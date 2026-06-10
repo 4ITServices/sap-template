@@ -142,6 +142,29 @@ Les credentials SAP (SAP_URL, SAP_USER, SAP_PASSWORD, etc.) sont lus automatique
 depuis `.env` par pydantic-settings. Le `.mcp.json` ne contient que la config
 structurelle (commandes, chemins). Pas de secrets dedans.
 
+## Post-`copier update` checklist
+
+`copier update` rewrites the template-owned files; a few things it cannot
+do for you:
+
+1. **Before updating** (one-time hygiene): make sure the tree is clean and
+   contains no previously committed conflict markers:
+   `grep -rEl '^(<<<<<<<|>>>>>>>)' . --exclude-dir=.git`
+2. Run `copier update`, then scan for fresh inline conflicts (copier ≥ 9
+   writes them into the files): same grep as above. Resolve them — an
+   unresolved marker in `devcontainer.json` means invalid JSON and a
+   container that no longer builds.
+3. **Re-align `.mcp.json`** with `.mcp.json.example` (gitignored,
+   bootstrapped once — copier never updates it): server names, removed or
+   added entries.
+4. **Resync project hooks** if the start logs show the pre-v0.8.15
+   migration warning: slim `post-*-project.sh` down to project extras,
+   using the current `.example.sh` files as reference. MCP servers belong
+   in `mcp-servers.conf` (project-owned, kept by copier).
+5. Smoke-test the lifecycle without rebuilding:
+   `bash .devcontainer/post-start.sh` (self-heals /opt installs, launches
+   the servers, health-checks the ports).
+
 ### Explicit MCP permissions
 
 The template uses `bypassPermissions` by default. If you switch to explicit

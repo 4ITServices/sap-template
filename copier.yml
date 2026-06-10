@@ -7,9 +7,12 @@ _subdirectory: template
 _answers_file: .copier-answers.yml
 _min_copier_version: "9.0"
 
-# Generated once, then project-owned — `copier update` never overwrites them
+# Generated once, then project-owned — `copier update` never overwrites them.
+# .abapgit.xml: abapGit on the SAP side rewrites this file (UTF-8 BOM, IGNORE
+# list churn), so re-rendering it on every update only manufactures conflicts.
 _skip_if_exists:
   - .devcontainer/mcp-servers.conf
+  - .abapgit.xml
 
 # Clean up files that only apply to specific project types
 _tasks:
