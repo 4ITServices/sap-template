@@ -16,4 +16,8 @@ _references/
 # Generated projects (local testing)
 sap-zexplore/
 sap-zextract/
+sap-zontology/
+ai-openagent/
 4it-azure/
+# Session files (accidental commits)
+.bash_history
