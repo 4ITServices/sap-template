@@ -133,12 +133,24 @@ fi
 {%- endif %}
 
 # =============================================================================
-# 9. Project-specific setup (not managed by template — safe from copier update)
+# 9. MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
+# =============================================================================
+echo "[9/9] MCP servers..."
+# .env was bootstrapped above; source it for GITHUB_PERSONAL_ACCESS_TOKEN
+if [ -f "$WORKSPACE_DIR/.env" ]; then
+  set -a; source "$WORKSPACE_DIR/.env"; set +a
+fi
+source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
+mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" create
+
+# =============================================================================
+# 10. Project-specific setup (not managed by template — safe from copier update)
 # =============================================================================
 PROJECT_POST_CREATE="$WORKSPACE_DIR/.devcontainer/post-create-project.sh"
 if [ -f "$PROJECT_POST_CREATE" ]; then
   echo ""
   echo "--- Project-specific post-create ---"
+  warn_legacy_mcp_hooks "$PROJECT_POST_CREATE"
   bash "$PROJECT_POST_CREATE" "$WORKSPACE_DIR"
 else
   echo "  (no post-create-project.sh — see post-create-project.example.sh)"

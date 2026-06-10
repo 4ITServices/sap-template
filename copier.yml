@@ -7,6 +7,10 @@ _subdirectory: template
 _answers_file: .copier-answers.yml
 _min_copier_version: "9.0"
 
+# Generated once, then project-owned — `copier update` never overwrites them
+_skip_if_exists:
+  - .devcontainer/mcp-servers.conf
+
 # Clean up files that only apply to specific project types
 _tasks:
   - "{% if project_type != 'abap-project' %}rm -rf .abapgit.xml abap{% endif %}"

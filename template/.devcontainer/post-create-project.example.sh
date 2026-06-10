@@ -3,83 +3,31 @@
 # Project-specific post-create — runs once after container build
 # This file is owned by the project, NOT the template.
 # Template updates will never overwrite this file.
+#
+# hook-api: 2 (template >= v0.8.15)
+# Generic MCP server install/update/launch is handled by the TEMPLATE hooks
+# (post-create.sh / post-start.sh) through .devcontainer/lib-mcp.sh, driven
+# by the project-owned manifest .devcontainer/mcp-servers.conf.
+#   → to add/remove a managed MCP server, edit mcp-servers.conf — not this.
+# Keep this hook for genuinely project-specific setup only.
 # =============================================================================
 
 WORKSPACE_DIR="${1:-$(pwd)}"
 
-# Source .env for GITHUB_PERSONAL_ACCESS_TOKEN (needed to clone private repos)
+# .env is already sourced by post-create.sh; re-source when run standalone
 if [ -f "$WORKSPACE_DIR/.env" ]; then
   set -a; source "$WORKSPACE_DIR/.env"; set +a
 fi
 
-# =============================================================================
-# Helper: clone + build an MCP server into /opt/
-# Auto-detects project type: Python (pyproject.toml) or Node.js (package.json)
-# =============================================================================
-install_mcp_server() {
-  local NAME="$1"
-  local REPO="$2"
-  local DEST="/opt/$NAME"
-
-  echo "[project] $NAME install..."
-  if [ ! -d "$DEST" ] || [ -z "$(ls -A "$DEST" 2>/dev/null)" ]; then
-    # Inject GitHub token into URL for private repos
-    local CLONE_URL="$REPO"
-    if [ -n "$GITHUB_PERSONAL_ACCESS_TOKEN" ]; then
-      CLONE_URL="${REPO/https:\/\/github.com/https://${GITHUB_PERSONAL_ACCESS_TOKEN}@github.com}"
-    fi
-
-    sudo mkdir -p "$DEST" && sudo chown -R "$(whoami):$(whoami)" "$DEST"
-    # GIT_LFS_SKIP_SMUDGE: the LFS smudge filter calls `git credential fill`
-    # and ignores the inline PAT, so it prompts (and fails) on private repos.
-    # MCP servers ship code, not LFS payloads — skip is safe.
-    GIT_LFS_SKIP_SMUDGE=1 git clone "$CLONE_URL" "$DEST" 2>/dev/null || \
-      { echo "  WARNING: clone failed for $NAME"; return 0; }
-  fi
-
-  cd "$DEST"
-
-  if [ -f "pyproject.toml" ]; then
-    # Python project (uv + hatchling)
-    uv sync --quiet 2>/dev/null && \
-      echo "  $NAME installed (Python)" || echo "  WARNING: uv sync failed for $NAME"
-  elif [ -f "package.json" ]; then
-    # Node.js project
-    npm ci --silent 2>/dev/null || npm install --silent 2>/dev/null || \
-      echo "  WARNING: npm install failed for $NAME"
-    npm run build 2>/dev/null && \
-      echo "  $NAME installed (Node.js)" || echo "  WARNING: build failed for $NAME"
-  else
-    echo "  WARNING: no pyproject.toml or package.json found for $NAME"
-  fi
-
-  cd "$WORKSPACE_DIR"
-}
+# The shared helpers (ensure_mcp_server, start_mcp_server, mcp_link_env, …)
+# are available if custom steps need them:
+# source "$(dirname "${BASH_SOURCE[0]:-$0}")/lib-mcp.sh"
 
 # =============================================================================
-# SAP ADT MCP — ABAP Development Tools (ADT REST + RFC)
+# SAP GUI MCP — remote on the Windows VM (needs COM/pywin32), nothing to
+# install locally. Configured in .mcp.json (http://<MCP_VM_HOST>:8001/mcp).
 # =============================================================================
-install_mcp_server "sap-adt-mcp" "https://github.com/4ITServices/sap-adt-mcp.git"
-
-# Symlink workspace .env into sap-adt-mcp so pydantic-settings finds credentials
-if [ -f "$WORKSPACE_DIR/.env" ] && [ -d "/opt/sap-adt-mcp" ]; then
-  ln -sf "$WORKSPACE_DIR/.env" /opt/sap-adt-mcp/.env
-  echo "  .env symlinked to /opt/sap-adt-mcp/"
-fi
-
-# Same for the optional second instance targeting ECC EHP8 (port 8001).
-# mcp-server-ecc.sh reads /opt/sap-adt-mcp/.env.ecc.
-if [ -f "$WORKSPACE_DIR/.env.ecc" ] && [ -d "/opt/sap-adt-mcp" ]; then
-  ln -sf "$WORKSPACE_DIR/.env.ecc" /opt/sap-adt-mcp/.env.ecc
-  echo "  .env.ecc symlinked to /opt/sap-adt-mcp/ (ECC stack)"
-fi
-
-# =============================================================================
-# SAP GUI MCP — SAP GUI automation (SSE remote — runs on Windows VM)
-# =============================================================================
-# sap-gui-mcp requires Windows (COM/pywin32), configured as SSE in .mcp.json
-# No local install needed — adjust the SSE URL in .mcp.json if needed
-echo "[project] sap-gui-mcp configured as SSE remote (see .mcp.json)"
+echo "[project] sap-gui-mcp is remote on the Windows VM (see .mcp.json) — no local install"
 
 # =============================================================================
 # IaC Tooling — Azure CLI, OpenTofu, Bicep (si enable_iac)

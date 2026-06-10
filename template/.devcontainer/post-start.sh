@@ -50,12 +50,33 @@ else
 fi
 
 # =============================================================================
+# MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
+# Self-healing: a failed post-create install (e.g. missing
+# GITHUB_PERSONAL_ACCESS_TOKEN at first build) is repaired here on a plain
+# container restart — no rebuild needed.
+# =============================================================================
+echo ""
+echo "--- MCP servers (mcp-servers.conf) ---"
+source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
+mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
+
+# Optional second sap-adt-mcp instance targeting SAP ECC EHP8 on port 8001.
+# Runtime-gated, not Jinja-gated: starts only when both .env.ecc and the ECC
+# launcher exist, so ECC can be flipped on/off without re-running copier.
+SAP_ADT_ECC_LAUNCHER="/opt/sap-adt-mcp/scripts/mcp-server-ecc.sh"
+if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
+  "$SAP_ADT_ECC_LAUNCHER" start
+  mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
+fi
+
+# =============================================================================
 # Project-specific checks (not managed by template — safe from copier update)
 # =============================================================================
 PROJECT_POST_START="$WORKSPACE_DIR/.devcontainer/post-start-project.sh"
 if [ -f "$PROJECT_POST_START" ]; then
   echo ""
   echo "--- Project-specific post-start ---"
+  warn_legacy_mcp_hooks "$PROJECT_POST_START"
   bash "$PROJECT_POST_START" "$WORKSPACE_DIR"
 else
   echo "  (no post-start-project.sh — see post-start-project.example.sh)"
