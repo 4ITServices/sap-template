@@ -112,16 +112,31 @@ SAP_Bronze (schema-enabled)              Domain_Lakehouse (schema-enabled)
 
 ## MCP Servers SAP (infrastructure commune)
 
-Deux serveurs MCP SAP sont disponibles dans `/opt/` (installés par `post-create-project.sh`) :
+| Serveur | Emplacement | Transport | Usage |
+|---------|-------------|-----------|-------|
+| `sap-adt-mcp` | `/opt/sap-adt-mcp` (installé via `.devcontainer/mcp-servers.conf`) | streamable-http `127.0.0.1:8000/mcp` | ADT REST API + RFC — lecture/écriture objets ABAP, activation, transports |
+{%- if enable_ecc_stack %}
+| `sap-adt-ecc` | `/opt/sap-adt-mcp` (2ᵉ instance, lancée par `mcp-server-ecc.sh` si `.env.ecc` existe) | streamable-http `127.0.0.1:8001/mcp` | idem, ciblant SAP ECC EHP8 (NW 7.50) |
+{%- endif %}
+| `sap-gui-mcp` | VM Windows — remote, nécessite COM/pywin32, jamais installé en local | http `http://<MCP_VM_HOST>:8001/mcp` | SAP GUI automation — transactions, navigation écran, tables |
 
-| Serveur | Emplacement | Usage |
-|---------|-------------|-------|
-| `sap-adt-mcp` | `/opt/sap-adt-mcp` | ADT REST API + RFC — lecture/écriture objets ABAP, activation, transports |
-| `sap-gui-mcp` | `/opt/sap-gui-mcp` | SAP GUI automation — transactions, navigation écran, tables |
+Les serveurs locaux sont installés, mis à jour et lancés par les hooks du
+template (`.devcontainer/lib-mcp.sh`) à partir du manifeste project-owned
+`.devcontainer/mcp-servers.conf`. Self-healing : si l'install a échoué
+(token GitHub manquant au premier build), un simple restart du container
+répare — pas de rebuild.
+{%- if enable_ecc_stack %}
+
+Attention : le port 8001 désigne deux choses distinctes — l'instance ECC
+**locale** (`127.0.0.1:8001`) et le sap-gui-mcp **remote** sur la VM Windows
+(`<MCP_VM_HOST>:8001`). Pas de conflit (hôtes différents), mais ne pas les
+confondre dans `.mcp.json`.
+{%- endif %}
 
 Configuration : `.mcp.json` est créé automatiquement depuis `.mcp.json.example` au premier build. Modifier `.mcp.json` pour ajuster les credentials SAP si nécessaire.
 
 ## Conventions SYNKRONIC
+{%- if project_type == "abap-project" %}
 
 ### Labels CDS SAP (français)
 Les CDS views générées dans ZEXTRACT utilisent des labels en **français** :
@@ -135,14 +150,20 @@ Les CDS views générées dans ZEXTRACT utilisent des labels en **français** :
 - Packages secondaires : `ZEXTRACT` (extraction), `ZMCP` (serveurs MCP)
 - CDS views : `ZCDS_EXT_{MODULE}_{OBJET}` (delta), `ZCDS_CFG_` (config), `ZCDS_CHG_` (changelog)
 - Tables shadow CDC : `ZEXT_{NOM}_SNAP` (snapshot hashkeys)
+{%- endif %}
 
 ### Règles absolues
+{%- if project_type == "abap-project" %}
 1. Ne jamais modifier des objets SAP hors des packages `{{ abap_package_name }}` / `ZEXTRACT` / `ZMCP`
 2. Ne jamais committer `.env`, `.mcp.json`, `*.pem`, `ssh_appliance.pem`
 3. Activer TOUJOURS après `setObjectSource` (MCP ADT)
+{%- else %}
+1. Ne jamais committer `.env`, `.mcp.json`, `*.pem`, `ssh_appliance.pem`
+2. Activer TOUJOURS après `setObjectSource` (MCP ADT)
+{%- endif %}
 {%- if project_type == "mcp-server" %}
-4. Un tool MCP = une responsabilité. Pas de tools "fourre-tout"
-5. Les tools retournent du texte structuré (markdown tables, JSON) lisible par Claude
+3. Un tool MCP = une responsabilité. Pas de tools "fourre-tout"
+4. Les tools retournent du texte structuré (markdown tables, JSON) lisible par Claude
 {%- endif %}
 
 {%- if enable_iac %}

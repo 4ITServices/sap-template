@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "sap-adt": {
+    "sap-adt-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:8000/mcp"
     },
@@ -10,12 +10,9 @@
       "url": "http://127.0.0.1:8001/mcp"
     },
     {%- endif %}
-    "mcp-sap-docs": {
-      "command": "/bin/sh",
-      "args": ["-c", "cd /opt/mcp-sap-docs && exec node stdio-wrapper.js"],
-      "env": {
-        "MCP_VARIANT": "abap"
-      }
+    "sap-gui-mcp": {
+      "type": "http",
+      "url": "http://192.168.50.119:8001/mcp"
     }
   }
 }

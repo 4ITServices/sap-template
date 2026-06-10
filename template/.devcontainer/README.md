@@ -7,8 +7,10 @@ devcontainer.json
   ├── initializeCommand      mkdir ~/.claude (host-side, before build)
   ├── onCreateCommand        git config + claude dirs (once, at image creation)
   ├── postCreateCommand  →   post-create.sh (once, after build)
+  │                            ├── MCP servers install (lib-mcp.sh ← mcp-servers.conf)
   │                            └── post-create-project.sh (if exists)
   └── postStartCommand   →   post-start.sh (every container start)
+                               ├── MCP servers self-heal + launch (lib-mcp.sh ← mcp-servers.conf)
                                └── post-start-project.sh (if exists)
 ```
 
@@ -19,6 +21,8 @@ devcontainer.json
 | `devcontainer.json` | template | `copier update` |
 | `post-create.sh` | template | `copier update` |
 | `post-start.sh` | template | `copier update` |
+| `lib-mcp.sh` | template | `copier update` (MCP lifecycle engine) |
+| `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten) |
 | `post-create-project.sh` | **project** | developer (never overwritten by template) |
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
 | `*.example.sh` | template | reference/documentation |
@@ -34,11 +38,30 @@ devcontainer.json
 5. Install Claude Code CLI
 6. Python dependencies (`uv sync`)
 7. Git submodules init
+8. Bootstrap `.env` / `.mcp.json` from examples
+9. MCP servers install (`lib-mcp.sh` over `mcp-servers.conf`)
 
 **post-start.sh** (runs on every start):
 1. Claude alias (`--dangerously-skip-permissions` in .bashrc)
 2. `chmod 600` on sensitive files (.env, .mcp.json)
 3. Source `.env`
+4. MCP servers: self-heal (re-clone if absent/broken), update, launch,
+   port health-check (`lib-mcp.sh` over `mcp-servers.conf`)
+
+## Managed MCP servers (mcp-servers.conf)
+
+`.devcontainer/mcp-servers.conf` declares the MCP servers the lifecycle
+manages — one `NAME REPO [REF] [PORT]` line per server (`-` = unset). The
+file is **project-owned** (`_skip_if_exists`): add or pin servers there,
+and the template-owned engine (`lib-mcp.sh`, updated by `copier update`)
+takes care of cloning into `/opt/<NAME>`, building (uv/npm), symlinking
+`.env`, launching `scripts/mcp-server.sh start` and waiting for the port.
+
+Self-healing: if the first build could not clone (typically an empty
+`GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`), fill the token and simply
+**restart** the container — post-start repairs the install, no rebuild
+needed. Broken half-clones are detected (not a valid git work tree) and
+re-cloned. Install/build details are logged to `/tmp/<NAME>.log`.
 
 ## Project-specific scripts
 
@@ -53,30 +76,27 @@ cp .devcontainer/post-start-project.example.sh  .devcontainer/post-start-project
 These files receive `$WORKSPACE_DIR` as `$1` and are called at the end of the
 template scripts. They are **never overwritten** by `copier update`.
 
-## Available examples
+Since template v0.8.15 (`hook-api: 2`), generic MCP server lifecycle no
+longer belongs in these hooks — it is template-managed via
+`mcp-servers.conf`. Keep the hooks for genuinely project-specific extras
+(extra tooling, Ansible, IaC…). Hooks that still define their own
+`install_mcp_server`/`update_mcp_server` (pre-v0.8.15) keep working but
+trigger a migration warning at each start: slim them down to the extras,
+using the current `.example.sh` files as reference.
 
-### SAP MCP Servers (ADT + GUI)
-
-`post-create-project.example.sh` and `post-start-project.example.sh` ship with
-support for two MCP servers:
+## SAP MCP Servers (ADT + GUI)
 
 - [sap-adt-mcp](https://github.com/4ITServices/sap-adt-mcp) (>= 2.6.1) — SAP
   ABAP Development Tools (ADT REST API + RFC + HANA). Streamable-HTTP transport
   on `http://127.0.0.1:8000/mcp`. Read/write ABAP objects, syntax check,
   activation, transport management, abapGit bridge (Phase D), HANA queries.
-- [sap-gui-mcp](https://github.com/jeanbaptistemack/sap-gui-mcp) — SAP GUI
-  automation, runs remote on a Windows VM (referenced via `.mcp.json` only,
-  no local install).
-
-**post-create**: clones sap-adt-mcp into `/opt/sap-adt-mcp` and runs
-`uv sync`. Symlinks the workspace `.env` so pydantic-settings finds SAP
-credentials.
-
-**post-start**: foreground `git pull` + `uv sync` of `/opt/sap-adt-mcp`,
-then delegates to the canonical launcher `scripts/mcp-server.sh start`
-shipped by sap-adt-mcp (manages PID file, log file at
-`/opt/sap-adt-mcp/logs/server.log`, health check on
-`/.well-known/oauth-protected-resource`, idempotent).
+  Installed in `/opt/sap-adt-mcp` and launched by the lifecycle via the
+  canonical launcher `scripts/mcp-server.sh start` shipped by the repo
+  (PID file, log at `/opt/sap-adt-mcp/logs/server.log`, idempotent).
+- [sap-gui-mcp](https://github.com/4ITServices/sap-gui-mcp) — SAP GUI
+  automation. Requires Windows (COM/pywin32): runs **remote on the Windows
+  VM** (`http://<MCP_VM_HOST>:8001/mcp`, see `.mcp.json`), never installed
+  locally in the devcontainer.
 
 ### Dual-stack: ECC EHP8 second instance (optional)
 
@@ -93,15 +113,19 @@ two instances cohabit on the same machine:
 To activate at runtime:
 
 1. Copy `.env.ecc.example` → `.env.ecc` and fill in the ECC credentials.
-2. Rebuild the container (or run `bash .devcontainer/post-start-project.sh`).
-3. `.mcp.json` exposes both instances under names `sap-adt` (S/4) and
-   `sap-adt-ecc` (ECC). Tools are addressable via `mcp__sap-adt__*` and
-   `mcp__sap-adt-ecc__*` respectively.
+2. Restart the container (or run `bash .devcontainer/post-start.sh`).
+3. `.mcp.json` exposes both instances under names `sap-adt-mcp` (S/4) and
+   `sap-adt-ecc` (ECC). Tools are addressable via `mcp__sap-adt-mcp__*`
+   and `mcp__sap-adt-ecc__*` respectively.
 
 The ECC launcher reads `/opt/sap-adt-mcp/.env.ecc` (symlinked from the
-workspace by `post-create-project.sh`), overrides `MCP_PORT=8001`, then
-delegates to the same canonical `mcp-server.sh`. To disable: delete
-`.env.ecc` — the post-start block becomes a no-op.
+workspace by the lifecycle), overrides `MCP_PORT=8001`, then delegates to
+the same canonical `mcp-server.sh`. To disable: delete `.env.ecc` — the
+post-start block becomes a no-op.
+
+Note: local port 8001 (ECC instance) is unrelated to the Windows VM's
+port 8001 (remote sap-gui-mcp) — different hosts, easy to mix up in
+`.mcp.json`.
 
 ECC quirks (15 SAP-side + 3 ZMCP) are documented upstream in
 `/opt/sap-adt-mcp/docs/ecc-ehp8-quirks.md`.
@@ -128,6 +152,7 @@ permissions in `.claude/settings.json`, add:
   "permissions": {
     "allow": [
       "mcp__sap-adt-mcp__*",
+      "mcp__sap-adt-ecc__*",
       "mcp__sap-gui-mcp__*"
     ]
   }
