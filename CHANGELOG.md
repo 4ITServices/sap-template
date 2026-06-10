@@ -7,6 +7,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.8.15] — 2026-06-10
+
+Hardening release after the `copier update` v0.5.1 → v0.8.14 incident on a
+downstream project (sap-adt-mcp unreachable on 127.0.0.1:8000 — see
+`4ITServices/sap-gui-mcp@b8a0d11` for the downstream-side fix this release
+generalizes).
+
+### Changed
+
+- **MCP server lifecycle is now template-managed.** Install/update/launch
+  used to live only in the project-owned `post-*-project.sh` hooks (seeded
+  manually from `.example.sh` files), so downstream projects never
+  inherited hook fixes via `copier update`. The generic engine now lives
+  in template-owned files updated by copier:
+  - `.devcontainer/lib-mcp.sh` — ensure/build/launch helpers, called by
+    `post-create.sh` and `post-start.sh`.
+  - `.devcontainer/mcp-servers.conf` — project-owned declarative manifest
+    (`NAME REPO [REF] [PORT]`, `_skip_if_exists`): projects add servers
+    as data, the engine stays upgradable.
+  - `post-*-project.sh` hooks are now for project extras only
+    (`hook-api: 2`); pre-v0.8.15 hooks that still define their own
+    `install/update_mcp_server` keep working but trigger a migration
+    warning at each start.
+- `.mcp.json.example`: ADT server renamed `sap-adt` → `sap-adt-mcp`
+  (matches the documented `mcp__sap-adt-mcp__*` permissions); added the
+  remote `sap-gui-mcp` entry (type http, Windows VM —
+  `http://<MCP_VM_HOST>:8001/mcp`, never installed locally). Existing
+  projects: `.mcp.json` is gitignored and bootstrapped once — re-align it
+  manually (see post-update checklist).
+- `CLAUDE.md`: the MCP servers table no longer claims sap-gui-mcp lives in
+  `/opt/sap-gui-mcp` (it requires Windows COM/pywin32 and runs remote on
+  the VM); documents the `sap-adt-ecc` instance (undocumented since
+  v0.8.14); the ABAP conventions block (package naming + absolute rule
+  no 1) is now rendered only for `abap-project` — other project types got
+  an unprompted derived package name (e.g. `GUIMCP`) injected into their
+  safety rule.
+- `devcontainer.json` no longer forces `CLAUDE_CODE_EFFORT_LEVEL`,
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`
+  on every developer through `remoteEnv` (per-user preferences).
+
+### Added
+
+- **Self-healing installs**: post-start re-clones `/opt/<name>` when it is
+  absent or broken — a failed first build (typically an empty
+  `GITHUB_PERSONAL_ACCESS_TOKEN`) is repaired by a plain container
+  restart, no rebuild. Health = valid git work tree + buildable manifest,
+  so interrupted half-clones are detected and wiped instead of wedging
+  forever.
+- Port health-check after launch (S/4 8000, ECC 8001) with server log tail
+  on timeout; install/build logs in `/tmp/<name>.log` instead of
+  `/dev/null`.
+- Post-`copier update` checklist in `.devcontainer/README.md` (conflict
+  markers, `.mcp.json` re-alignment, hook resync, no-rebuild smoke test).
+- `_skip_if_exists` for `.abapgit.xml`: generated once, then owned by
+  abapGit on the SAP side (BOM + IGNORE churn) — copier stops re-rendering
+  it on every update.
+
+### Fixed
+
+- Removed the dead `mcp-sap-docs` entry from `.mcp.json.example` (nothing
+  installs `/opt/mcp-sap-docs` anymore — fresh clones got a broken MCP
+  server on first build).
+- The GitHub PAT is no longer persisted into `/opt/*/.git/config` (it was
+  written there in cleartext by the per-start `git remote set-url`);
+  tokens are injected per git invocation, and origins token-baked by
+  pre-v0.8.15 hooks are scrubbed on each start.
+
 ## [0.8.14] — 2026-05-11
 
 ### Added
