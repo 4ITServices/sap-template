@@ -63,6 +63,11 @@ generalizes).
 - `_skip_if_exists` for `.abapgit.xml`: generated once, then owned by
   abapGit on the SAP side (BOM + IGNORE churn) — copier stops re-rendering
   it on every update.
+- Type-specific files (`.abapgit.xml`, `abap/`, `tofu/`, `bicep/`, the
+  tofu workflows, `.env.ecc.example`) are now excluded via Jinja
+  conditions in their path names instead of `rm` `_tasks`: tasks re-ran on
+  every `copier update` and would have deleted such files if a project
+  hand-added them after generation.
 
 ### Fixed
 
@@ -70,9 +75,16 @@ generalizes).
   installs `/opt/mcp-sap-docs` anymore — fresh clones got a broken MCP
   server on first build).
 - The GitHub PAT is no longer persisted into `/opt/*/.git/config` (it was
-  written there in cleartext by the per-start `git remote set-url`);
-  tokens are injected per git invocation, and origins token-baked by
-  pre-v0.8.15 hooks are scrubbed on each start.
+  written there in cleartext by the per-start `git remote set-url`):
+  tokens are injected per git invocation, and the origins are scrubbed
+  both before the manifest run and again *after* the project hooks — so
+  even an unmigrated pre-v0.8.15 hook that re-bakes the token is cleaned
+  up in the same start.
+- Generated `.gitignore` now ignores `.env.ecc` (the dual-stack flow
+  instructs users to create it with SAP ECC credentials); post-start also
+  `chmod 600`s it.
+- `SAP_WEBGUI_URL` in `.env.example` is now quoted — the unquoted `&` in
+  its query string broke `source .env` in the lifecycle hooks.
 
 ## [0.8.14] — 2026-05-11
 

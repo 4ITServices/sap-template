@@ -22,7 +22,7 @@ devcontainer.json
 | `post-create.sh` | template | `copier update` |
 | `post-start.sh` | template | `copier update` |
 | `lib-mcp.sh` | template | `copier update` (MCP lifecycle engine) |
-| `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten) |
+| `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten; to opt out, comment out every line — a *deleted* file is re-seeded by the next `copier update`) |
 | `post-create-project.sh` | **project** | developer (never overwritten by template) |
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
 | `*.example.sh` | template | reference/documentation |
@@ -95,7 +95,8 @@ using the current `.example.sh` files as reference.
   (PID file, log at `/opt/sap-adt-mcp/logs/server.log`, idempotent).
 - [sap-gui-mcp](https://github.com/4ITServices/sap-gui-mcp) — SAP GUI
   automation. Requires Windows (COM/pywin32): runs **remote on the Windows
-  VM** (`http://<MCP_VM_HOST>:8001/mcp`, see `.mcp.json`), never installed
+  VM** (`http://192.168.50.119:8001/mcp` by default — edit the
+  `sap-gui-mcp` entry in `.mcp.json` if the VM IP changes), never installed
   locally in the devcontainer.
 
 ### Dual-stack: ECC EHP8 second instance (optional)
@@ -126,6 +127,13 @@ post-start block becomes a no-op.
 Note: local port 8001 (ECC instance) is unrelated to the Windows VM's
 port 8001 (remote sap-gui-mcp) — different hosts, easy to mix up in
 `.mcp.json`.
+
+The post-start ECC block is **runtime-gated for every project**, not only
+those generated with `enable_ecc_stack: true`. On a project generated
+without the flag, activate ECC by hand: create `.env.ecc` yourself (the
+field list ships as `.env.ecc.example` in ECC-enabled renders, or see
+`/opt/sap-adt-mcp/docs/`) and add the `sap-adt-ecc` http entry
+(`http://127.0.0.1:8001/mcp`) to `.mcp.json`.
 
 ECC quirks (15 SAP-side + 3 ZMCP) are documented upstream in
 `/opt/sap-adt-mcp/docs/ecc-ehp8-quirks.md`.
@@ -160,10 +168,14 @@ do for you:
 4. **Resync project hooks** if the start logs show the pre-v0.8.15
    migration warning: slim `post-*-project.sh` down to project extras,
    using the current `.example.sh` files as reference. MCP servers belong
-   in `mcp-servers.conf` (project-owned, kept by copier).
-5. Smoke-test the lifecycle without rebuilding:
-   `bash .devcontainer/post-start.sh` (self-heals /opt installs, launches
-   the servers, health-checks the ports).
+   in `mcp-servers.conf` (project-owned, kept by copier). Do it promptly:
+   until slimmed, the legacy helper re-writes your GitHub PAT in cleartext
+   into `/opt/<name>/.git/config` at each start (the template scrubs it
+   back out right after, but the cycle only stops with the resync).
+5. **Inside the devcontainer**, smoke-test the lifecycle without
+   rebuilding: `bash .devcontainer/post-start.sh` (self-heals /opt
+   installs, launches the servers, health-checks the ports). Do not run
+   it on the host: it appends to `~/.bashrc` and provisions `/opt`.
 
 ### Explicit MCP permissions
 

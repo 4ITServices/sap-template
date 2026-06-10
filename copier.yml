@@ -14,11 +14,10 @@ _skip_if_exists:
   - .devcontainer/mcp-servers.conf
   - .abapgit.xml
 
-# Clean up files that only apply to specific project types
-_tasks:
-  - "{% if project_type != 'abap-project' %}rm -rf .abapgit.xml abap{% endif %}"
-  - "{% if not enable_iac %}rm -rf tofu bicep .github/workflows/tofu-plan.yml .github/workflows/tofu-apply.yml{% endif %}"
-  - "{% if not enable_ecc_stack %}rm -f .env.ecc.example{% endif %}"
+# Type-specific files are excluded via Jinja conditions in their path names
+# ({% if ... %}name{% endif %}), NOT via rm _tasks: tasks re-run on every
+# `copier update` and would delete files a project hand-added later (e.g.
+# .abapgit.xml / abap/ in a project generated as mcp-server).
 
 # =============================================================================
 # Questions

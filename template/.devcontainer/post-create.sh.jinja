@@ -12,7 +12,7 @@ echo "  {{ project_name }} — post-create setup..."
 echo "============================================"
 
 # =============================================================================
-# 1. uv + copier
+# 1-4. Base tooling: just, git-lfs, Claude auth, uv + copier
 # =============================================================================
 echo "[1/9] just (command runner)..."
 if command -v just &>/dev/null; then
@@ -59,7 +59,7 @@ else
 fi
 
 # =============================================================================
-# 2. Claude Code CLI
+# 5. Claude Code CLI
 # =============================================================================
 echo "[5/9] Claude Code CLI..."
 if command -v claude &>/dev/null; then
@@ -152,6 +152,8 @@ if [ -f "$PROJECT_POST_CREATE" ]; then
   echo "--- Project-specific post-create ---"
   warn_legacy_mcp_hooks "$PROJECT_POST_CREATE"
   bash "$PROJECT_POST_CREATE" "$WORKSPACE_DIR"
+  # pre-v0.8.15 hooks bake the PAT into the origins — scrub it back out
+  mcp_scrub_origins "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf"
 else
   echo "  (no post-create-project.sh — see post-create-project.example.sh)"
 fi

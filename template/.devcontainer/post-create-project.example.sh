@@ -25,7 +25,7 @@ fi
 
 # =============================================================================
 # SAP GUI MCP — remote on the Windows VM (needs COM/pywin32), nothing to
-# install locally. Configured in .mcp.json (http://<MCP_VM_HOST>:8001/mcp).
+# install locally. URL configured in .mcp.json (sap-gui-mcp entry).
 # =============================================================================
 echo "[project] sap-gui-mcp is remote on the Windows VM (see .mcp.json) — no local install"
 
