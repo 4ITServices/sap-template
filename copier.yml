@@ -1,6 +1,6 @@
 # =============================================================================
 # SYNKRONIC Python Project Template
-# Usage: copier copy gh:jeanbaptistemack/sap-template ./my-project
+# Usage: copier copy gh:4ITServices/sap-template ./my-project
 # =============================================================================
 
 _subdirectory: template
@@ -67,7 +67,7 @@ author_email:
 github_org:
   type: str
   help: "Organisation ou username GitHub"
-  default: "jeanbaptistemack"
+  default: "4ITServices"
 
 enable_iac:
   type: bool

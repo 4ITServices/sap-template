@@ -56,9 +56,9 @@ install_mcp_server() {
 # =============================================================================
 # SAP ADT MCP — ABAP Development Tools (ADT REST + RFC)
 # =============================================================================
-install_mcp_server "sap-adt-mcp" "https://github.com/jeanbaptistemack/sap-adt-mcp.git"
+install_mcp_server "sap-adt-mcp" "https://github.com/4ITServices/sap-adt-mcp.git"
 
 # =============================================================================
 # SAP GUI MCP — SAP GUI automation
 # =============================================================================
-install_mcp_server "sap-gui-mcp" "https://github.com/jeanbaptistemack/sap-gui-mcp.git"
+install_mcp_server "sap-gui-mcp" "https://github.com/4ITServices/sap-gui-mcp.git"

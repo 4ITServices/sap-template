@@ -60,10 +60,10 @@ template scripts. They are **never overwritten** by `copier update`.
 `post-create-project.example.sh` and `post-start-project.example.sh` ship with
 support for two MCP servers:
 
-- [sap-adt-mcp](https://github.com/jeanbaptistemack/sap-adt-mcp) — SAP ABAP
+- [sap-adt-mcp](https://github.com/4ITServices/sap-adt-mcp) — SAP ABAP
   Development Tools (ADT REST API + RFC). Lecture/ecriture objets ABAP, syntax
   check, activation, transport management.
-- [sap-gui-mcp](https://github.com/jeanbaptistemack/sap-gui-mcp) — SAP GUI
+- [sap-gui-mcp](https://github.com/4ITServices/sap-gui-mcp) — SAP GUI
   automation. Session management, navigation ecran, execution transactions.
 
 **post-create**: clones both repos and builds them (`npm ci && npm run build`)

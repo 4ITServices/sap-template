@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.8.16] — 2026-06-11
+
+### Changed
+
+- Repositories moved to the `4ITServices` GitHub organisation: the
+  `github_org` copier default is now `4ITServices` (existing projects keep
+  the org recorded in their `.copier-answers.yml`), and the usage header
+  points at `gh:4ITServices/sap-template`. The template repo's own
+  devcontainer hooks/README also clone sap-adt-mcp / sap-gui-mcp from
+  `4ITServices`.
+
 ## [0.8.15] — 2026-06-10
 
 Hardening release after the `copier update` v0.5.1 → v0.8.14 incident on a
