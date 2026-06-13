@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.8.17] — 2026-06-13
+
+### Added
+
+- **Long-session stability for Claude Code in VS Code.** Marathon (multi-hour)
+  Claude Code sessions now survive the events that used to kill the terminal
+  process, and the extension "relaunch the terminal" prompt no longer
+  interrupts a running session:
+  - `.devcontainer/tmux-session.sh` (new, template-owned) — the integrated
+    terminal's default profile now runs inside a persistent `tmux` session
+    (`claude`). It survives window reload, full VS Code restart/revive,
+    Remote-SSH disconnect and host sleep as long as the container is up;
+    reattach with `tmux attach -t claude`. Forwards the per-window VS Code
+    IPC env so `code`, git askpass and the Claude IDE link keep working on
+    reattach, and falls back to a plain login shell if tmux is unavailable.
+  - `devcontainer.json` terminal settings: `tmux`/`bash` profiles + a plain
+    `automationProfile`; `environmentChangesRelaunch: false` (no extension
+    can auto-relaunch/kill the terminal); `enablePersistentSessions: true`;
+    `persistentSessionReviveProcess: onExitAndWindowClose`; larger
+    `scrollback` (20000) and `persistentSessionScrollback` (1000);
+    `python.terminal.activateEnvironment: false` + `python.envFile: ""` to
+    stop the Python extension's env-collection churn (the relaunch trigger).
+  - `devcontainer.json`: `shutdownAction: none` (the container — and the
+    detached tmux session — survives closing the VS Code window) and
+    `init: true` (tini reaps zombie background processes and avoids the
+    process-group signal cascade that can crash Claude with exit 137).
+  - `post-create.sh` installs `tmux`.
+
+  Project-owned knobs that pair with this (not template-managed, set per
+  project in `.claude/settings.json` `env` and `post-*-project.sh`):
+  `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS`, `API_TIMEOUT_MS`,
+  `MCP_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+  `DISABLE_AUTOUPDATER`, and `NODE_OPTIONS=--max-old-space-size=4096`.
+
 ## [0.8.16] — 2026-06-11
 
 ### Changed
