@@ -22,6 +22,7 @@ devcontainer.json
 | `post-create.sh` | template | `copier update` |
 | `post-start.sh` | template | `copier update` |
 | `lib-mcp.sh` | template | `copier update` (MCP lifecycle engine) |
+| `tmux-session.sh` | template | `copier update` (integrated-terminal tmux launcher) |
 | `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten; to opt out, comment out every line — a *deleted* file is re-seeded by the next `copier update`) |
 | `post-create-project.sh` | **project** | developer (never overwritten by template) |
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
