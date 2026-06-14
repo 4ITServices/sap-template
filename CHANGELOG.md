@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.8.18] — 2026-06-14
+
+### Fixed
+
+- **One tmux session per terminal tab — parallel Claude Code without
+  mirroring.** `tmux-session.sh` previously used a fixed session name
+  (`claude`): the first tab created it and every later tab *attached* to the
+  same session, so two tabs mirrored each other (same window, pane and
+  keystrokes) and you could not run several Claude Code instances in parallel.
+  The launcher now treats `CLAUDE_TMUX_SESSION` as a session *prefix* (default
+  `claude`) and:
+  - gives every new tab its OWN session named `<prefix>-<pid>` (parallelism);
+  - on revival after a window reload / VS Code restart / SSH drop, reattaches a
+    DETACHED (orphaned) session of the prefix instead of creating a new one
+    (persistence);
+  - never reclaims a session that already has a live client
+    (`session_attached != 0`), which is what kills the mirroring;
+  - reclaims orphans atomically — `rename-session` acts as a lock, so on a
+    multi-tab revival the first tab wins an orphan and the losers fall back to
+    a fresh session (anti-race);
+  - pushes the per-window VS Code IPC handles into the tmux server's GLOBAL
+    environment (`setenv -g`) so new sessions inherit live sockets, and
+    refreshes a reattached orphan in place (`setenv -t`).
+
+  `devcontainer.json` terminal comment updated accordingly (sessions are now
+  `claude-<pid>`; list/reattach with `tmux ls` then `tmux attach -t <name>`).
+
 ## [0.8.17] — 2026-06-13
 
 ### Added

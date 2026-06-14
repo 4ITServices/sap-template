@@ -38,7 +38,10 @@
       "settings": {
         // Run the integrated terminal inside a persistent tmux session so a
         // long Claude Code run survives window reload, full VS Code restart,
-        // SSH drop and host sleep. Reattach: `tmux attach -t claude`.
+        // SSH drop and host sleep. Each tab gets its own session
+        // (`claude-<pid>`) so several Claude Code instances run in parallel;
+        // on revival each reopened tab reattaches a detached one. List/reattach
+        // from any shell: `tmux ls` then `tmux attach -t <name>`.
         "terminal.integrated.defaultProfile.linux": "tmux",
         "terminal.integrated.profiles.linux": {
           "tmux": {
