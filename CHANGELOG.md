@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.9.0] — 2026-06-15
+
+### Added
+
+- **Optional, opt-in tmux config for Claude Code long sessions
+  (`enable_tmux_claude_code_config`, default `false`).** When enabled, the
+  generated project gets a standalone, source-it-yourself tmux snippet
+  (`.config/tmux/claude-code.tmux.conf`) plus a guide
+  (`docs/claude-code-tmux.md`) covering reliable scrolling, copy-mode
+  (`Ctrl+b [` … `q`), the alternate-screen trade-off
+  (`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`) and `/tui fullscreen`. The snippet
+  adds `mouse on`, `history-limit 50000`, `allow-passthrough on`,
+  `extended-keys on` and `terminal-features 'xterm*:extkeys'`. It never touches
+  the user's `~/.tmux.conf` — it is meant to be sourced manually
+  (`tmux source-file …`). Disabled by default, so existing projects are
+  unaffected until they opt in on their next `copier update`.
+- **`scripts/test-template-render.sh`** — local smoke test that renders the
+  template with the option off and on and asserts the conditional files appear
+  (or not) and that the base render is unchanged.
+
 ## [0.8.18] — 2026-06-14
 
 ### Fixed

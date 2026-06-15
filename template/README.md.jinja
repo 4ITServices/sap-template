@@ -73,6 +73,22 @@ Ce projet ingère des données SAP dans Microsoft Fabric / OneLake.
 
 Configurer les variables Azure dans `.env` avant le premier lancement.
 {%- endif %}
+{%- if enable_tmux_claude_code_config %}
+
+## Claude Code dans tmux (sessions longues)
+
+Un snippet tmux **optionnel** fiabilise le scroll et le copy-mode de Claude Code
+lors de sessions longues (SSH, devcontainer). Il ne modifie pas votre
+`~/.tmux.conf`.
+
+```bash
+# Essai immédiat dans la session courante
+tmux source-file .config/tmux/claude-code.tmux.conf
+```
+
+Guide complet (copy-mode, alternate screen, stratégies de scroll) :
+[`docs/claude-code-tmux.md`](docs/claude-code-tmux.md).
+{%- endif %}
 
 ## Auteur
 

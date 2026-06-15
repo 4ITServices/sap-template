@@ -1,0 +1,119 @@
+# Claude Code dans tmux — scroll fiable en sessions longues
+
+Guide optionnel pour **{{ project_name }}**. Il accompagne le snippet
+[`.config/tmux/claude-code.tmux.conf`](../.config/tmux/claude-code.tmux.conf).
+
+> Rien ici n'est imposé. Le snippet se source à la main et ne modifie jamais
+> votre `~/.tmux.conf`.
+
+## Le problème
+
+Utiliser Claude Code dans tmux fiabilise les longues sessions (une déconnexion
+SSH ou la fermeture d'un terminal ne tue pas le run). En contrepartie, **le
+scroll des sorties devient parfois confus** :
+
+- la molette peut remonter dans d'anciens prompts/saisies au lieu de défiler
+  proprement dans les sorties ;
+- tmux, le scrollback du terminal et la TUI Claude Code peuvent se disputer le
+  défilement ;
+- selon les cas, Claude Code utilise un *alternate screen* (mode plein écran)
+  qui change le comportement du scroll ;
+- au final, le **copy-mode de tmux** reste la méthode la plus fiable pour relire
+  de longues sorties.
+
+## Réglages tmux recommandés
+
+Le snippet applique :
+
+```tmux
+set -g mouse on                              # molette + sélection souris
+set -g history-limit 50000                   # gros historique de scrollback
+set -g allow-passthrough on                  # laisse passer les séquences des TUI
+set -s extended-keys on                      # touches étendues (Ctrl/Alt/Shift)
+set -as terminal-features 'xterm*:extkeys'   # extkeys pour terminaux xterm
+```
+
+Pour l'essayer **dans la session courante** (non destructif, repart au prochain
+lancement de tmux) :
+
+```bash
+tmux source-file .config/tmux/claude-code.tmux.conf
+```
+
+> `history-limit` ne s'applique qu'aux panes ouverts **après** le source : pour
+> bénéficier du gros scrollback, ouvrez une nouvelle fenêtre/pane (`Ctrl+b c`)
+> ou relancez tmux. Les autres réglages (`mouse`, `allow-passthrough`…) sont
+> actifs immédiatement.
+
+Pour l'**adopter durablement**, copiez-le puis sourcez-le depuis votre config
+perso :
+
+```bash
+mkdir -p ~/.config/tmux
+cp .config/tmux/claude-code.tmux.conf ~/.config/tmux/
+echo 'source-file ~/.config/tmux/claude-code.tmux.conf' >> ~/.tmux.conf
+tmux source-file ~/.tmux.conf   # recharge sans tuer la session
+```
+
+## Relire les sorties : le copy-mode tmux
+
+La façon la plus fiable de remonter dans une longue sortie :
+
+1. `Ctrl+b` puis `[` — entre en **copy-mode** ;
+2. molette / `PageUp` / `PageDown` / flèches — défile dans l'historique ;
+3. `q` — **quitte** le copy-mode et revient au prompt.
+
+Si l'historique est pollué et que vous voulez repartir propre :
+
+```bash
+tmux clear-history
+```
+
+## Mode Claude Code : deux stratégies à tester
+
+Selon le terminal et l'OS, l'une ou l'autre est plus stable. Testez les deux.
+
+### Stratégie A — garder le scrollback natif terminal/tmux
+
+Désactive l'alternate screen : les sorties restent dans le scrollback normal,
+donc molette et copy-mode se comportent comme pour n'importe quelle commande.
+
+```bash
+export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+claude
+```
+
+### Stratégie B — privilégier la stabilité de la TUI
+
+Garde l'affichage plein écran géré par Claude Code (scroll interne à la TUI).
+Dans Claude Code, lancez :
+
+```
+/tui fullscreen
+```
+
+## À tester avant de généraliser
+
+Procédure reproductible pour décider de la meilleure combinaison **sur votre
+environnement** (macOS / Linux / SSH / devcontainer diffèrent) :
+
+1. ouvrir une **session tmux propre** ;
+2. sourcer le snippet : `tmux source-file .config/tmux/claude-code.tmux.conf` ;
+3. lancer Claude Code ;
+4. générer une **longue sortie** (ex. lister un gros fichier) ;
+5. tester le **scroll molette** normal ;
+6. tester le **copy-mode** : `Ctrl+b [`, défiler, `q` ;
+7. tester `/tui fullscreen` ;
+8. tester **avec et sans** `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` ;
+9. **noter** quelle combinaison est la plus stable (terminal + OS + tmux), et la
+   documenter pour l'équipe avant d'en faire un défaut.
+
+## Notes
+
+- Ce devcontainer lance déjà chaque terminal dans une session tmux
+  (`claude-<pid>`) via `.devcontainer/tmux-session.sh`, qui active déjà
+  `mouse`, `history-limit` et `allow-passthrough`. Ce snippet ajoute en plus
+  `extended-keys` / `terminal-features` et sert de référence **portable** hors
+  devcontainer (poste local, autre serveur SSH).
+- Aucun réglage ici ne touche `~/.tmux.conf` sans une action explicite de votre
+  part.

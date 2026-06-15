@@ -96,6 +96,15 @@ enable_ecc_stack:
     en post-start si .env.ecc existe.
   when: "{{ project_type in ['mcp-server', 'abap-project'] }}"
 
+enable_tmux_claude_code_config:
+  type: bool
+  default: false
+  help: >-
+    Générer un snippet tmux OPTIONNEL (+ doc) pour fiabiliser le scroll et le
+    copy-mode de Claude Code en sessions longues. Sourçable à la main, ne
+    modifie jamais ~/.tmux.conf. Crée .config/tmux/claude-code.tmux.conf et
+    docs/claude-code-tmux.md.
+
 workspace_color:
   type: str
   help: "Couleur de la barre d'activité VS Code (hex, ex: #6B7280)"
