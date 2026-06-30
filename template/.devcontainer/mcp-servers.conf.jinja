@@ -14,4 +14,9 @@
 # To opt out of template-managed servers, comment out every line — but KEEP
 # the file: if it is deleted, the next `copier update` re-seeds the default.
 # =============================================================================
+{%- if project_type != "base" %}
 sap-adt-mcp https://github.com/4ITServices/sap-adt-mcp.git - 8000
+{%- else %}
+# No MCP server seeded for project_type=base. Add your own, one per line, e.g.:
+# my-mcp https://github.com/org/my-mcp.git - 8000
+{%- endif %}

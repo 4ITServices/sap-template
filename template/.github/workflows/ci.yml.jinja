@@ -36,12 +36,13 @@ jobs:
 
       - name: Tests
         run: uv run pytest
-        env:
 {%- if project_type == "mcp-server" or project_type == "abap-project" %}
+        env:
           SAP_URL: ${{ "{{" }} secrets.SAP_URL {{ "}}" }}
           SAP_USER: ${{ "{{" }} secrets.SAP_USER {{ "}}" }}
           SAP_PASSWORD: ${{ "{{" }} secrets.SAP_PASSWORD {{ "}}" }}
 {%- elif project_type == "fabric-pipeline" %}
+        env:
           AZURE_TENANT_ID: ${{ "{{" }} secrets.AZURE_TENANT_ID {{ "}}" }}
           AZURE_CLIENT_ID: ${{ "{{" }} secrets.AZURE_CLIENT_ID {{ "}}" }}
           AZURE_CLIENT_SECRET: ${{ "{{" }} secrets.AZURE_CLIENT_SECRET {{ "}}" }}

@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.10.0] — 2026-06-30
+
+### Added
+
+- **New `base` project type (`project_type: base`).** A neutral, cloud- and
+  SAP-free socle: it ships the full common base (devcontainer + tmux/terminal
+  hardening, uv/ruff/pytest tooling, `justfile`, CI) and a bare Python skeleton
+  (`src/<slug>/` with a plain `main()` entry point, empty pydantic-settings
+  `config.py`), but wires no SAP, Azure or MCP integration. Intended as a
+  starting point for projects that will be specialised by hand (e.g. a GCP
+  pipeline). Concretely, for `base`:
+  - `pyproject.toml` depends only on `pydantic` / `pydantic-settings` /
+    `python-dotenv`;
+  - `.env.example` carries no `SAP_*` block, only `GITHUB_PERSONAL_ACCESS_TOKEN`;
+  - `.mcp.json.example` has an empty `mcpServers`, and the (now templated)
+    `.devcontainer/mcp-servers.conf` seeds **no** server, so nothing SAP runs;
+  - `CLAUDE.md` / `README.md` drop the SAP/MCP sections;
+  - CI emits no secret `env:` block.
+- **`.devcontainer/mcp-servers.conf` is now rendered from a Jinja template**
+  (`mcp-servers.conf.jinja`) so the seeded server set depends on
+  `project_type`. It stays project-owned via `_skip_if_exists`, so existing
+  projects are untouched on `copier update`.
+
 ## [0.9.0] — 2026-06-15
 
 ### Added

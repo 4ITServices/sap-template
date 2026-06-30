@@ -108,7 +108,20 @@ SAP_Bronze (schema-enabled)              Domain_Lakehouse (schema-enabled)
 - PK : `_pk_hkey_{fields}` (SHA256 sur les champs clés)
 - FK : `_fk_hkey_{business_keys}`
 - Jointures : `fact._fk_hkey_{bk} = dim._pk_hkey_{bk}`
+{%- elif project_type == "base" %}
+
+Socle Python générique, prêt à spécialiser. Aucune intégration SAP ou cloud
+n'est câblée par défaut.
+
+```
+src/{{ project_slug }}/
+├── __init__.py       — version et exports publics
+├── __main__.py       — point d'entrée `python -m {{ project_slug }}`
+├── server.py         — point d'entrée principal (`main()`)
+└── config.py         — pydantic-settings (depuis .env)
+```
 {%- endif %}
+{%- if project_type != "base" %}
 
 ## MCP Servers SAP (infrastructure commune)
 
@@ -134,6 +147,7 @@ confondre dans `.mcp.json`.
 {%- endif %}
 
 Configuration : `.mcp.json` est créé automatiquement depuis `.mcp.json.example` au premier build. Les credentials SAP vivent dans `.env` (lus par pydantic-settings) ; `.mcp.json` ne contient que la config structurelle (URLs, noms de serveurs) — le modifier par exemple si l'IP de la VM Windows change. Pas de secrets dedans.
+{%- endif %}
 
 ## Conventions SYNKRONIC
 {%- if project_type == "abap-project" %}
@@ -157,6 +171,8 @@ Les CDS views générées dans ZEXTRACT utilisent des labels en **français** :
 1. Ne jamais modifier des objets SAP hors des packages `{{ abap_package_name }}` / `ZEXTRACT` / `ZMCP`
 2. Ne jamais committer `.env`, `.env.ecc`, `.mcp.json`, `*.pem`, `ssh_appliance.pem`
 3. Activer TOUJOURS après `setObjectSource` (MCP ADT)
+{%- elif project_type == "base" %}
+1. Ne jamais committer `.env`, `.mcp.json`, `*.pem`
 {%- else %}
 1. Ne jamais committer `.env`, `.env.ecc`, `.mcp.json`, `*.pem`, `ssh_appliance.pem`
 2. Activer TOUJOURS après `setObjectSource` (MCP ADT)

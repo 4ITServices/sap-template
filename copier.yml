@@ -47,6 +47,7 @@ project_type:
     - mcp-server
     - abap-project
     - fabric-pipeline
+    - base
   default: mcp-server
 
 python_version:
@@ -112,4 +113,5 @@ workspace_color:
     {%- if project_type == "mcp-server" %}#1E3A5F
     {%- elif project_type == "abap-project" %}#3D1A00
     {%- elif project_type == "fabric-pipeline" %}#0E2A1A
+    {%- elif project_type == "base" %}#374151
     {%- endif %}

@@ -7,6 +7,8 @@
 # Run   : docker run --rm --env-file .env {{ project_name }}
 {%- elif project_type == "abap-project" %}
 # Run   : docker run --rm --env-file .env {{ project_name }}
+{%- elif project_type == "base" %}
+# Run   : docker run --rm --env-file .env {{ project_name }}
 {%- endif %}
 # =============================================================================
 

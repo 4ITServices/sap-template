@@ -30,6 +30,10 @@ dependencies = [
   "pandas>=2.2",
   "pydantic>=2.0",
   "python-dotenv>=1.0",
+{%- elif project_type == "base" %}
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "python-dotenv>=1.0",
 {%- endif %}
 ]
 

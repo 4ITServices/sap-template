@@ -72,6 +72,14 @@ Configurer les variables SAP dans `.env` avant le premier lancement.
 Ce projet ingère des données SAP dans Microsoft Fabric / OneLake.
 
 Configurer les variables Azure dans `.env` avant le premier lancement.
+{%- elif project_type == "base" %}
+
+## Projet
+
+Socle Python générique (devcontainer, tooling uv/ruff/pytest, CI) prêt à être
+spécialisé. Aucune dépendance cloud ou SAP n'est câblée par défaut : ajoutez vos
+dépendances dans `pyproject.toml`, vos variables dans `.env`, et votre code dans
+`src/{{ project_slug }}/`.
 {%- endif %}
 {%- if enable_tmux_claude_code_config %}
 
