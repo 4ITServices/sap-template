@@ -111,6 +111,21 @@ else
 fi
 
 # =============================================================================
+# Long-session stability — tmux (decouples Claude Code from the VS Code pty so
+# a session survives window reload / restart / disconnect). The integrated-
+# terminal tmux profile lives in devcontainer.json + tmux-session.sh.
+# =============================================================================
+echo "[stability] tmux..."
+if command -v tmux &>/dev/null; then
+  echo "  tmux $(tmux -V)"
+else
+  sudo apt-get update -qq 2>/dev/null \
+    && sudo apt-get install -y -qq tmux 2>/dev/null \
+    && echo "  tmux installed ($(tmux -V))" \
+    || echo "  WARNING: tmux install failed"
+fi
+
+# =============================================================================
 # Project-specific setup (not managed by template — safe from template updates)
 # =============================================================================
 PROJECT_POST_CREATE="$WORKSPACE_DIR/.devcontainer/post-create-project.sh"

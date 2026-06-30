@@ -2,6 +2,14 @@
   "name": "sap-template-devcontainer",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
 
+  // Keep the container running when the VS Code window closes, so a detached
+  // tmux session (and the Claude Code run inside it) survives close / sleep /
+  // reconnect. Stop it manually with `docker stop` when you're done.
+  "shutdownAction": "none",
+  // tini as PID 1: reap zombie/orphan processes from agentic background tasks
+  // and avoid the process-group signal cascade that can crash Claude (exit 137).
+  "init": true,
+
   "mounts": [
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
@@ -24,7 +32,36 @@
         "bierner.markdown-mermaid"
       ],
       "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash"
+        // Run the integrated terminal inside a persistent tmux session so a
+        // long Claude Code run survives window reload, full VS Code restart,
+        // SSH drop and host sleep. Each tab gets its own session
+        // (`claude-<pid>`) so several Claude Code instances run in parallel;
+        // on revival each reopened tab reattaches a detached one. List/reattach
+        // from any shell: `tmux ls` then `tmux attach -t <name>`.
+        "terminal.integrated.defaultProfile.linux": "tmux",
+        "terminal.integrated.profiles.linux": {
+          "tmux": {
+            "path": "bash",
+            "args": ["${workspaceFolder}/.devcontainer/tmux-session.sh"],
+            "icon": "terminal-tmux"
+          },
+          "bash": { "path": "bash", "icon": "terminal-bash" }
+        },
+        // Tasks/debuggers use a plain shell, never tmux.
+        "terminal.integrated.automationProfile.linux": { "path": "bash" },
+        // Survive window reloads by reconnecting to the live process.
+        "terminal.integrated.enablePersistentSessions": true,
+        // Never let an extension's env contribution auto-relaunch (= kill) a
+        // terminal that is about to host, or is hosting, a Claude session.
+        "terminal.integrated.environmentChangesRelaunch": false,
+        "terminal.integrated.persistentSessionReviveProcess": "onExitAndWindowClose",
+        // Keep far more transcript in the buffer / restored after a reload.
+        "terminal.integrated.scrollback": 20000,
+        "terminal.integrated.persistentSessionScrollback": 1000,
+        // Silence the Python extension's env-collection churn (venv activation
+        // + .env injection) — the main trigger of the relaunch prompt.
+        "python.terminal.activateEnvironment": false,
+        "python.envFile": ""
       }
     }
   },
