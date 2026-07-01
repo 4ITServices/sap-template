@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.10.1] — 2026-07-01
+
+### Fixed
+
+- **`shutdownAction` is now `stopContainer` instead of `none`** in both the
+  generated project's `.devcontainer/devcontainer.json` and the template's own
+  root dev env. `none` kept the container running even after its VS Code
+  window/project was **closed**, so containers from closed projects piled up and
+  exhausted the Docker VM's RAM; the kernel OOM-killer then took down the active
+  window's extension host, producing the recurring
+  `command 'claude-vscode.terminal.open' not found` error. With `stopContainer`,
+  a closed project releases its container, while an **open** project still keeps
+  the container and its detached tmux session alive across window reloads,
+  reconnects and host sleep (only a real close/quit stops it). The tmux terminal
+  profile and all persistent-session settings are unchanged.
+
+  Behavior change on `copier update`: existing projects re-render this file back
+  to `stopContainer`; a container that was previously immortal will now stop when
+  its window closes. Already-running immortal containers must be stopped once by
+  hand (`docker ps` → `docker stop …`, or `docker container prune`). For a
+  deliberately always-on service, run it as a plain `docker run` daemon rather
+  than reverting to `none`.
+
 ## [0.10.0] — 2026-06-30
 
 ### Added

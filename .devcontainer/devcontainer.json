@@ -2,10 +2,15 @@
   "name": "sap-template-devcontainer",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
 
-  // Keep the container running when the VS Code window closes, so a detached
-  // tmux session (and the Claude Code run inside it) survives close / sleep /
-  // reconnect. Stop it manually with `docker stop` when you're done.
-  "shutdownAction": "none",
+  // Stop the container when the VS Code window/project is CLOSED, so containers
+  // don't pile up and exhaust the Docker VM's RAM. Unstopped containers from
+  // closed projects accumulate until the kernel OOM-killer fires and takes down
+  // the active window's extension host (symptom: "command not found" loops).
+  // While the project stays OPEN the container — and the detached tmux session
+  // below — still survives window reloads, reconnects and host sleep; only a
+  // real close/quit stops it. For a deliberately always-on service, run it as a
+  // plain `docker run` daemon rather than flipping this back to "none".
+  "shutdownAction": "stopContainer",
   // tini as PID 1: reap zombie/orphan processes from agentic background tasks
   // and avoid the process-group signal cascade that can crash Claude (exit 137).
   "init": true,
