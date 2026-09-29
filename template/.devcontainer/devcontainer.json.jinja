@@ -16,7 +16,16 @@
   "init": true,
 
   "mounts": [
+{%- if claude_profile %}
+    // Claude profile "{{ claude_profile }}": ~/.claude is the HOST dir
+    // ~/.claude-profiles/{{ claude_profile }}, not the host-wide ~/.claude shared
+    // by every container. Its login (.credentials.json), chat history, memory
+    // and backups/ belong to this profile and persist host-side across rebuilds
+    // (even without cache). Repos answering the same profile share its account.
+    "source=${localEnv:HOME}/.claude-profiles/{{ claude_profile }},target=/home/vscode/.claude,type=bind",
+{%- else %}
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
+{%- endif %}
     "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
   ],
 
@@ -27,8 +36,15 @@
     "ghcr.io/devcontainers/features/azure-cli:1": {},
     "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}
   },
+{%- if claude_profile %}
+
+  // Host-side, before the container is created: the profile dir must exist,
+  // since a missing bind source aborts `docker run --mount` (no auto-create).
+  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"",
+{%- else %}
 
   "initializeCommand": "mkdir -p ${HOME}/.claude",
+{%- endif %}
 
   "customizations": {
     "vscode": {

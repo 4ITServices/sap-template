@@ -7,6 +7,9 @@
 #   - ON  : les deux fichiers présents, sans suffixe .jinja résiduel ;
 #   - dans les deux cas : le rendu de base (README.md, .copier-answers.yml) est
 #     généré et ne contient pas de marqueur Jinja non résolu.
+# Puis claude_profile : vide = montage ~/.claude historique à l'identique ;
+# renseigné = ~/.claude-profiles/<profil> monté et créé par initializeCommand ;
+# devcontainer.json toujours valide (JSONC) ; un profil « ../x » est refusé.
 #
 # Copier rend depuis une réf git : par défaut HEAD du repo courant. Les fichiers
 # NON COMMITÉS ne sont pas pris en compte -> committez avant de tester, ou
@@ -26,12 +29,32 @@ fail=0
 pass() { printf '  \033[32mOK\033[0m   %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=1; }
 
-render() {  # render <enable_bool> <out_dir>
+render() {  # render <enable_bool> <out_dir> [extra copier args...]
+  local enable=$1 out=$2; shift 2
   copier copy --vcs-ref "$VCS_REF" --defaults --quiet \
     --data project_name=render-test \
     --data project_description="Render smoke test" \
-    --data "enable_tmux_claude_code_config=$1" \
-    "$REPO_ROOT" "$2"
+    --data "enable_tmux_claude_code_config=$enable" \
+    "$@" "$REPO_ROOT" "$out"
+}
+
+# devcontainer.json is JSONC: strip comments (outside strings), then parse.
+jsonc_ok() {
+  python3 - "$1" <<'PY'
+import json, sys
+s, out, i, in_str = open(sys.argv[1]).read(), [], 0, False
+while i < len(s):
+    c = s[i]
+    if in_str:
+        out.append(c)
+        if c == '\\': out.append(s[i + 1]); i += 2; continue
+        in_str = c != '"'; i += 1; continue
+    if c == '"': in_str = True
+    elif s.startswith('//', i):
+        j = s.find('\n', i); i = len(s) if j < 0 else j; continue
+    out.append(c); i += 1
+json.loads(''.join(out))
+PY
 }
 
 SNIPPET=".config/tmux/claude-code.tmux.conf"
@@ -72,6 +95,34 @@ if render true "$WORK/on"; then
     && pass "ON: doc interpolée (project_name)" || bad "ON: doc non interpolée"
 else
   bad "ON: copier a échoué"
+fi
+
+DC=".devcontainer/devcontainer.json"
+LEGACY_MOUNT='"source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",'
+LEGACY_INIT='"initializeCommand": "mkdir -p ${HOME}/.claude",'
+
+echo "== claude_profile vide (rendu OFF) : montage historique, à l'identique =="
+grep -qxF "    $LEGACY_MOUNT" "$WORK/off/$DC" && pass "OFF: montage ~/.claude historique" || bad "OFF: montage historique absent/modifié"
+grep -qxF "  $LEGACY_INIT" "$WORK/off/$DC" && pass "OFF: initializeCommand historique" || bad "OFF: initializeCommand modifié"
+grep -q 'claude-profiles' "$WORK/off/$DC" && bad "OFF: référence à .claude-profiles" || pass "OFF: aucune référence à .claude-profiles"
+jsonc_ok "$WORK/off/$DC" && pass "OFF: devcontainer.json valide (JSONC)" || bad "OFF: devcontainer.json invalide"
+
+echo "== claude_profile=render-profile : montage du profil =="
+if render false "$WORK/prof" --data claude_profile=render-profile; then
+  PROF_SRC='${localEnv:HOME}/.claude-profiles/render-profile'
+  grep -qF "\"source=$PROF_SRC,target=/home/vscode/.claude,type=bind\"" "$WORK/prof/$DC" \
+    && pass "PROFIL: ~/.claude-profiles/render-profile monté sur ~/.claude" || bad "PROFIL: montage du profil absent"
+  grep -qF "\"initializeCommand\": \"mkdir -p \\\"$PROF_SRC\\\"\"" "$WORK/prof/$DC" \
+    && pass "PROFIL: initializeCommand crée CE dossier (même chemin que la source)" || bad "PROFIL: initializeCommand ne crée pas le dossier du profil"
+  grep -qF "$LEGACY_MOUNT" "$WORK/prof/$DC" && bad "PROFIL: le ~/.claude partagé est encore monté" || pass "PROFIL: ~/.claude partagé non monté"
+  jsonc_ok "$WORK/prof/$DC" && pass "PROFIL: devcontainer.json valide (JSONC)" || bad "PROFIL: devcontainer.json invalide"
+else
+  bad "PROFIL: copier a échoué"
+fi
+if render false "$WORK/badprof" --data 'claude_profile=../x' >/dev/null 2>&1; then
+  bad "PROFIL: '../x' accepté (traversée de chemin)"
+else
+  pass "PROFIL: '../x' refusé par le validateur"
 fi
 
 echo "== Vérif marqueurs Jinja non résolus (les deux rendus) =="

@@ -7,6 +7,71 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [0.11.0] — 2026-09-29
+
+### Added
+
+- **One Claude account per container: copier question `claude_profile`
+  (default empty).** Every container used to bind-mount the same host
+  `~/.claude`, which holds the one `.credentials.json`. A `/login` in any
+  container therefore switched **all** of them: running sessions watch that
+  file and reload it when it changes. Answering a profile name (e.g.
+  `sap-testing`) mounts the host dir `~/.claude-profiles/<profile>` on
+  `/home/vscode/.claude` instead. The mount *target* is unchanged, so nothing
+  else in the template moves (`PATH`, `claude-dirs`, scripts). The profile
+  stays host-side: its login, chat history (`projects/<slug>/*.jsonl`,
+  `history.jsonl`) and memory survive every rebuild, including without cache.
+  `initializeCommand` creates the profile dir on the host first, because a
+  missing bind source makes `docker run --mount` fail. Repos answering the same
+  profile share its account. The name must match `^[a-z0-9][a-z0-9_-]{0,62}$`:
+  no `..`, `/`, `,` or uppercase (APFS is case-insensitive).
+- **The `~/.claude.json` restore (post-create step 3) becomes per-profile.**
+  It restores the newest `~/.claude/backups/` entry. With a profile, those are
+  the profile's own backups, instead of whichever container saved last
+  (whatever its account).
+- **`scripts/claude-profile-migrate.sh`** seeds a profile for one repo. It
+  runs on the host with the container stopped, and is a dry run unless
+  `--apply` is given. It only **copies** from `~/.claude`, which it never
+  writes to:
+  - user config (settings, skills, plugins…), when the profile lacks it;
+  - the repo's `projects/<slug>/`: transcripts, subagents and memory, plus the
+    `<session>/` artefacts its sessions left under worktree or subdirectory
+    slugs. Ownership is decided by the recorded `cwd` and the session id, not
+    by the lossy slug name;
+  - its `history.jsonl` lines (merged, de-duplicated, sorted by timestamp);
+  - its `file-history/`.
+
+  It never copies `.credentials.json*`, `backups/`, `.device-keys.json` or
+  runtime state, and it checks every copied file with `cmp`.
+- **Tests.** New `scripts/test-claude-profile-migrate.sh`: 45 checks on a
+  throwaway fake `~/.claude`, under POSIX `sh`/`dash`/`bash`.
+  `scripts/test-template-render.sh` now also covers `claude_profile`:
+  - empty: the legacy mount is byte-identical;
+  - set: the profile mount and `initializeCommand` are present;
+  - both renders are valid JSONC;
+  - `../x` is rejected.
+
+### Notes
+
+- **No behaviour change unless you opt in.** With `claude_profile` empty, the
+  rendered tree is byte-identical to v0.10.1. Only `.copier-answers.yml` gains
+  `claude_profile: ''`.
+- **Opting in an existing repo** (see `.devcontainer/README.md`, *Claude
+  profiles*):
+  1. run `copier update`, answering `claude_profile`, and commit;
+  2. **close the window**, which stops the container;
+  3. run `scripts/claude-profile-migrate.sh` on the host (dry run, then
+     `--apply`);
+  4. rebuild, then `/login` with the profile's account.
+
+  Rebuilding before migrating shows an empty history. Nothing is lost: it is
+  still in `~/.claude`, so migrate and rebuild again.
+- A profile's first start finds no `~/.claude.json` backup, so onboarding,
+  folder trust and `.mcp.json` approvals are asked once.
+- To roll back, set `claude_profile` back to empty and rebuild: `~/.claude`
+  was never modified.
+- The sap-template root dev env itself keeps the shared `~/.claude`.
+
 ## [0.10.1] — 2026-07-01
 
 ### Fixed

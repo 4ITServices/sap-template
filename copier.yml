@@ -106,6 +106,22 @@ enable_tmux_claude_code_config:
     modifie jamais ~/.tmux.conf. Crée .config/tmux/claude-code.tmux.conf et
     docs/claude-code-tmux.md.
 
+claude_profile:
+  type: str
+  default: ""
+  help: >-
+    Profil Claude Code de ce container (un compte/abonnement par profil).
+    Vide = comportement historique : le ~/.claude de l'hôte, partagé par tous
+    les containers (un /login bascule tous les autres). Renseigné (ex:
+    sap-testing) = ~/.claude-profiles/<profil> de l'hôte monté sur ~/.claude :
+    login, historique et mémoire propres au profil, persistés côté hôte.
+    Donner le même profil à deux dépôts leur fait partager le même compte.
+    Migration de l'historique : .devcontainer/README.md (« Claude profiles »).
+  validator: >-
+    {% if claude_profile and not (claude_profile | regex_search('^[a-z0-9][a-z0-9_-]{0,62}$')) %}
+    Profil invalide : minuscules, chiffres, - et _ uniquement, 63 caractères max (ex: sap-testing)
+    {% endif %}
+
 workspace_color:
   type: str
   help: "Couleur de la barre d'activité VS Code (hex, ex: #6B7280)"

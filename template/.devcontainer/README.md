@@ -4,7 +4,7 @@
 
 ```
 devcontainer.json
-  ├── initializeCommand      mkdir ~/.claude (host-side, before build)
+  ├── initializeCommand      mkdir ~/.claude or ~/.claude-profiles/<profile> (host-side, before build)
   ├── onCreateCommand        git config + claude dirs (once, at image creation)
   ├── postCreateCommand  →   post-create.sh (once, after build)
   │                            ├── MCP servers install (lib-mcp.sh ← mcp-servers.conf)
@@ -28,13 +28,16 @@ devcontainer.json
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
 | `*.example.sh` | template | reference/documentation |
 | `.mcp.json.example` | template | `copier update` (project root) |
+| `~/.claude/` (host) | **Claude Code** — shared by every container without a profile | never touched by copier; mounted on `/home/vscode/.claude` when `claude_profile` is empty |
+| `~/.claude-profiles/<profile>/` (host) | **Claude Code** — one per profile | never touched by copier; created empty by `initializeCommand`, mounted on `/home/vscode/.claude` when `claude_profile` is set |
 
 ## Template scripts (generic)
 
 **post-create.sh** (runs once after build):
 1. Install just (command runner)
 2. Git LFS setup
-3. Restore Claude auth from backup
+3. Restore `~/.claude.json` from the newest `~/.claude/backups/` entry (the
+   profile's own backups when `claude_profile` is set)
 4. Install uv + copier (Python toolchain)
 5. Install Claude Code CLI
 6. Python dependencies (`uv sync`)
@@ -48,6 +51,42 @@ devcontainer.json
 3. Source `.env`
 4. MCP servers: self-heal (re-clone if absent/broken), update, launch,
    port health-check (`lib-mcp.sh` over `mcp-servers.conf`)
+
+## Claude profiles (one Claude account per container)
+
+By default (`claude_profile` empty) every container bind-mounts the same host
+`~/.claude`. It holds the one `.credentials.json`, so a `/login` in any
+container switches **all** of them. The `backups/` there are written by every
+container too, so step 3 of `post-create.sh` restores whichever container
+saved last, whatever its account.
+
+Answering the copier question `claude_profile` (e.g. `sap-testing`) mounts
+`~/.claude-profiles/<profile>` from the host instead. The target is unchanged
+(`/home/vscode/.claude`), so nothing else in the template moves. The profile
+dir stays on the host: login, chat history (`projects/<slug>/*.jsonl`,
+`history.jsonl`), memory (`projects/<slug>/memory/`) and `backups/` survive
+any rebuild, including without cache. `~/.claude.json` still lives in the
+container and is restored from the **profile's** backups. Repos given the
+same profile share its account: that is how two repos share a login.
+
+Everything under `~/.claude` becomes per-profile, including user settings,
+skills and plugins. They are seeded once when a repo is migrated and diverge
+afterwards.
+
+**Migrating an existing repo** (the step where history could be lost):
+`scripts/claude-profile-migrate.sh` in the sap-template repo, run **on the
+host** with the repo's container **stopped**. It is a dry run unless you pass
+`--apply`, and it only **copies** (the host-wide `~/.claude` is only ever read):
+
+- user config: settings, skills, plugins…
+- the repo's `projects/<slug>/` (transcripts and memory)
+- its `history.jsonl` lines
+- its `file-history/`
+
+It never copies `.credentials.json` (you `/login` again), `backups/` or
+runtime state. Then `copier update` with the profile, rebuild, `/login`, and
+check with `claude --resume`. To roll back, set `claude_profile` back to empty
+and rebuild: `~/.claude` was never modified.
 
 ## Managed MCP servers (mcp-servers.conf)
 
@@ -177,6 +216,10 @@ do for you:
    rebuilding: `bash .devcontainer/post-start.sh` (self-heals /opt
    installs, launches the servers, health-checks the ports). Do not run
    it on the host: it appends to `~/.bashrc` and provisions `/opt`.
+6. **First time `claude_profile` is set**: stop the container and migrate
+   the history (see *Claude profiles*) **before** rebuilding. Otherwise the
+   rebuilt container starts with an empty history. Nothing is lost: it is
+   still in the host's `~/.claude`, and migrating later works too.
 
 ### Explicit MCP permissions
 
