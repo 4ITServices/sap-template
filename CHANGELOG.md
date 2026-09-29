@@ -54,8 +54,9 @@ and commit messages; this changelog starts at v0.8.12.
 ### Notes
 
 - **No behaviour change unless you opt in.** With `claude_profile` empty, the
-  rendered tree is byte-identical to v0.10.1. Only `.copier-answers.yml` gains
-  `claude_profile: ''`.
+  rendered `devcontainer.json` and every script are byte-identical to v0.10.1.
+  A `copier update` only touches `.copier-answers.yml` (new key
+  `claude_profile: ''`) and the docs in `.devcontainer/README.md`.
 - **Opting in an existing repo** (see `.devcontainer/README.md`, *Claude
   profiles*):
   1. run `copier update`, answering `claude_profile`, and commit;
