@@ -1,0 +1,707 @@
+#!/bin/bash
+# =============================================================================
+# lib-dbt.sh — dbt dual-engine workspace lifecycle (TEMPLATE-OWNED)
+# Updated by `copier update` — do not edit in projects.
+#
+# Sourced by post-create.sh, post-start.sh, dbt-run.sh and dbt-doctor.sh, and
+# driven by the project-owned manifest .devcontainer/dbt.conf.
+#
+# What `dbt_process <workspace> create|start` guarantees:
+#   - the UPSTREAM repository (the dbt project being taken over) is readable
+#     and cannot be pushed to: pinned host key, HTTPS->SSH rewrite for its
+#     private dbt packages, push lock (global pushInsteadOf + remote pushurl)
+#   - two git worktrees of THIS repository: v1/ on branch v1 (the original
+#     project, dbt Core 1.x) and v2/ on branch v2 (the dbt v2 migration)
+#   - two engines side by side: dbt Core 1.x in the /opt/dbt-v1 venv, built
+#     from the pins the project ships (`dbt1`), and dbt v2 at
+#     ~/.local/bin/dbt (`dbtf`), where the official dbt extension expects it
+#   - a fail-closed profile hub: <workspace>/profiles is the only place dbt
+#     reads profiles from (DBT_PROFILES_DIR)
+#
+# Design constraints (same as lib-mcp.sh):
+#   - functions must survive `set -eu` callers: every env read is guarded
+#     with ${VAR:-} and every best-effort command has an explicit fallback
+#   - never abort the container lifecycle: lifecycle helpers always return 0
+#   - self-healing: whatever lives in the container filesystem (venv, v2
+#     binary, ~/.gitconfig, ~/.bashrc) is restored on a plain restart
+#   - never push, never delete user files: a directory that is in the way is
+#     reported, not removed
+# =============================================================================
+
+# Include guard (tolerates double-sourcing)
+[ -n "${_LIB_DBT_LOADED:-}" ] && return 0
+_LIB_DBT_LOADED=1
+LIB_DBT_VERSION=1
+
+# Install locations — overridable for tests
+DBT_V1_VENV="${DBT_V1_VENV:-/opt/dbt-v1}"
+DBT_BIN_DIR="${DBT_BIN_DIR:-${HOME:-/home/vscode}/.local/bin}"
+DBT_V2_INSTALLER_URL="${DBT_V2_INSTALLER_URL:-https://public.cdn.getdbt.com/fs/install/install.sh}"
+DBT_LOG="${DBT_LOG:-/tmp/dbt-workspace.log}"
+
+# The two worktrees: directory name = branch name
+DBT_WORKTREES="v1 v2"
+
+# dbt_load_conf [WORKSPACE] — defaults, then the project manifest
+dbt_load_conf() {
+  DBT_WS="${1:-${WORKSPACE_DIR:-$(pwd)}}"
+  DBT_CONF="$DBT_WS/.devcontainer/dbt.conf"
+  DBT_UPSTREAM_URL=""
+  DBT_UPSTREAM_BRANCH="main"
+  DBT_PROJECT_SUBDIR=""
+  DBT_UPSTREAM_PUSH_LOCK=1
+  DBT_UPSTREAM_HTTPS_TO_SSH=1
+  DBT_V1_REQUIREMENTS=""
+  DBT_V1_FALLBACK_REQUIREMENTS=""
+  DBT_V1_PYTHON="3.12"
+  DBT_V2_VERSION="latest"
+  DBT_BQ_PROJECT=""
+  DBT_BQ_DATASET=""
+  DBT_BQ_DATASET_PREFIX=""
+  DBT_BQ_LOCATION="EU"
+  DBT_TARGET_NAME="dev"
+  DBT_ALLOW_RUN_OPERATION=0
+  DBT_HOOKS_REVIEWED=0
+  # shellcheck disable=SC1090
+  [ -f "$DBT_CONF" ] && . "$DBT_CONF"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Upstream access
+# -----------------------------------------------------------------------------
+
+# git@HOST:path | ssh://[user@]HOST[:port]/path | https://HOST/path -> HOST
+_dbt_url_host() {
+  local U="${1:-}"
+  case "$U" in
+    ssh://*|https://*|http://*)
+      U="${U#*://}"; U="${U%%/*}"; U="${U##*@}"; U="${U%%:*}" ;;
+    *@*:*)
+      U="${U#*@}"; U="${U%%:*}" ;;
+    *) U="" ;;
+  esac
+  printf '%s' "$U"
+}
+
+_dbt_url_is_ssh() {
+  case "${1:-}" in
+    ssh://*) return 0 ;;
+    http://*|https://*) return 1 ;;
+    *@*:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_dbt_known_hosts() { printf '%s' "$DBT_WS/.devcontainer/upstream_known_hosts"; }
+
+# dbt_git_setup — ~/.gitconfig lives in the container filesystem, so this is
+# replayed on every start.
+dbt_git_setup() {
+  local HOST KH CUR P
+  HOST="$(_dbt_url_host "${DBT_UPSTREAM_URL:-}")"
+  KH="$(_dbt_known_hosts)"
+  if [ -z "$HOST" ]; then
+    echo "  no upstream host (DBT_UPSTREAM_URL in dbt.conf) — git setup skipped"
+    return 0
+  fi
+
+  if _dbt_url_is_ssh "$DBT_UPSTREAM_URL"; then
+    # ~/.ssh is mounted read-only: ssh cannot record a host key it has never
+    # seen, so the upstream key is pinned in the repository. A missing pin is
+    # scanned once (trust on first use) and must then be reviewed + committed.
+    if [ ! -s "$KH" ] && command -v ssh-keyscan >/dev/null 2>&1; then
+      if ssh-keyscan -T 8 -t ed25519,rsa,ecdsa "$HOST" > "$KH.tmp" 2>/dev/null && [ -s "$KH.tmp" ]; then
+        mv "$KH.tmp" "$KH"
+        echo "  host keys of $HOST scanned into .devcontainer/upstream_known_hosts (trust on first use):"
+        ssh-keygen -lf "$KH" 2>/dev/null | sed 's/^/    /'
+        echo "  -> CHECK these fingerprints against the server, then commit the file."
+      else
+        rm -f "$KH.tmp"
+        echo "  WARNING: cannot scan the host keys of $HOST (offline? VPN?) — SSH to it will be refused"
+      fi
+    fi
+    if [ -s "$KH" ]; then
+      CUR="$(git config --global --get core.sshCommand 2>/dev/null || true)"
+      case "$CUR" in
+        ""|*upstream_known_hosts*)
+          # pinned file first, ~/.ssh/known_hosts second (GitHub & co keep working)
+          git config --global core.sshCommand "ssh -o \"UserKnownHostsFile=$KH $HOME/.ssh/known_hosts\""
+          echo "  $HOST host key pinned (.devcontainer/upstream_known_hosts)" ;;
+        *)
+          echo "  NOTE: core.sshCommand is already customised — left as is; add yourself:"
+          echo "        -o \"UserKnownHostsFile=$KH $HOME/.ssh/known_hosts\"" ;;
+      esac
+    fi
+    # Private dbt packages hosted next to the project are usually declared
+    # over HTTPS (CI authenticates with a job token); locally only the SSH key
+    # can read them.
+    if [ "${DBT_UPSTREAM_HTTPS_TO_SSH:-1}" != "0" ]; then
+      git config --global "url.git@$HOST:.insteadOf" "https://$HOST/"
+    else
+      git config --global --unset-all "url.git@$HOST:.insteadOf" 2>/dev/null || true
+    fi
+  fi
+
+  # Push lock. pushInsteadOf rewrites the push URL of ANY destination on the
+  # upstream host to a protocol that does not exist — it also covers
+  # `git push <explicit url>` and submodules, which a remote's pushurl alone
+  # does not see.
+  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+    for P in "git@$HOST:" "ssh://git@$HOST/" "https://$HOST/"; do
+      git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "$P" \
+        || git config --global --add url.DISABLED://.pushInsteadOf "$P"
+    done
+    echo "  push to $HOST LOCKED (pushInsteadOf)"
+  else
+    # only this host's entries: a lock set by hand for another host stays
+    for P in "git@$HOST:" "ssh://git@$HOST/" "https://$HOST/"; do
+      git config --global --fixed-value --unset-all url.DISABLED://.pushInsteadOf "$P" 2>/dev/null || true
+    done
+    echo "  WARNING: push to $HOST is UNLOCKED (DBT_UPSTREAM_PUSH_LOCK=0 in dbt.conf)"
+  fi
+  return 0
+}
+
+# Bounded fetch of the upstream remote. In a hook (no terminal) ssh must never
+# prompt nor hang; from a terminal a passphrase prompt is fine.
+_dbt_fetch_upstream() {
+  local KH SSH="ssh -o ConnectTimeout=10"
+  KH="$(_dbt_known_hosts)"
+  [ -t 0 ] || SSH="$SSH -o BatchMode=yes"
+  [ -s "$KH" ] && SSH="$SSH -o \"UserKnownHostsFile=$KH $HOME/.ssh/known_hosts\""
+  GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 GIT_SSH_COMMAND="$SSH" \
+    timeout 300 git -C "$DBT_WS" fetch --quiet --no-tags upstream >>"$DBT_LOG" 2>&1
+}
+
+# -----------------------------------------------------------------------------
+# Worktrees
+# -----------------------------------------------------------------------------
+
+# A directory is one of OUR worktrees iff it is the TOPLEVEL of a work tree
+# (a plain directory inside the workspace answers with the workspace itself).
+_dbt_is_worktree() {
+  local P="${1:-}" TOP
+  [ -e "$P/.git" ] || return 1
+  TOP="$(git -C "$P" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ "$TOP" = "$(cd "$P" 2>/dev/null && pwd -P)" ]
+}
+
+_dbt_has_ref() { git -C "$DBT_WS" show-ref --verify --quiet "$1"; }
+
+# Where the upstream branch can be read from, without the network if possible:
+# the upstream remote, else its mirror on origin (upstream-<branch>).
+_dbt_upstream_base() {
+  local BR="${DBT_UPSTREAM_BRANCH:-main}"
+  if ! _dbt_has_ref "refs/remotes/upstream/$BR" && ! _dbt_has_ref "refs/remotes/origin/upstream-$BR"; then
+    if git -C "$DBT_WS" remote get-url upstream >/dev/null 2>&1; then
+      echo "  fetching upstream ($BR)..." >&2
+      _dbt_fetch_upstream || echo "  WARNING: upstream fetch failed (details: $DBT_LOG)" >&2
+    fi
+  fi
+  if _dbt_has_ref "refs/remotes/upstream/$BR"; then
+    printf '%s' "upstream/$BR"
+  elif _dbt_has_ref "refs/remotes/origin/upstream-$BR"; then
+    printf '%s' "origin/upstream-$BR"
+  else
+    return 1
+  fi
+}
+
+# _dbt_ensure_branch V — the local branch exists: from origin when it was
+# already published, else v1 from the upstream branch and v2 from v1.
+_dbt_ensure_branch() {
+  local V="$1" BASE
+  _dbt_has_ref "refs/heads/$V" && return 0
+  if _dbt_has_ref "refs/remotes/origin/$V"; then
+    git -C "$DBT_WS" branch --quiet --track "$V" "origin/$V" >>"$DBT_LOG" 2>&1 \
+      && echo "  branch $V <- origin/$V" && return 0
+  fi
+  if [ "$V" != "v1" ] && _dbt_has_ref "refs/heads/v1"; then
+    BASE="v1"
+  else
+    BASE="$(_dbt_upstream_base)" || {
+      echo "  WARNING: no source for branch $V: neither origin/$V nor the upstream branch is reachable."
+      echo "           Check the VPN / SSH key, then run: just setup"
+      return 1
+    }
+  fi
+  git -C "$DBT_WS" branch --quiet --no-track "$V" "$BASE" >>"$DBT_LOG" 2>&1 \
+    && echo "  branch $V created from $BASE" || return 1
+}
+
+dbt_ensure_worktrees() {
+  local WS="$DBT_WS" V P REC
+  if ! git -C "$WS" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  $WS is not a git repository — worktrees skipped"
+    return 0
+  fi
+
+  # The upstream remote: fetch-only, no tags (they would land in this
+  # repository's own tag namespace).
+  if [ -n "${DBT_UPSTREAM_URL:-}" ]; then
+    if git -C "$WS" remote get-url upstream >/dev/null 2>&1; then
+      git -C "$WS" remote set-url upstream "$DBT_UPSTREAM_URL"
+    else
+      git -C "$WS" remote add upstream "$DBT_UPSTREAM_URL"
+    fi
+    git -C "$WS" config remote.upstream.tagOpt --no-tags
+    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+      git -C "$WS" config remote.upstream.pushurl DISABLED
+    else
+      git -C "$WS" config --unset-all remote.upstream.pushurl 2>/dev/null || true
+    fi
+  fi
+
+  for V in $DBT_WORKTREES; do
+    P="$WS/$V"
+    # Same trust as the workspace folder (onCreateCommand registers only that
+    # one): a bind mount owned by another uid would otherwise be refused.
+    git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$P" \
+      || git config --global --add safe.directory "$P"
+    # The links between a worktree and the repository are absolute paths:
+    # they break when the workspace folder is renamed. repair rewrites both
+    # directions and is a no-op when they are right.
+    [ -e "$P/.git" ] && git -C "$WS" worktree repair "$P" >>"$DBT_LOG" 2>&1
+
+    if _dbt_is_worktree "$P"; then
+      echo "  $V/ on branch $(git -C "$P" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    else
+      if [ -e "$P" ] && [ -n "$(ls -A "$P" 2>/dev/null)" ]; then
+        echo "  WARNING: $V/ exists but is not a worktree of this repository."
+        echo "           Move it away (nothing is deleted for you), then run: just setup"
+        continue
+      fi
+      _dbt_ensure_branch "$V" || continue
+      # A record left by a worktree whose directory is gone (deleted by hand)
+      # blocks the branch: locked records are not pruned, so release it first.
+      REC="$(git -C "$WS" worktree list --porcelain 2>/dev/null \
+        | awk -v b="refs/heads/$V" '$1=="worktree"{p=substr($0,10)} $1=="branch"&&$2==b{print p}')"
+      if [ -n "$REC" ] && [ ! -d "$REC" ]; then
+        git -C "$WS" worktree unlock "$REC" >>"$DBT_LOG" 2>&1 || true
+        git -C "$WS" worktree prune >>"$DBT_LOG" 2>&1 || true
+      fi
+      if git -C "$WS" worktree add "$P" "$V" >>"$DBT_LOG" 2>&1; then
+        echo "  $V/ created on branch $V"
+      else
+        echo "  ERROR: git worktree add $V failed (details: $DBT_LOG)"
+        continue
+      fi
+    fi
+    # The container path of a worktree does not exist on the host: without a
+    # lock, a `git worktree prune` (or an automatic gc) run on the host side
+    # would drop its administrative files.
+    git -C "$WS" worktree lock --reason "devcontainer path, not visible from the host: never prune" "$P" >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+# dbt_project_dir V — the directory of worktree V that holds dbt_project.yml
+dbt_project_dir() {
+  local ROOT="$DBT_WS/${1:-}" SUB="${DBT_PROJECT_SUBDIR:-}" FOUND
+  [ -d "$ROOT" ] || return 1
+  if [ -z "$SUB" ]; then
+    # auto-detect: the single dbt_project.yml that is not an installed package
+    FOUND="$(cd "$ROOT" && find . -name dbt_project.yml \
+      -not -path '*/dbt_packages/*' -not -path '*/dbt_modules/*' \
+      -not -path '*/target/*' -not -path '*/.venv/*' -not -path '*/node_modules/*' 2>/dev/null)"
+    [ -n "$FOUND" ] && [ "$(printf '%s\n' "$FOUND" | wc -l)" -eq 1 ] || return 1
+    SUB="$(dirname "${FOUND#./}")"
+  fi
+  if [ "$SUB" = "." ]; then printf '%s' "$ROOT"; else printf '%s' "$ROOT/$SUB"; fi
+  [ -f "$ROOT/$SUB/dbt_project.yml" ]
+}
+
+# The `profile:` the project asks for (dbt_project.yml)
+_dbt_profile_name() {
+  sed -nE "s/^profile:[[:space:]]*['\"]?([^'\"#[:space:]]+).*/\1/p" "${1:-}/dbt_project.yml" 2>/dev/null | head -1
+}
+
+# -----------------------------------------------------------------------------
+# Engines
+# -----------------------------------------------------------------------------
+
+dbt_engine() {
+  case "${1:-}" in
+    v1) printf '%s' "$DBT_V1_VENV/bin/dbt" ;;
+    v2) printf '%s' "$DBT_BIN_DIR/dbt" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Create DIR owned by the current user, using sudo only when the parent is
+# not writable (/opt is root-owned in the devcontainer; test dirs are not).
+_dbt_provision_dir() {
+  local DIR="$1"
+  [ -d "$DIR" ] && [ -w "$DIR" ] && return 0
+  if [ -w "$(dirname "$DIR")" ]; then
+    install -d "$DIR"
+  elif sudo -n true 2>/dev/null; then
+    sudo install -d -o "$(id -un)" -g "$(id -gn)" "$DIR"
+  else
+    return 1
+  fi
+}
+
+# Read from the package metadata: `dbt --version` of dbt Core takes seconds
+# and calls PyPI.
+_dbt_v1_version() {
+  local META
+  META="$(ls -d "$DBT_V1_VENV"/lib/python*/site-packages/dbt_core-*.dist-info 2>/dev/null | tail -1)"
+  [ -n "$META" ] || return 1
+  META="${META##*/dbt_core-}"
+  printf '%s' "${META%.dist-info}"
+}
+
+# The file that pins the project's dbt version, relative to the v1 worktree
+_dbt_v1_requirements() {
+  local PROJ F
+  if [ -n "${DBT_V1_REQUIREMENTS:-}" ]; then
+    [ -f "$DBT_WS/v1/$DBT_V1_REQUIREMENTS" ] && printf '%s' "$DBT_WS/v1/$DBT_V1_REQUIREMENTS"
+    return 0
+  fi
+  PROJ="$(dbt_project_dir v1)" || return 0
+  for F in "$PROJ/pyproject.toml" "$PROJ/requirements.txt" "$DBT_WS/v1/requirements.txt"; do
+    if [ -f "$F" ] && grep -q "dbt" "$F"; then printf '%s' "$F"; return 0; fi
+  done
+  return 0
+}
+
+# dbt Core 1.x, isolated in its own venv at the versions the project pins.
+# The venv lives in the container filesystem (fast, and gone at each rebuild:
+# rebuilt here); it is also rebuilt when the pin file changes.
+dbt_ensure_v1_venv() {
+  local REQ SUM STAMP="$DBT_V1_VENV/.dbt-pins" PY TRIED="" TMP OK=0 LOG="/tmp/dbt-v1-venv.log"
+  if [ ! -d "$DBT_WS/v1" ]; then
+    echo "  v1/ is not there yet — dbt Core venv skipped"
+    return 0
+  fi
+  REQ="$(_dbt_v1_requirements)"
+  if [ -n "$REQ" ]; then
+    SUM="$(sha256sum "$REQ" 2>/dev/null | cut -d' ' -f1)"
+  elif [ -n "${DBT_V1_FALLBACK_REQUIREMENTS:-}" ]; then
+    SUM="fallback:$DBT_V1_FALLBACK_REQUIREMENTS"
+  else
+    echo "  WARNING: the project pins no dbt version (no pyproject.toml / requirements.txt"
+    echo "           mentioning dbt). Set DBT_V1_FALLBACK_REQUIREMENTS in dbt.conf, e.g."
+    echo "           \"dbt-core~=1.10.0 dbt-bigquery~=1.10.0\", then run: just setup"
+    return 0
+  fi
+
+  if [ -x "$DBT_V1_VENV/bin/python" ] && [ -x "$DBT_V1_VENV/bin/dbt" ] \
+     && [ "$(cat "$STAMP" 2>/dev/null)" = "$SUM" ]; then
+    echo "  dbt Core $(_dbt_v1_version || echo '?') ($DBT_V1_VENV)"
+  else
+    if ! command -v uv >/dev/null 2>&1; then
+      echo "  WARNING: uv not found — cannot build the dbt Core venv"
+      return 0
+    fi
+    if ! _dbt_provision_dir "$DBT_V1_VENV"; then
+      echo "  ERROR: cannot create $DBT_V1_VENV (passwordless sudo unavailable?)"
+      return 0
+    fi
+    # the rebuild below empties the directory: only ever a venv of ours
+    if [ -n "$(ls -A "$DBT_V1_VENV" 2>/dev/null)" ] && [ ! -f "$DBT_V1_VENV/pyvenv.cfg" ]; then
+      echo "  ERROR: $DBT_V1_VENV is not empty and is not a virtualenv — refusing to rebuild into it"
+      return 0
+    fi
+    TMP="$(mktemp -d)"
+    : > "$LOG"
+    # Interpreter fallbacks, newest first: older dbt releases do not resolve
+    # on a recent Python (1.8/1.9 on 3.12, pre-1.0 beyond 3.9).
+    for PY in "${DBT_V1_PYTHON:-3.12}" 3.11 3.9; do
+      case " $TRIED " in *" $PY "*) continue ;; esac
+      TRIED="$TRIED $PY"
+      find "$DBT_V1_VENV" -mindepth 1 -delete 2>/dev/null
+      uv venv --quiet --python "$PY" "$DBT_V1_VENV" >>"$LOG" 2>&1 || continue
+      if [ -n "$REQ" ]; then
+        # Install from an isolated COPY: uv walks up from the file and parses
+        # every parent pyproject.toml, so an unrelated broken one above the
+        # project would fail an otherwise valid install.
+        cp "$REQ" "$TMP/$(basename "$REQ")"
+        uv pip install --quiet --python "$DBT_V1_VENV/bin/python" -r "$TMP/$(basename "$REQ")" >>"$LOG" 2>&1 || continue
+      else
+        # shellcheck disable=SC2086
+        uv pip install --quiet --python "$DBT_V1_VENV/bin/python" $DBT_V1_FALLBACK_REQUIREMENTS >>"$LOG" 2>&1 || continue
+      fi
+      if [ -x "$DBT_V1_VENV/bin/dbt" ]; then OK=1; break; fi
+    done
+    rm -rf "$TMP"
+    if [ "$OK" != 1 ]; then
+      echo "  ERROR: dbt Core venv could not be built (details: $LOG)"
+      tail -n 4 "$LOG" 2>/dev/null | sed 's/^/    | /'
+      return 0
+    fi
+    # `uv venv` installs no setuptools, and dbt < 1.9 still imports
+    # pkg_resources (dropped by setuptools >= 81) or distutils (gone in 3.12).
+    if "$DBT_V1_VENV/bin/dbt" --version 2>&1 | grep -Eq "No module named '(pkg_resources|distutils)'"; then
+      uv pip install --quiet --python "$DBT_V1_VENV/bin/python" "setuptools<80" >>"$LOG" 2>&1 \
+        && echo "  setuptools<80 added (old dbt: pkg_resources/distutils)"
+    fi
+    printf '%s' "$SUM" > "$STAMP"
+    echo "  dbt Core $(_dbt_v1_version || echo '?') installed in $DBT_V1_VENV (python $PY${REQ:+, pins: ${REQ#"$DBT_WS"/}})"
+  fi
+
+  mkdir -p "$DBT_BIN_DIR"
+  ln -sf "$DBT_V1_VENV/bin/dbt" "$DBT_BIN_DIR/dbt1"
+  return 0
+}
+
+# dbt v2. It must sit at ~/.local/bin/dbt: that is where the official
+# installer puts it and the only place the dbt VS Code extension looks
+# without a dbt.dbtPath override. Installed once per container build, never
+# upgraded behind the user's back.
+dbt_ensure_v2() {
+  local BIN="$DBT_BIN_DIR/dbt" VER LOG="/tmp/dbt-v2-install.log"
+  if [ -x "$BIN" ]; then
+    VER="$("$BIN" --version 2>/dev/null | head -1)"
+    case "$VER" in
+      "dbt 2."*|"dbt-fusion 2."*) echo "  $VER ($BIN)" ;;
+      *)
+        echo "  WARNING: $BIN is not dbt v2 ('${VER:-no answer}') — left untouched."
+        echo "           dbt v2 must own this path; remove that binary, then run: just setup"
+        return 0 ;;
+    esac
+  else
+    command -v curl >/dev/null 2>&1 || { echo "  WARNING: curl not found — cannot install dbt v2"; return 0; }
+    mkdir -p "$DBT_BIN_DIR"
+    if curl -fsSL "$DBT_V2_INSTALLER_URL" 2>>"$LOG" \
+         | sh -s -- --update --to "$DBT_BIN_DIR" ${DBT_V2_VERSION:+--version "$DBT_V2_VERSION"} >>"$LOG" 2>&1 \
+       && [ -x "$BIN" ]; then
+      echo "  $("$BIN" --version 2>/dev/null | head -1) installed ($BIN)"
+    else
+      echo "  ERROR: dbt v2 install failed (details: $LOG) — retried at the next start"
+      tail -n 3 "$LOG" 2>/dev/null | sed 's/^/    | /'
+      return 0
+    fi
+  fi
+  # `dbtf` as a real command (the installer only adds a shell alias, which
+  # scripts, just recipes and non-interactive shells do not see)
+  ln -sf dbt "$DBT_BIN_DIR/dbtf"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Profile hub
+# -----------------------------------------------------------------------------
+
+# profiles/profiles.yml is PROJECT-OWNED: seeded once, never rewritten.
+dbt_ensure_profiles() {
+  local DIR="$DBT_WS/profiles" FILE="$DBT_WS/profiles/profiles.yml" PROJ NAME=""
+  mkdir -p "$DIR"
+  PROJ="$(dbt_project_dir v1)" && NAME="$(_dbt_profile_name "$PROJ")"
+  if [ -f "$FILE" ]; then
+    if [ -n "$NAME" ] && ! grep -Eq "^['\"]?$NAME['\"]?:" "$FILE"; then
+      echo "  WARNING: profile '$NAME' (asked by dbt_project.yml) is not in profiles/profiles.yml:"
+      echo "           dbt will refuse to run until it is declared there (fail-closed)."
+    else
+      echo "  hub profiles/profiles.yml${NAME:+ (profile '$NAME')}"
+    fi
+    return 0
+  fi
+  if [ -z "$NAME" ]; then
+    echo "  profile name unknown (no dbt_project.yml in v1/ yet) — hub not seeded"
+    return 0
+  fi
+  if [ -z "${DBT_BQ_PROJECT:-}" ] || [ -z "${DBT_BQ_DATASET:-}" ]; then
+    echo "  DBT_BQ_PROJECT / DBT_BQ_DATASET are empty in dbt.conf: no profile generated."
+    echo "  dbt stays LOCKED (fail-closed) until profiles/profiles.yml declares '$NAME'."
+    return 0
+  fi
+  cat > "$FILE" <<EOF
+# =============================================================================
+# dbt profile hub — the ONLY profiles dbt reads in this container.
+# DBT_PROFILES_DIR points here for every process; the profiles.yml files
+# shipped inside v1/ and v2/ (they target the real projects) are never used.
+# A profile that is not declared here is an error, not a fallback.
+#
+# No secret in this file: \`method: oauth\` uses the gcloud ADC
+# (\`just gcp-login\`). PROJECT-OWNED: seeded once from .devcontainer/dbt.conf,
+# then yours — edit it and commit it.
+#
+# The target NAME is what the project's macros see (target.name); the
+# project and dataset below are where dbt actually runs and writes.
+# =============================================================================
+
+$NAME:
+  target: ${DBT_TARGET_NAME:-dev}
+  outputs:
+    ${DBT_TARGET_NAME:-dev}:
+      type: bigquery
+      method: oauth
+      project: $DBT_BQ_PROJECT
+      dataset: $DBT_BQ_DATASET
+      location: ${DBT_BQ_LOCATION:-EU}
+      threads: 4
+      priority: interactive
+      job_execution_timeout_seconds: 1800
+      maximum_bytes_billed: 42949672960   # 40 GiB — does NOT cap DDL
+EOF
+  echo "  hub seeded: profiles/profiles.yml (profile '$NAME' -> $DBT_BQ_PROJECT.$DBT_BQ_DATASET) — review and commit it"
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Editor + shell integration
+# -----------------------------------------------------------------------------
+
+# Files the editors need inside the worktrees. None of them belongs to the
+# dbt branches: they are hidden from git through the shared info/exclude.
+dbt_ensure_editor_files() {
+  local V PROJ EXCL PAT F KIND ALLOW
+  EXCL="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
+  if [ -d "$(dirname "$EXCL")" ]; then
+    for PAT in ".vscode/" ".env"; do
+      grep -qxF "$PAT" "$EXCL" 2>/dev/null || echo "$PAT" >> "$EXCL"
+    done
+  fi
+  for V in $DBT_WORKTREES; do
+    _dbt_is_worktree "$DBT_WS/$V" || continue
+    # dbt v2 and its extension read a .env from the project directory: point
+    # it at the single env file of the workspace.
+    if PROJ="$(dbt_project_dir "$V")" && [ ! -e "$PROJ/.env" ] && [ ! -L "$PROJ/.env" ]; then
+      ln -s "$(realpath --relative-to="$PROJ" "$DBT_WS/profiles/dbt.env")" "$PROJ/.env" 2>/dev/null || true
+    fi
+    # Settings for a window opened on the worktree alone (one extension per
+    # window). Rewritten as long as they carry the marker key below.
+    F="$DBT_WS/$V/.vscode/settings.json"
+    if [ ! -f "$F" ] || grep -q '"dbt-project.generated"' "$F" 2>/dev/null; then
+      mkdir -p "$DBT_WS/$V/.vscode"
+      if [ "$V" = "v1" ]; then KIND="v1"; ALLOW="[]"; else KIND="v2"; ALLOW='[".vscode"]'; fi
+      cat > "$F" <<EOF
+{
+  "dbt-project.generated": "by .devcontainer/lib-dbt.sh — remove this key to own the file",
+  "dbt.dbtMajorVersion": "$KIND",
+  "dbt.allowListFolders": $ALLOW,
+  "python.envFile": "$DBT_WS/profiles/dbt.env",
+  "terminal.integrated.profiles.linux": {
+    "tmux": { "path": "bash", "args": ["$DBT_WS/.devcontainer/tmux-session.sh"], "icon": "terminal-tmux" },
+    "bash": { "path": "bash", "icon": "terminal-bash" }
+  }
+}
+EOF
+    fi
+  done
+  return 0
+}
+
+# ~/.bashrc lives in the container filesystem: the block is rewritten on
+# every start (it embeds the workspace path).
+dbt_shell_integration() {
+  local RC="${HOME:-/home/vscode}/.bashrc" TMP
+  local BEGIN="# >>> dbt-project (lib-dbt.sh) >>>" END="# <<< dbt-project (lib-dbt.sh) <<<"
+  touch "$RC" 2>/dev/null || return 0
+  TMP="$(mktemp)"
+  awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$RC" > "$TMP" \
+    && cat "$TMP" > "$RC"
+  rm -f "$TMP"
+  cat >> "$RC" <<EOF
+$BEGIN
+# Belt and braces: containerEnv already gives it to every process.
+export DBT_PROFILES_DIR="$DBT_WS/profiles"
+# \`dbt\` picks its engine from the directory: dbt Core 1.x inside v1/, dbt v2
+# inside v2/ (both through the guarded dbt-run.sh), plain dbt v2 elsewhere.
+# The raw engines stay reachable as \`dbt1\` and \`dbtf\`.
+dbt() { bash "$DBT_WS/.devcontainer/dbt-run.sh" auto "\$@"; }
+$END
+EOF
+  return 0
+}
+
+# Informative only — never blocks the start, never calls the network.
+dbt_gcloud_status() {
+  local ACCT
+  if ! command -v gcloud >/dev/null 2>&1; then
+    echo "  gcloud not found — rebuild the container (feature google-cloud-cli)"
+    return 0
+  fi
+  ACCT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
+  if [ -n "$ACCT" ]; then echo "  gcloud/bq CLI: $ACCT"; else echo "  gcloud/bq CLI: not logged in -> just gcp-login"; fi
+  if [ -f "${HOME:-}/.config/gcloud/application_default_credentials.json" ]; then
+    echo "  ADC (dbt oauth): present"
+  else
+    echo "  ADC (dbt oauth): missing -> just gcp-login"
+  fi
+  # bq defaults: region + a cost guard (a query whose ESTIMATE exceeds it
+  # fails before running). Created once, then yours.
+  if [ ! -f "${HOME:-}/.bigqueryrc" ]; then
+    cat > "$HOME/.bigqueryrc" <<EOF
+--location=${DBT_BQ_LOCATION:-EU}
+
+[query]
+--use_legacy_sql=false
+--maximum_bytes_billed=42949672960
+EOF
+    echo "  ~/.bigqueryrc created (location=${DBT_BQ_LOCATION:-EU}, maximum_bytes_billed=40 GiB — does not cap DDL)"
+  fi
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Resolved write destinations
+# -----------------------------------------------------------------------------
+
+# dbt_destinations V [selection args…] — one line per model/seed/snapshot:
+#   resource_type <TAB> database <TAB> schema <TAB> name
+# Offline (dbt ls). Returns dbt's exit status: a project that does not parse
+# has no known destination.
+dbt_destinations() {
+  local V="${1:-}" PROJ ENGINE OUT RC
+  [ $# -gt 0 ] && shift
+  PROJ="$(dbt_project_dir "$V")" || return 1
+  ENGINE="$(dbt_engine "$V")" || return 1
+  [ -x "$ENGINE" ] || return 1
+  OUT="$(cd "$PROJ" && "$ENGINE" ls --resource-type model seed snapshot \
+    --output json --output-keys database schema name resource_type "$@" 2>>"$DBT_LOG")"
+  RC=$?
+  printf '%s\n' "$OUT" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        n = json.loads(line)
+    except ValueError:
+        continue
+    print("\t".join(str(n.get(k) or "") for k in ("resource_type", "database", "schema", "name")))
+' | sort
+  return $RC
+}
+
+# -----------------------------------------------------------------------------
+# Lifecycle entry point
+# -----------------------------------------------------------------------------
+
+# dbt_process WORKSPACE MODE — MODE 'create' also installs the v1 packages.
+dbt_process() {
+  local MODE="${2:-start}" PROJ
+  dbt_load_conf "${1:-}"
+  if [ ! -f "$DBT_CONF" ]; then
+    echo "[dbt] no .devcontainer/dbt.conf — nothing to manage"
+    return 0
+  fi
+  echo "[dbt] upstream access..."
+  dbt_git_setup
+  echo "[dbt] worktrees..."
+  dbt_ensure_worktrees
+  echo "[dbt] engine v1 — dbt Core 1.x..."
+  dbt_ensure_v1_venv
+  echo "[dbt] engine v2 — dbt v2..."
+  dbt_ensure_v2
+  echo "[dbt] profile hub..."
+  dbt_ensure_profiles
+  dbt_ensure_editor_files
+  dbt_shell_integration
+  if [ "$MODE" = "create" ] && [ -x "$DBT_V1_VENV/bin/dbt" ] && PROJ="$(dbt_project_dir v1)" \
+     && [ ! -d "$PROJ/dbt_packages" ] && { [ -f "$PROJ/packages.yml" ] || [ -f "$PROJ/dependencies.yml" ]; }; then
+    # v1 only: dbt Core installs what package-lock.yml says. dbt v2 would
+    # re-resolve and rewrite that tracked file — a migration step, not a hook's.
+    echo "[dbt] v1 packages (dbt deps)..."
+    ( cd "$PROJ" && DBT_PROFILES_DIR="$DBT_WS/profiles" "$DBT_V1_VENV/bin/dbt" deps >>"$DBT_LOG" 2>&1 ) \
+      && echo "  dbt deps done" || echo "  WARNING: dbt deps failed (details: $DBT_LOG) — retry: just v1 deps"
+  fi
+  echo "[dbt] BigQuery auth..."
+  dbt_gcloud_status
+  return 0
+}

@@ -7,6 +7,94 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Earlier releases (v0.1.0–v0.8.11) are documented in their git tag annotations
 and commit messages; this changelog starts at v0.8.12.
 
+## [Unreleased]
+
+### Added
+
+- **New `dbt-project` project type (`project_type: dbt-project`): take over an
+  existing dbt BigQuery project and migrate it from dbt Core 1.x to dbt v2,
+  both versions side by side in one container.** The repository's `main`
+  branch only carries the tooling. The dbt code lives in two git worktrees of
+  the same repository, ignored by `main`: `v1/` (branch `v1`, the original
+  project) and `v2/` (branch `v2`, the migration, then the refactoring).
+  Driven by a template-owned engine, `.devcontainer/lib-dbt.sh`, and a
+  project-owned manifest, `.devcontainer/dbt.conf` (seeded once from the
+  copier answers, `_skip_if_exists`) — the same split as `lib-mcp.sh` /
+  `mcp-servers.conf`. On create and on every start it:
+  - makes the **upstream** repository readable and impossible to push to: the
+    host key is pinned in `.devcontainer/upstream_known_hosts` (`~/.ssh` is
+    mounted read-only), `https://<host>/` is fetched over SSH for private dbt
+    packages, and a push is refused twice — a global
+    `url."DISABLED://".pushInsteadOf` (explicit URLs, submodules) plus
+    `remote.upstream.pushurl DISABLED`;
+  - creates the worktrees, from `origin` when the branches are published,
+    else `v1` from the upstream branch and `v2` from `v1`. They are **locked**
+    (their links are container paths, which a host-side `git worktree prune`
+    would drop) and **repaired** on every start (a renamed workspace folder is
+    harmless). Hooks never push and never delete;
+  - installs **both engines**: dbt Core 1.x in the `/opt/dbt-v1` venv, built
+    from the pins the project itself ships (`pyproject.toml`, else
+    `requirements.txt`; rebuilt when they change; interpreter fallbacks 3.11
+    and 3.9 for old releases) and exposed as `dbt1`; dbt v2 at
+    `~/.local/bin/dbt` through the official installer, exposed as `dbtf` —
+    the path the official dbt extension expects. In an interactive shell `dbt`
+    picks the engine from the directory;
+  - enforces a **fail-closed profile hub**: `containerEnv` sets
+    `DBT_PROFILES_DIR` to `<workspace>/profiles` for every process, so the
+    `profiles.yml` shipped inside the worktrees (they target the real
+    projects) are never read. `profiles/profiles.yml` is seeded once from the
+    sandbox declared in `dbt.conf`; with none declared, dbt stays locked.
+- **Write guard, `.devcontainer/dbt-run.sh`** (behind `just v1 …`,
+  `just v2 …` and the `dbt` shell function). A `run`/`build`/`seed`/`snapshot`
+  needs an explicit selection, and every selected node must resolve — through
+  an offline `dbt ls` — to the sandbox project, and to a dataset carrying the
+  configured prefix. `run-operation` is refused, and a project with hooks
+  cannot write until they are reviewed. `just destinations` lists where each
+  engine would write every node and where v1 and v2 disagree.
+- **`just doctor`** (`.devcontainer/dbt-doctor.sh`): engines, worktrees,
+  upstream lock (a dry-run push must fail), profile hub, BigQuery auth, MCP
+  ports. It checks and repairs nothing; `just setup` replays the lifecycle.
+- **BigQuery access**: host `~/.config/gcloud` bind-mounted (one login for all
+  the containers mounting it, no service-account key in the image) and a
+  **local** devcontainer feature for gcloud + bq, since the public
+  `ghcr.io/dhoeric/features/google-cloud-cli` is abandoned and fails on
+  current Debian images (`apt-key` removed).
+- **Editors**: the official dbt extension (dbt v2) and dbt Power User (dbt
+  Core, restricted to `v1/` by `dbt.allowListFolders`, running on
+  `/opt/dbt-v1/bin/python`). `redhat.vscode-yaml` is left out for this type,
+  as dbt Labs recommends. A root `.ignore` gives the worktrees back to
+  ripgrep-based search (VS Code, Claude Code), which `.gitignore` hides.
+- **SAP**: `sap-adt-mcp` is seeded as for the other SAP types (no SAP GUI
+  entry); `enable_ecc_stack` is now offered for `dbt-project` too.
+- **New copier questions**, asked for `dbt-project` only: `upstream_repo_url`
+  (required), `upstream_branch`, `dbt_project_subdir`, `bq_sandbox_project`,
+  `bq_sandbox_dataset`, `bq_dataset_prefix`, `bq_location`, `dbt_target_name`.
+- **Tests.** New `scripts/test-lib-dbt.sh`: about a hundred offline checks of the lifecycle
+  and of the write guard, on throwaway repositories with stubbed engines and
+  a fake `HOME`. `scripts/test-template-render.sh` now also covers the
+  `dbt-project` render and checks that nothing of it leaks into the other
+  types.
+
+### Changed
+
+- `dbt-project` is not a Python package: the shared `pyproject.toml`, `src/`,
+  `tests/`, `Dockerfile`, `.python-version` and CI workflow are skipped for it
+  through a templated `_exclude` in `copier.yml`.
+- Template-internal renames, without effect on rendered projects:
+  `post-start.sh` is now a Jinja template, and `CLAUDE.md`, `README.md` and
+  `justfile` each exist in two variants selected by a condition in their
+  file name.
+
+### Notes
+
+- **No behaviour change for the existing types.** For `mcp-server`,
+  `abap-project`, `fabric-pipeline` and `base`, every rendered file is
+  byte-identical to v0.11.0, except `.devcontainer/README.md`, which gains
+  the *dbt workspace* section.
+- The official dbt extension has no folder filter and shares `Ctrl/Cmd+Enter`
+  with dbt Power User. For one extension per window, open `v1/` or `v2/`
+  alone; `lib-dbt.sh` seeds the settings for that in each worktree.
+
 ## [0.11.0] — 2026-09-29
 
 ### Added

@@ -2,6 +2,19 @@
 {
   "mcpServers": {}
 }
+{%- elif project_type == "dbt-project" -%}
+{
+  "mcpServers": {
+    "sap-adt-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }{% if enable_ecc_stack | default(false) %},
+    "sap-adt-ecc": {
+      "type": "http",
+      "url": "http://127.0.0.1:8001/mcp"
+    }{% endif %}
+  }
+}
 {%- else -%}
 {
   "mcpServers": {

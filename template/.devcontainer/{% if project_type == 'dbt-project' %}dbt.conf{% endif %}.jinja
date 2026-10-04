@@ -1,0 +1,54 @@
+# =============================================================================
+# dbt workspace manifest — read by .devcontainer/lib-dbt.sh (lifecycle hooks,
+# dbt-run.sh, dbt-doctor.sh)
+#
+# This file is PROJECT-OWNED after the first render (copier _skip_if_exists):
+# edit it freely, `copier update` will never overwrite it.
+# Shell syntax: KEY="value", no space around '='. Apply a change: just setup
+# =============================================================================
+
+# --- Upstream: the dbt repository being taken over (read-only) ---------------
+DBT_UPSTREAM_URL="{{ upstream_repo_url }}"
+DBT_UPSTREAM_BRANCH="{{ upstream_branch }}"
+# Folder that holds dbt_project.yml inside that repository ('.' = its root,
+# empty = auto-detect, possible when it has a single dbt_project.yml)
+DBT_PROJECT_SUBDIR="{{ dbt_project_subdir }}"
+# 1 = no push to the upstream host can leave this container (global
+# pushInsteadOf + remote pushurl). Set to 0 only for the day a branch must be
+# delivered upstream, then put it back.
+DBT_UPSTREAM_PUSH_LOCK=1
+# 1 = fetch https://<upstream host>/… over SSH: private dbt packages hosted
+# next to the project are usually declared over HTTPS, which only CI can auth
+DBT_UPSTREAM_HTTPS_TO_SSH=1
+
+# --- Engines -----------------------------------------------------------------
+# v1 = dbt Core 1.x in the /opt/dbt-v1 venv, at the versions the project pins:
+# pyproject.toml, else requirements.txt, next to dbt_project.yml. Point at
+# another file (path relative to v1/), or give pins for a project that ships
+# none (e.g. "dbt-core~=1.10.0 dbt-bigquery~=1.10.0"):
+DBT_V1_REQUIREMENTS=""
+DBT_V1_FALLBACK_REQUIREMENTS=""
+DBT_V1_PYTHON="{{ python_version }}"
+# v2 = dbt v2 at ~/.local/bin/dbt, installed once per container build:
+# latest | stable | canary | an exact version (2.0.6). Never upgraded on a
+# restart — use `dbtf system update` or the dbt extension's prompt.
+DBT_V2_VERSION="latest"
+
+# --- BigQuery sandbox: the only place dbt may write --------------------------
+# Seeds profiles/profiles.yml (once) and arms the write guard of dbt-run.sh:
+# a run/build/seed/snapshot goes through only if every selected node resolves
+# to DBT_BQ_PROJECT — and to a dataset starting with DBT_BQ_DATASET_PREFIX,
+# when one is set. Empty project = no profile generated, every write refused.
+DBT_BQ_PROJECT="{{ bq_sandbox_project }}"
+DBT_BQ_DATASET="{{ bq_sandbox_dataset }}"
+DBT_BQ_DATASET_PREFIX="{{ bq_dataset_prefix }}"
+DBT_BQ_LOCATION="{{ bq_location }}"
+DBT_TARGET_NAME="{{ dbt_target_name }}"
+
+# --- Write guard opt-outs (leave at 0 until reviewed) ------------------------
+# run-operation executes arbitrary macros: refused unless 1
+DBT_ALLOW_RUN_OPERATION=0
+# pre/post-hooks and on-run-* run SQL outside any materialization, possibly
+# against a source. When the project has some, writes are refused until a
+# human has read them and set this to 1.
+DBT_HOOKS_REVIEWED=0

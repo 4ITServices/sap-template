@@ -1,0 +1,196 @@
+#!/bin/bash
+# =============================================================================
+# dbt-doctor.sh — health check of the dbt workspace (TEMPLATE-OWNED)
+# Updated by `copier update` — do not edit in projects.
+#
+# Checks, repairs nothing. Everything that lives in the container filesystem
+# (both engines, ~/.gitconfig, ~/.bashrc) is gone after a rebuild and must be
+# put back by the hooks: this script tells whether it is all there.
+#
+#   just doctor           fast and offline
+#   just doctor --deep    also parses v1/ and v2/ and asks Google for a token
+#
+# Repair: `just setup` (replays the lifecycle, idempotent).
+# Prints no secret: safe to paste as is.
+# =============================================================================
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="$(dirname "$HERE")"
+# shellcheck disable=SC1091
+source "$HERE/lib-dbt.sh"
+dbt_load_conf "$WS"
+
+DEEP=0
+[ "${1:-}" = "--deep" ] && DEEP=1
+PROBLEMS=0
+
+ok()   { echo "  ✅ $1"; }
+ko()   { echo "  ❌ $1  ->  $2"; PROBLEMS=$((PROBLEMS + 1)); }
+info() { echo "  ·  $1"; }
+
+echo "[tools]"
+for C in uv just git git-lfs gh gcloud bq tmux claude; do
+  command -v "$C" >/dev/null 2>&1 && ok "$C" || ko "$C not found" "rebuild the container (feature / post-create)"
+done
+
+echo "[engines]"
+V1="$(_dbt_v1_version 2>/dev/null)"
+if [ -x "$DBT_V1_VENV/bin/dbt" ] && [ -n "$V1" ]; then
+  case "$V1" in
+    1.*) ok "v1 = dbt Core $V1 ($DBT_V1_VENV)" ;;
+    *)   ko "v1 venv holds dbt $V1, not a 1.x" "check the pins of v1/, then: just setup" ;;
+  esac
+else
+  ko "v1 engine missing ($DBT_V1_VENV)" "just setup"
+fi
+[ "$(readlink -f "$DBT_BIN_DIR/dbt1" 2>/dev/null)" = "$(readlink -f "$DBT_V1_VENV/bin/dbt" 2>/dev/null)" ] \
+  && [ -x "$DBT_BIN_DIR/dbt1" ] && ok "dbt1 -> v1 engine" || ko "dbt1 command missing" "just setup"
+V2="$("$DBT_BIN_DIR/dbt" --version 2>/dev/null | head -1)"
+case "$V2" in
+  "dbt 2."*|"dbt-fusion 2."*) ok "v2 = $V2 ($DBT_BIN_DIR/dbt)" ;;
+  *) ko "v2 engine missing or not dbt v2 ('${V2:-no answer}')" "just setup" ;;
+esac
+[ -x "$DBT_BIN_DIR/dbtf" ] && ok "dbtf -> v2 engine" || ko "dbtf command missing" "just setup"
+# The official dbt extension looks for dbt v2 at this exact path
+[ "$(command -v dbt 2>/dev/null)" = "$DBT_BIN_DIR/dbt" ] \
+  && ok "\`dbt\` on PATH is the v2 binary (what the dbt extension expects)" \
+  || ko "\`dbt\` on PATH is '$(command -v dbt 2>/dev/null)'" "another dbt shadows $DBT_BIN_DIR/dbt"
+
+echo "[upstream — read-only]"
+HOST="$(_dbt_url_host "${DBT_UPSTREAM_URL:-}")"
+KH="$(_dbt_known_hosts)"
+if [ -z "$HOST" ]; then
+  ko "no upstream declared" "set DBT_UPSTREAM_URL in .devcontainer/dbt.conf"
+else
+  info "upstream: $DBT_UPSTREAM_URL (branch ${DBT_UPSTREAM_BRANCH:-main})"
+  if _dbt_url_is_ssh "$DBT_UPSTREAM_URL"; then
+    if [ -s "$KH" ]; then
+      ok "host key pinned: $(ssh-keygen -lf "$KH" 2>/dev/null | awk '{print $2" "$NF}' | paste -sd' ' -)"
+      git -C "$WS" ls-files --error-unmatch .devcontainer/upstream_known_hosts >/dev/null 2>&1 \
+        || ko "upstream_known_hosts is not committed" "check the fingerprints, then commit .devcontainer/upstream_known_hosts"
+    else
+      ko "no pinned host key for $HOST" "just setup (needs the network), then commit .devcontainer/upstream_known_hosts"
+    fi
+    git config --global --get core.sshCommand 2>/dev/null | grep -q upstream_known_hosts \
+      && ok "git uses the pinned key (core.sshCommand)" || ko "core.sshCommand not set" "just setup"
+  fi
+  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+    git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "git@$HOST:" \
+      && ok "push lock, global (pushInsteadOf)" || ko "global push lock missing" "just setup"
+    [ "$(git -C "$WS" config --get remote.upstream.pushurl 2>/dev/null)" = "DISABLED" ] \
+      && ok "push lock, remote (pushurl)" || ko "remote.upstream.pushurl not DISABLED" "just setup"
+    # prove it: this push can only fail, and fails before any network access
+    if git -C "$WS" push --dry-run upstream "HEAD:refs/heads/doctor-probe" >/dev/null 2>&1; then
+      ko "a push to upstream was ACCEPTED by git" "just setup — and do not push"
+    else
+      ok "a push to upstream is refused by git (tried, dry-run)"
+    fi
+  else
+    ko "push to upstream is UNLOCKED" "set DBT_UPSTREAM_PUSH_LOCK=1 in .devcontainer/dbt.conf, then: just setup"
+  fi
+fi
+
+echo "[worktrees]"
+for V in $DBT_WORKTREES; do
+  if _dbt_is_worktree "$WS/$V"; then
+    B="$(git -C "$WS/$V" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    ok "$V/ on branch $B ($(git -C "$WS/$V" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$WS/$V" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
+    git -C "$WS" worktree list --porcelain 2>/dev/null | awk -v p="$WS/$V" '$1=="worktree"{f=(substr($0,10)==p)} f&&$1=="locked"{found=1} END{exit !found}' \
+      && ok "$V/ locked against prune" || ko "$V/ not locked" "just setup"
+    if P="$(dbt_project_dir "$V")"; then
+      ok "$V dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
+    else
+      ko "$V: dbt_project.yml not found" "set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf"
+    fi
+  else
+    ko "$V/ is not a worktree" "just setup"
+  fi
+done
+BR="${DBT_UPSTREAM_BRANCH:-main}"
+if git -C "$WS" show-ref --verify --quiet "refs/remotes/upstream/$BR"; then
+  info "v1 is $(git -C "$WS" rev-list --count "v1..upstream/$BR" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "upstream/$BR..v1" 2>/dev/null) ahead of upstream/$BR (as last fetched: just upstream-pull)"
+  info "v2 is $(git -C "$WS" rev-list --count "v2..v1" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "v1..v2" 2>/dev/null) ahead of v1"
+else
+  info "upstream/$BR never fetched in this clone (branches came from origin): just upstream-pull"
+fi
+
+echo "[profile hub]"
+[ "${DBT_PROFILES_DIR:-}" = "$WS/profiles" ] \
+  && ok "DBT_PROFILES_DIR -> profiles/" \
+  || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only \`just v1|v2\`"
+NAME=""
+P1="$(dbt_project_dir v1)" && NAME="$(_dbt_profile_name "$P1")"
+if [ -f "$WS/profiles/profiles.yml" ]; then
+  if [ -n "$NAME" ] && grep -Eq "^['\"]?$NAME['\"]?:" "$WS/profiles/profiles.yml"; then
+    ok "profiles/profiles.yml declares '$NAME'"
+  else
+    ko "profiles/profiles.yml does not declare '${NAME:-?}'" "add it — dbt refuses to run without it"
+  fi
+else
+  ko "profiles/profiles.yml missing: dbt is locked" "fill DBT_BQ_PROJECT / DBT_BQ_DATASET in .devcontainer/dbt.conf, then: just setup"
+fi
+if [ -n "${DBT_BQ_PROJECT:-}" ]; then
+  ok "write guard: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, datasets $DBT_BQ_DATASET_PREFIX*}"
+else
+  ko "no sandbox declared: every write is refused" "set DBT_BQ_PROJECT in .devcontainer/dbt.conf"
+fi
+[ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
+
+echo "[BigQuery auth]"
+ACCT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
+[ -n "$ACCT" ] && ok "gcloud/bq CLI: $ACCT" || ko "gcloud/bq CLI not logged in" "just gcp-login"
+if [ -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
+  if [ "$DEEP" = 1 ]; then
+    timeout 30 gcloud auth application-default print-access-token --quiet >/dev/null 2>&1 \
+      && ok "ADC (dbt oauth): valid" || ko "ADC (dbt oauth): expired or refused" "just gcp-login"
+  else
+    ok "ADC (dbt oauth): present (validity: just doctor --deep)"
+  fi
+else
+  ko "ADC (dbt oauth) missing" "just gcp-login"
+fi
+
+echo "[editor]"
+for E in dbtlabsinc.dbt innoverio.vscode-dbt-power-user; do
+  if ls -d "$HOME"/.vscode-server*/extensions/"$E"-* >/dev/null 2>&1; then
+    ok "extension installed: $E"
+  else
+    info "extension $E not found under ~/.vscode-server*/extensions (other editor, or not installed yet)"
+  fi
+done
+info "an installed extension can still be DISABLED for this workspace: that state lives in the editor, not here"
+
+echo "[MCP servers]"
+if [ -f "$HERE/mcp-servers.conf" ]; then
+  while read -r N _ _ PORT _; do
+    case "$N" in ""|\#*) continue ;; esac
+    case "$PORT" in ""|-|*[!0-9]*) info "$N: no port to check"; continue ;; esac
+    curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/mcp" \
+      && ok "$N answering on 127.0.0.1:$PORT" \
+      || ko "$N not answering on 127.0.0.1:$PORT" "GITHUB_PERSONAL_ACCESS_TOKEN + SAP_* in .env, then restart the container"
+  done < "$HERE/mcp-servers.conf"
+fi
+
+if [ "$DEEP" = 1 ]; then
+  echo "[parse — offline]"
+  for V in $DBT_WORKTREES; do
+    OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"
+    if [ $? -eq 0 ]; then
+      ok "$V parses"
+    elif [ "$V" = "v2" ]; then
+      info "v2 does not parse yet — expected until the migration is done:"
+      printf '%s\n' "$OUT" | grep -E "Finished|error" | tail -n 2 | sed 's/^/       /'
+    else
+      ko "v1 does not parse" "just v1 parse"
+      printf '%s\n' "$OUT" | tail -n 5 | sed 's/^/       /'
+    fi
+  done
+fi
+
+echo
+if [ "$PROBLEMS" -eq 0 ]; then
+  echo "Workspace healthy."
+else
+  echo "$PROBLEMS problem(s) — most are fixed by: just setup"
+fi
+exit $(( PROBLEMS > 0 ))

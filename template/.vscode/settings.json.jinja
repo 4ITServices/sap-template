@@ -1,5 +1,15 @@
 {
   "workbench.colorCustomizations": {
     "activityBar.background": "{{ workspace_color }}"
-  }
+  }{% if project_type == "dbt-project" %},
+  "dbt.allowListFolders": ["v1"],
+  "dbt.dbtMajorVersion": "v2",
+  "files.watcherExclude": {
+    "**/v1/**/target/**": true,
+    "**/v1/**/dbt_packages/**": true,
+    "**/v1/**/logs/**": true,
+    "**/v2/**/target/**": true,
+    "**/v2/**/dbt_packages/**": true,
+    "**/v2/**/logs/**": true
+  }{% endif %}
 }

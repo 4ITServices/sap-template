@@ -1,0 +1,50 @@
+# {{ project_name }} — reprise dbt : v1 = dbt Core 1.x, v2 = dbt v2
+# ⚠ Arguments POSITIONNELS : `just v1 parse`, `just v2 compile -s mon_modele`
+
+set positional-arguments
+
+# Lister les recettes disponibles
+default:
+    @just --list
+
+# --- Container ----------------------------------------------------------------
+
+# État de santé du container — ne répare rien (--deep : parse v1/v2 + jeton Google)
+doctor *args:
+    @bash .devcontainer/dbt-doctor.sh "$@"
+
+# (Re)poser worktrees, moteurs, verrous git et hub de profils — idempotent
+setup:
+    @bash -c 'source .devcontainer/lib-dbt.sh && dbt_process "$PWD" create'
+
+# --- dbt (voie gardée : hub de profils imposé, écritures contrôlées) ----------
+
+# dbt Core 1.x sur v1/ : just v1 parse
+v1 *args:
+    @bash .devcontainer/dbt-run.sh v1 "$@"
+
+# dbt v2 sur v2/ : just v2 parse
+v2 *args:
+    @bash .devcontainer/dbt-run.sh v2 "$@"
+
+# Où v1 et v2 écriraient chaque modèle (hors ligne), et où ils divergent
+destinations:
+    @bash .devcontainer/dbt-run.sh destinations
+
+# --- Dépôt d'origine (lecture seule) ------------------------------------------
+
+# Récupérer la branche d'origine et rafraîchir son miroir sur origin (ne fusionne rien)
+upstream-pull:
+    @bash .devcontainer/dbt-run.sh upstream-pull
+
+# --- GCP / BigQuery -----------------------------------------------------------
+
+# Auth GCP : CLI (bq) puis ADC (dbt oauth) — conservée côté hôte (~/.config/gcloud)
+gcp-login:
+    gcloud auth login
+    gcloud auth application-default login
+
+# Qui est connecté (CLI + ADC)
+gcp-whoami:
+    @gcloud auth list 2>/dev/null || echo "gcloud non connecté"
+    @gcloud auth application-default print-access-token >/dev/null 2>&1 && echo "ADC (dbt oauth) : OK" || echo "ADC (dbt oauth) : absent ou expiré"

@@ -69,6 +69,19 @@ if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
   "$SAP_ADT_ECC_LAUNCHER" start
   mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
 fi
+{%- if project_type == "dbt-project" %}
+
+# =============================================================================
+# dbt workspace (template-managed — lib-dbt.sh + dbt.conf)
+# Self-healing: both engines, ~/.gitconfig (pinned host key, push lock) and
+# ~/.bashrc live in the container filesystem and are put back here; a
+# worktree that could not be created at build time (upstream unreachable) is
+# retried. Nothing is fetched nor upgraded once everything is in place.
+# =============================================================================
+echo ""
+source "$WORKSPACE_DIR/.devcontainer/lib-dbt.sh"
+dbt_process "$WORKSPACE_DIR" start
+{%- endif %}
 
 # =============================================================================
 # Project-specific checks (not managed by template — safe from copier update)

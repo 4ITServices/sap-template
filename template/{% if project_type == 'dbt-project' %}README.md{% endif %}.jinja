@@ -1,0 +1,88 @@
+{%- set sub = ('/' ~ dbt_project_subdir) if (dbt_project_subdir and dbt_project_subdir != '.') else '' -%}
+# {{ project_name }}
+
+{{ project_description }}
+
+Reprise du projet dbt `{{ upstream_repo_url }}` (branche `{{ upstream_branch }}`) : la
+version d'origine sous dbt Core 1.x et sa migration vers dbt v2 cohabitent
+dans le même container.
+
+```
+{{ project_name }}/        branche main : l'outillage seulement
+├── .devcontainer/         container, hooks, dbt.conf (manifeste du projet)
+├── profiles/              hub de profils dbt (bac à sable) + dbt.env
+├── v1/                    worktree, branche v1 — projet d'origine, dbt Core 1.x
+└── v2/                    worktree, branche v2 — migration dbt v2, puis refactoring
+```
+
+`v1/` et `v2/` sont deux branches de CE dépôt, extraites côte à côte par
+`git worktree`. Elles n'apparaissent qu'une fois le container démarré.
+
+## Prérequis sur l'hôte
+
+- VS Code + Dev Containers, Docker.
+- `~/.ssh` : une clé autorisée sur le dépôt d'origine (elle est montée en
+  lecture seule dans le container).
+- `~/.config/gcloud` : créé au besoin ; l'authentification Google y est
+  conservée et partagée entre les containers qui le montent.
+
+## Première ouverture
+
+1. Cloner ce dépôt, puis **avant** d'ouvrir le container, créer `.env` à partir
+   de `.env.example` et y renseigner `GITHUB_PERSONAL_ACCESS_TOKEN` (clone du
+   serveur MCP) et `SAP_PASSWORD`. Sans cela le container démarre quand même :
+   compléter `.env` puis redémarrer suffit, sans rebuild.
+2. VS Code → **Reopen in Container**. Le premier build installe gcloud, les
+   deux moteurs dbt et crée `v1/` et `v2/`.
+3. Dans le terminal du container :
+
+   ```bash
+   just doctor        # tout doit être ✅, sauf l'auth Google au tout premier passage
+   just gcp-login     # une fois par hôte : CLI (bq) puis ADC (dbt oauth)
+   ```
+
+4. **Reload Window** : les deux extensions dbt ne voient les projets qu'une
+   fois `v1/` et `v2/` présents.
+
+## Vérifier que tout fonctionne
+
+```bash
+just doctor --deep                  # + parse de v1 et v2, + jeton Google
+dbt1 --version                      # dbt Core 1.x (le projet d'origine)
+dbtf --version                      # dbt v2
+just v1 parse                       # doit passer
+just v2 parse                       # échoue tant que la migration n'est pas faite : c'est le point de départ
+just v1 compile -s <un_modele>      # premier aller-retour BigQuery, sans écriture
+just destinations                   # où chaque moteur écrirait
+```
+
+Côté éditeur :
+
+- Ouvrir un `.sql` de `v2{{ sub }}/models` : la barre d'état affiche
+  « dbt Extension » ; la vue *Lineage* (extension dbt Labs) suit le fichier.
+  Si elle propose d'activer le « v1 compatibility mode » : **Not now** (ce
+  réglage masquerait aussi les diagnostics de `v2/`).
+- Ouvrir un `.sql` de `v1{{ sub }}/models` : dbt Power User (icône dédiée dans
+  la barre d'activité) affiche son lignage, calculé par dbt Core.
+- `Ctrl/Cmd+P` trouve les modèles de `v1/` et `v2/` (fichier `.ignore`).
+
+Les deux extensions partagent `Ctrl/Cmd+Enter` : passer par leurs boutons, ou
+ouvrir `v1/` ou `v2/` dans une fenêtre dédiée (`code v1`, `code v2`), où une
+seule extension est active.
+
+## Travailler
+
+```bash
+just v1 <commande dbt>      # dbt Core 1.x sur v1/
+just v2 <commande dbt>      # dbt v2 sur v2/
+cd v2 && git status         # chaque worktree a son git : commits sur la branche v2
+git push -u origin v2       # vers CE dépôt — jamais vers l'origine (verrouillé)
+just upstream-pull          # nouveautés de l'origine + miroir upstream-{{ upstream_branch }}
+```
+
+Règles, verrous et méthode de migration : [`CLAUDE.md`](CLAUDE.md).
+Architecture du container : [`.devcontainer/README.md`](.devcontainer/README.md).
+
+## Auteur
+
+[{{ author_name }}](https://github.com/{{ github_org }}/{{ project_name }})

@@ -10,6 +10,9 @@
 # Puis claude_profile : vide = montage ~/.claude historique à l'identique ;
 # renseigné = ~/.claude-profiles/<profil> monté et créé par initializeCommand ;
 # devcontainer.json toujours valide (JSONC) ; un profil « ../x » est refusé.
+# Puis project_type=dbt-project : pas de squelette Python, l'outillage dbt
+# (lib-dbt.sh, dbt.conf, feature gcloud, hub de profils) présent et valide,
+# et rien de tout cela ne fuit dans les autres types.
 #
 # Copier rend depuis une réf git : par défaut HEAD du repo courant. Les fichiers
 # NON COMMITÉS ne sont pas pris en compte -> committez avant de tester, ou
@@ -124,6 +127,102 @@ if render false "$WORK/badprof" --data 'claude_profile=../x' >/dev/null 2>&1; th
 else
   pass "PROFIL: '../x' refusé par le validateur"
 fi
+
+echo "== project_type=dbt-project : reprise dbt (v1 + v2) =="
+DBT_URL='git@git.example.com:data/my-dwh.git'
+if render false "$WORK/dbt" --data project_type=dbt-project --data "upstream_repo_url=$DBT_URL" \
+     --data upstream_branch=prod --data dbt_project_subdir=dbt \
+     --data bq_sandbox_project=sandbox-prj --data bq_sandbox_dataset=JDOE_run \
+     --data bq_dataset_prefix=JDOE --data dbt_target_name=prd; then
+  D="$WORK/dbt"
+  # le type n'est pas un package Python : la racine ne porte que l'outillage
+  for absent in pyproject.toml .python-version Dockerfile src tests .github; do
+    [ -e "$D/$absent" ] && bad "DBT: $absent ne devrait PAS exister" || pass "DBT: pas de $absent"
+  done
+  if find "$D" -type d -empty | grep -q .; then bad "DBT: dossier vide généré"; find "$D" -type d -empty; else pass "DBT: aucun dossier vide"; fi
+  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh \
+                 .devcontainer/dbt.conf .devcontainer/features/google-cloud-cli/devcontainer-feature.json \
+                 .devcontainer/lib-mcp.sh .devcontainer/mcp-servers.conf .ignore profiles/dbt.env \
+                 justfile CLAUDE.md README.md .env.example; do
+    [ -f "$D/$present" ] && pass "DBT: $present présent" || bad "DBT: $present manquant"
+  done
+  [ -x "$D/.devcontainer/features/google-cloud-cli/install.sh" ] \
+    && pass "DBT: install.sh du feature gcloud exécutable" || bad "DBT: install.sh du feature gcloud non exécutable"
+  sh_ok=1
+  for f in "$D"/.devcontainer/*.sh "$D"/.devcontainer/features/google-cloud-cli/install.sh; do
+    bash -n "$f" 2>/dev/null || { bad "DBT: erreur de syntaxe bash dans ${f#"$D"/}"; sh_ok=0; }
+  done
+  [ "$sh_ok" -eq 1 ] && pass "DBT: tous les scripts passent bash -n"
+
+  # le manifeste du projet porte les réponses copier
+  conf_ok=1
+  for line in "DBT_UPSTREAM_URL=\"$DBT_URL\"" 'DBT_UPSTREAM_BRANCH="prod"' 'DBT_PROJECT_SUBDIR="dbt"' \
+              'DBT_BQ_PROJECT="sandbox-prj"' 'DBT_BQ_DATASET="JDOE_run"' 'DBT_BQ_DATASET_PREFIX="JDOE"' \
+              'DBT_BQ_LOCATION="EU"' 'DBT_TARGET_NAME="prd"' 'DBT_UPSTREAM_PUSH_LOCK=1'; do
+    grep -qxF "$line" "$D/.devcontainer/dbt.conf" || { bad "DBT: dbt.conf manque « $line »"; conf_ok=0; }
+  done
+  [ "$conf_ok" -eq 1 ] && pass "DBT: dbt.conf amorcé depuis les réponses (push verrouillé par défaut)"
+  ( set -u; . "$D/.devcontainer/dbt.conf" ) 2>/dev/null && pass "DBT: dbt.conf est du shell valide" || bad "DBT: dbt.conf non sourçable"
+
+  # devcontainer.json : gcloud côté hôte, verrou du hub de profils, les deux extensions
+  jsonc_ok "$D/$DC" && pass "DBT: devcontainer.json valide (JSONC)" || bad "DBT: devcontainer.json invalide"
+  grep -qF '"source=${localEnv:HOME}/.config/gcloud,target=/home/vscode/.config/gcloud,type=bind"' "$D/$DC" \
+    && pass "DBT: ~/.config/gcloud de l'hôte monté" || bad "DBT: montage gcloud absent"
+  grep -qxF '  "initializeCommand": "mkdir -p ${HOME}/.claude ${HOME}/.config/gcloud",' "$D/$DC" \
+    && pass "DBT: initializeCommand crée aussi la source du montage gcloud" || bad "DBT: initializeCommand ne crée pas ~/.config/gcloud"
+  grep -qF '"./features/google-cloud-cli": {}' "$D/$DC" && pass "DBT: feature gcloud LOCAL" || bad "DBT: feature gcloud absent"
+  grep -qE '^[[:space:]]*"ghcr\.io/dhoeric' "$D/$DC" && bad "DBT: feature dhoeric (abandonné) référencé" || pass "DBT: pas de feature dhoeric"
+  grep -qF '"DBT_PROFILES_DIR": "${containerWorkspaceFolder}/profiles",' "$D/$DC" \
+    && pass "DBT: DBT_PROFILES_DIR dans containerEnv (tous les processus)" || bad "DBT: verrou du hub absent de containerEnv"
+  grep -qF '"dbtLabsInc.dbt",' "$D/$DC" && grep -qF '"innoverio.vscode-dbt-power-user",' "$D/$DC" \
+    && pass "DBT: extension officielle + dbt Power User" || bad "DBT: extensions dbt absentes"
+  grep -qF '"redhat.vscode-yaml"' "$D/$DC" && bad "DBT: redhat.vscode-yaml installé (déconseillé avec l'extension dbt)" || pass "DBT: pas de redhat.vscode-yaml"
+  grep -qF '"dbt.dbtPythonPathOverride": "/opt/dbt-v1/bin/python",' "$D/$DC" \
+    && pass "DBT: dbt Power User branché sur le venv dbt Core" || bad "DBT: dbt.dbtPythonPathOverride absent"
+  python3 -c "import json,sys; d=json.load(open('$D/.vscode/settings.json')); sys.exit(0 if d['dbt.allowListFolders']==['v1'] and d['dbt.dbtMajorVersion']=='v2' else 1)" \
+    && pass "DBT: .vscode/settings.json — Power User cantonné à v1/" || bad "DBT: .vscode/settings.json inattendu"
+
+  # les hooks appellent le cycle de vie dbt, après les serveurs MCP
+  grep -qF 'dbt_process "$WORKSPACE_DIR" create' "$D/.devcontainer/post-create.sh" && pass "DBT: post-create lance le cycle dbt" || bad "DBT: post-create sans cycle dbt"
+  grep -qF 'dbt_process "$WORKSPACE_DIR" start' "$D/.devcontainer/post-start.sh" && pass "DBT: post-start rejoue le cycle dbt (self-healing)" || bad "DBT: post-start sans cycle dbt"
+
+  # v1/ et v2/ : ignorés par git, rendus aux outils de recherche
+  grep -qxF '/v1/' "$D/.gitignore" && grep -qxF '/v2/' "$D/.gitignore" && pass "DBT: .gitignore ignore v1/ et v2/" || bad "DBT: .gitignore n'ignore pas les worktrees"
+  grep -qxF '!/v1/' "$D/.ignore" && grep -qxF '!/v2/' "$D/.ignore" && pass "DBT: .ignore les rend à ripgrep" || bad "DBT: .ignore incomplet"
+
+  # MCP : SAP ADT seul (pas de VM SAP GUI)
+  python3 -c "import json,sys; d=json.load(open('$D/.mcp.json.example'))['mcpServers']; sys.exit(0 if list(d)==['sap-adt-mcp'] else 1)" \
+    && pass "DBT: .mcp.json.example — sap-adt-mcp seul" || bad "DBT: .mcp.json.example inattendu"
+  grep -q '^sap-adt-mcp ' "$D/.devcontainer/mcp-servers.conf" && pass "DBT: sap-adt-mcp dans mcp-servers.conf" || bad "DBT: sap-adt-mcp non semé"
+  grep -q "$DBT_URL" "$D/CLAUDE.md" && grep -q 'v1/dbt/' "$D/CLAUDE.md" && pass "DBT: CLAUDE.md interpolé (origine, dossier du projet)" || bad "DBT: CLAUDE.md non interpolé"
+  if grep -rlE '\{\{|\{%' "$D" 2>/dev/null | grep -q .; then
+    bad "DBT: marqueurs Jinja non résolus :"; grep -rlE '\{\{|\{%' "$D"
+  else pass "DBT: aucun marqueur Jinja non résolu (tous fichiers)"; fi
+else
+  bad "DBT: copier a échoué"
+fi
+if render false "$WORK/dbt-nourl" --data project_type=dbt-project >/dev/null 2>&1; then
+  bad "DBT: rendu accepté sans upstream_repo_url"
+else
+  pass "DBT: upstream_repo_url obligatoire"
+fi
+if render false "$WORK/dbt-badsub" --data project_type=dbt-project --data "upstream_repo_url=$DBT_URL" --data 'dbt_project_subdir=../x' >/dev/null 2>&1; then
+  bad "DBT: dbt_project_subdir « ../x » accepté"
+else
+  pass "DBT: dbt_project_subdir « ../x » refusé"
+fi
+
+echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
+for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/dbt.conf \
+            .devcontainer/features .ignore profiles; do
+  [ -e "$WORK/off/$leak" ] && bad "OFF: $leak ne devrait PAS exister" || pass "OFF: pas de $leak"
+done
+grep -qiE 'gcloud|DBT_|dbtLabs|power-user' "$WORK/off/$DC" && bad "OFF: devcontainer.json référence dbt/gcloud" || pass "OFF: devcontainer.json sans dbt ni gcloud"
+grep -q 'lib-dbt' "$WORK/off/.devcontainer/post-create.sh" "$WORK/off/.devcontainer/post-start.sh" \
+  && bad "OFF: les hooks référencent lib-dbt.sh" || pass "OFF: hooks sans cycle dbt"
+for kept in pyproject.toml Dockerfile src/render_test/__init__.py tests/__init__.py .github/workflows/ci.yml CLAUDE.md README.md justfile; do
+  [ -f "$WORK/off/$kept" ] && pass "OFF: $kept toujours généré" || bad "OFF: $kept a disparu"
+done
 
 echo "== Vérif marqueurs Jinja non résolus (les deux rendus) =="
 if grep -rlE '\{\{|\{%' "$WORK/off" "$WORK/on" --include='*.md' --include='*.conf' --include='*.toml' 2>/dev/null | grep -q .; then

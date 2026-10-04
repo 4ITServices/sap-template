@@ -26,7 +26,12 @@
 {%- else %}
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
 {%- endif %}
-    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"{% if project_type == "dbt-project" %},
+    // gcloud credentials live on the HOST: one `gcloud auth login` +
+    // `gcloud auth application-default login` (the ADC that dbt's
+    // `method: oauth` reads) survives every rebuild and is shared by all the
+    // containers mounting it. No service-account key ever enters the image.
+    "source=${localEnv:HOME}/.config/gcloud,target=/home/vscode/.config/gcloud,type=bind"{% endif %}
   ],
 
   "features": {
@@ -34,16 +39,20 @@
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers/features/git-lfs:1": {}{% if enable_iac %},
     "ghcr.io/devcontainers/features/azure-cli:1": {},
-    "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}
+    "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}{% if project_type == "dbt-project" %},
+    // gcloud + bq, installed from Google's apt repo by a LOCAL feature: the
+    // public ghcr.io/dhoeric one is abandoned and breaks on current Debian
+    // (it relies on the removed `apt-key`).
+    "./features/google-cloud-cli": {}{% endif %}
   },
 {%- if claude_profile %}
 
   // Host-side, before the container is created: the profile dir must exist,
   // since a missing bind source aborts `docker run --mount` (no auto-create).
-  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"",
+  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"{% if project_type == "dbt-project" %} \"${localEnv:HOME}/.config/gcloud\"{% endif %}",
 {%- else %}
 
-  "initializeCommand": "mkdir -p ${HOME}/.claude",
+  "initializeCommand": "mkdir -p ${HOME}/.claude{% if project_type == "dbt-project" %} ${HOME}/.config/gcloud{% endif %}",
 {%- endif %}
 
   "customizations": {
@@ -51,8 +60,17 @@
       "extensions": [
         "Anthropic.claude-code",
         "humao.rest-client",
+{%- if project_type == "dbt-project" %}
+        // No redhat.vscode-yaml here: dbt Labs recommends disabling it next to
+        // the dbt extension (it flags valid dbt YAML keys as errors).
+        // The official extension drives dbt v2; dbt Power User drives dbt Core
+        // 1.x and is scoped to v1/ (dbt.allowListFolders, .vscode/settings.json).
+        "dbtLabsInc.dbt",
+        "innoverio.vscode-dbt-power-user",
+{%- else %}
         "redhat.vscode-yaml",
         "ms-azuretools.vscode-azureresourcegroups",
+{%- endif %}
         "bierner.markdown-mermaid"{% if enable_iac %},
         "ms-azuretools.vscode-bicep"{% endif %}
       ],
@@ -87,7 +105,21 @@
         // + .env injection) — the main trigger of the relaunch prompt. The
         // project reads .env at runtime via pydantic-settings, not the shell.
         "python.terminal.activateEnvironment": false,
+{%- if project_type == "dbt-project" %}
+        // dbt Power User = the legacy engine only. It runs dbt Core 1.x through
+        // the /opt/dbt-v1 interpreter (its Python bridge) and gets the project
+        // env vars from profiles/dbt.env — the Python extension's envFile is
+        // the last layer applied to its dbt processes. The official extension
+        // finds dbt v2 at its default path ~/.local/bin/dbt: leave dbt.dbtPath
+        // unset so it can keep that binary in step with the extension.
+        "python.envFile": "${workspaceFolder}/profiles/dbt.env",
+        "python.defaultInterpreterPath": "/opt/dbt-v1/bin/python",
+        "dbt.dbtIntegration": "core",
+        "dbt.dbtPythonPathOverride": "/opt/dbt-v1/bin/python",
+        "dbt.installDepsOnProjectInitialization": false
+{%- else %}
         "python.envFile": ""
+{%- endif %}
       }
     }
   },
@@ -111,6 +143,14 @@
 
   "containerEnv": {
     "HOME": "/home/vscode",
-    "HISTFILE": "${containerWorkspaceFolder}/.bash_history"
+    "HISTFILE": "${containerWorkspaceFolder}/.bash_history"{% if project_type == "dbt-project" %},
+    // Profile hub lock: every process of the container (terminals, both dbt
+    // extensions, hooks, `docker exec`) resolves dbt profiles from the
+    // workspace hub, never from the profiles.yml shipped inside v1/ or v2/
+    // (those point at the real projects). dbt's lookup order is
+    // --profiles-dir > this variable > cwd > ~/.dbt, so a profile missing
+    // from the hub is an error, not a fallback.
+    "DBT_PROFILES_DIR": "${containerWorkspaceFolder}/profiles",
+    "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"{% endif %}
   }
 }

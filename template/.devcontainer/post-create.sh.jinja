@@ -157,6 +157,17 @@ if [ -f "$WORKSPACE_DIR/.env" ]; then
 fi
 source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
 mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" create
+{%- if project_type == "dbt-project" %}
+
+# =============================================================================
+# dbt workspace (template-managed — lib-dbt.sh + dbt.conf): upstream access
+# and push lock, v1/ + v2/ worktrees, dbt Core 1.x and dbt v2 side by side,
+# sandbox profile hub
+# =============================================================================
+echo ""
+source "$WORKSPACE_DIR/.devcontainer/lib-dbt.sh"
+dbt_process "$WORKSPACE_DIR" create
+{%- endif %}
 
 # =============================================================================
 # 10. Project-specific setup (not managed by template — safe from copier update)
