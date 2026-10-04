@@ -245,6 +245,37 @@ has "$O" "only in v2: model b" && pass "un modèle présent d'un seul côté est
 cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
 
 # =============================================================================
+echo "== Doctor : ce que le serveur VS Code du container a installé et activé =="
+DOC() { ( cd "$WS" && bash .devcontainer/dbt-doctor.sh ) 2>/dev/null | sed -n '/^\[editor/,/^\[MCP/p'; }
+O="$(DOC)"; has "$O" "no VS Code server in this container" && pass "pas de serveur VS Code : dit, sans erreur" || bad "absence de serveur VS Code mal gérée ($O)"
+X="$HOME/.vscode-server/extensions"; LG="$HOME/.vscode-server/data/logs/20260101T000000/exthost1"
+mkdir -p "$X/dbtlabsinc.dbt-0.111.0" "$X/innoverio.vscode-dbt-power-user-0.64.7" "$X/innoverio.vscode-dbt-power-user-0.60.0" "$LG"
+echo '{"name":"dbt"}' > "$X/dbtlabsinc.dbt-0.111.0/package.json"
+echo '{"name":"pu","extensionDependencies":["ms-python.python","samuelcolvin.jinjahtml"]}' > "$X/innoverio.vscode-dbt-power-user-0.64.7/package.json"
+reg() { printf '[%s]\n' "$1" > "$X/extensions.json"; }
+E_DBT='{"identifier":{"id":"dbtlabsinc.dbt"},"version":"0.111.0","relativeLocation":"dbtlabsinc.dbt-0.111.0"}'
+E_PU='{"identifier":{"id":"innoverio.vscode-dbt-power-user"},"version":"0.64.7","relativeLocation":"innoverio.vscode-dbt-power-user-0.64.7"}'
+E_PY='{"identifier":{"id":"ms-python.python"},"version":"1.0.0","relativeLocation":"x"},{"identifier":{"id":"samuelcolvin.jinjahtml"},"version":"1.0.0","relativeLocation":"y"}'
+echo "2026-01-01 00:00:01.000 [info] ExtensionService#_doActivateExtension dbtLabsInc.dbt, startup: false, activationEvent: 'workspaceContains:**/dbt_project.yml'" > "$LG/remoteexthost.log"
+
+reg "$E_DBT"
+O="$(DOC)"
+has "$O" "✅ dbtLabsInc.dbt 0.111.0 installed in the container" && pass "extension inscrite au registre du serveur : installée (version lue)" || bad "extension inscrite non reconnue ($O)"
+has "$O" "✅ dbtLabsInc.dbt active in the last VS Code window (activated on workspaceContains:**/dbt_project.yml)" && pass "…et son activation est lue dans le journal de la fenêtre" || bad "activation non lue ($O)"
+has "$O" "❌ innoverio.vscode-dbt-power-user is NOT installed in the container — a leftover folder is there" && pass "dossier présent mais absent du registre : NON installée (l'ancien contrôle disait oui)" || bad "dossier orphelin pris pour une installation ($O)"
+reg "$E_DBT,$E_PU"
+O="$(DOC)"
+has "$O" "✅ innoverio.vscode-dbt-power-user 0.64.7 installed" && pass "seconde extension inscrite : installée" || bad "seconde extension non reconnue"
+has "$O" "cannot start: it depends on ms-python.python, samuelcolvin.jinjahtml" && pass "…dépendances manquantes : signalées (lues dans son package.json)" || bad "dépendances manquantes non signalées ($O)"
+reg "$E_DBT,$E_PU,$E_PY"
+O="$(DOC)"
+refute "dépendances présentes : plus de signalement" grep -q "cannot start" <<<"$O"
+has "$O" "innoverio.vscode-dbt-power-user did NOT start in the last VS Code window" && pass "installée mais jamais activée : dit, avec les deux causes possibles" || bad "non-activation non signalée ($O)"
+echo "2026-01-01 00:00:02.000 [error] Activating extension 'innoverio.vscode-dbt-power-user' failed: boom" >> "$LG/remoteexthost.log"
+O="$(DOC)"; has "$O" "❌ innoverio.vscode-dbt-power-user was activated and FAILED" && pass "activation en échec : signalée" || bad "échec d'activation non signalé ($O)"
+rm -rf "$HOME/.vscode-server"
+
+# =============================================================================
 echo "== Clone neuf : les branches viennent d'origin, sans l'upstream =="
 git -C "$WS" push -q origin v1 v2 2>/dev/null
 WS2="$W/ws2"; make_ws "$WS2"; conf "$WS2"

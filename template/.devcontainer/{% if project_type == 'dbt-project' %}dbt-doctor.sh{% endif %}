@@ -150,15 +150,74 @@ else
   ko "ADC (dbt oauth) missing" "just gcp-login"
 fi
 
-echo "[editor]"
-for E in dbtlabsinc.dbt innoverio.vscode-dbt-power-user; do
-  if ls -d "$HOME"/.vscode-server*/extensions/"$E"-* >/dev/null 2>&1; then
-    ok "extension installed: $E"
-  else
-    info "extension $E not found under ~/.vscode-server*/extensions (other editor, or not installed yet)"
-  fi
-done
-info "an installed extension can still be DISABLED for this workspace: that state lives in the editor, not here"
+echo "[editor — what the VS Code server of this container knows]"
+# Read from the server's own files, not guessed from folder names:
+#   extensions/extensions.json      the registry of what is installed HERE (a
+#                                   folder left behind by an older version is not)
+#   data/logs/<session>/exthost*/   what the last window actually activated
+# The Extensions view also lists what is installed on the local machine: in a
+# container window those copies do not run, only the "Dev Container" list does.
+EXT_DIR="$(ls -dt "$HOME"/.vscode-server*/extensions 2>/dev/null | head -1)"
+if [ -z "$EXT_DIR" ] || [ ! -f "$EXT_DIR/extensions.json" ]; then
+  info "no VS Code server in this container (~/.vscode-server*): nothing to check from here"
+else
+  SESSION="$(ls -dt "${EXT_DIR%/extensions}"/data/logs/*/ 2>/dev/null | head -1)"
+  # shellcheck disable=SC2086
+  while IFS="$(printf '\t')" read -r KIND MSG FIX; do
+    case "$KIND" in
+      OK) ok "$MSG" ;;
+      KO) ko "$MSG" "$FIX" ;;
+      *)  info "$MSG" ;;
+    esac
+  done < <(python3 - "$EXT_DIR" "${SESSION:-}" ${DBT_DOCTOR_EXTENSIONS:-dbtLabsInc.dbt innoverio.vscode-dbt-power-user} <<'PY'
+import glob, json, os, re, sys
+
+ext_dir, session, wanted = sys.argv[1], sys.argv[2], sys.argv[3:]
+try:
+    registry = {e["identifier"]["id"].lower(): e for e in json.load(open(os.path.join(ext_dir, "extensions.json")))}
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    print(f"KO\tcannot read {ext_dir}/extensions.json ({exc})\treload the VS Code window")
+    sys.exit(0)
+
+log = ""
+for path in sorted(glob.glob(os.path.join(session, "exthost*", "remoteexthost.log"))) if session else []:
+    try:
+        log += open(path, errors="replace").read()
+    except OSError:
+        pass
+
+def folder(entry):
+    rel = entry.get("relativeLocation") or os.path.basename((entry.get("location") or {}).get("path", ""))
+    return os.path.join(ext_dir, rel)
+
+for ext in wanted:
+    entry = registry.get(ext.lower())
+    if not entry or not os.path.isdir(folder(entry)):
+        left = " — a leftover folder is there, but the server does not count it" if glob.glob(os.path.join(ext_dir, ext.lower() + "-*")) else ""
+        print(f"KO\t{ext} is NOT installed in the container{left}\tcode --install-extension {ext}   (or Extensions view: Install in Dev Container)")
+        continue
+    print(f"OK\t{ext} {entry.get('version', '?')} installed in the container")
+    try:
+        needs = json.load(open(os.path.join(folder(entry), "package.json"))).get("extensionDependencies") or []
+    except (OSError, ValueError):
+        needs = []
+    missing = [d for d in needs if d.lower() not in registry]
+    if missing:
+        print(f"KO\t{ext} cannot start: it depends on {', '.join(missing)}, not installed in the container\tcode --install-extension {missing[0]}")
+    name = re.escape(ext)
+    events = re.findall(r"_doActivateExtension " + name + r",[^\n]*activationEvent: '([^']*)'", log, flags=re.I)
+    if re.search(r"Activating extension '?" + name + r"'? failed", log, flags=re.I):
+        print(f"KO\t{ext} was activated and FAILED\tread the error in {session}exthost*/remoteexthost.log")
+    elif events:
+        print(f"OK\t{ext} active in the last VS Code window (activated on {events[-1]})")
+    elif log:
+        print(f"INFO\t{ext} did NOT start in the last VS Code window: it is disabled for this workspace (Extensions view: Enable (Workspace); Restricted Mode disables it too), or the window opened before v1/ and v2/ existed (Reload Window)")
+    else:
+        print(f"INFO\tno window log yet: cannot tell whether {ext} started")
+PY
+)
+  info "seeing them only under LOCAL in the Extensions view is normal for the copies on your machine; the list that counts is the Dev Container one (same answer: code --list-extensions)"
+fi
 
 echo "[MCP servers]"
 if [ -f "$HERE/mcp-servers.conf" ]; then

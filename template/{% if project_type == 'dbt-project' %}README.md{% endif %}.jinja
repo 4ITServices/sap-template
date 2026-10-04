@@ -57,7 +57,12 @@ just v1 compile -s <un_modele>      # premier aller-retour BigQuery, sans écrit
 just destinations                   # où chaque moteur écrirait
 ```
 
-Côté éditeur :
+Côté éditeur. La vue Extensions a deux listes, *Local* (ton poste) et *Dev
+Container* : les extensions dbt tournent dans le container, c'est donc la
+seconde qui compte — les copies installées sur ton poste y restent inactives.
+`just doctor` lit dans le serveur VS Code du container ce qui y est installé
+et ce que la fenêtre a réellement activé (`code --list-extensions` donne la
+même liste).
 
 - Ouvrir un `.sql` de `v2{{ sub }}/models` : la barre d'état affiche
   « dbt Extension » ; la vue *Lineage* (extension dbt Labs) suit le fichier.
