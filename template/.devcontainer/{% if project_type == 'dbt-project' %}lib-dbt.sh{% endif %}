@@ -703,5 +703,10 @@ dbt_process() {
   fi
   echo "[dbt] BigQuery auth..."
   dbt_gcloud_status
+  if [ "$MODE" = "create" ]; then
+    # the dbt extensions looked for projects and engines when the window
+    # opened, i.e. before this hook had put them (back) in place
+    echo "[dbt] ready -> reload the VS Code window (Developer: Reload Window) so both dbt extensions see v1/, v2/ and the engines"
+  fi
   return 0
 }

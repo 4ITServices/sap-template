@@ -41,8 +41,9 @@ dans le même container.
    just gcp-login     # une fois par hôte : CLI (bq) puis ADC (dbt oauth)
    ```
 
-4. **Reload Window** : les deux extensions dbt ne voient les projets qu'une
-   fois `v1/` et `v2/` présents.
+4. **Reload Window** : les deux extensions dbt cherchent projets et moteurs à
+   l'ouverture de la fenêtre, donc avant que le hook les ait posés. À refaire
+   après chaque rebuild (les moteurs vivent dans le container).
 
 ## Vérifier que tout fonctionne
 

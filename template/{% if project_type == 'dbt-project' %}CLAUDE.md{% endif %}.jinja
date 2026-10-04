@@ -140,6 +140,12 @@ un simple restart du container répare.
   l'outillage (`main`) est manipulable.
 - **`dbt` dans un terminal est une fonction shell** (moteur selon le dossier).
   Dans un script ou une recette : `dbt1`, `dbtf`, ou `bash .devcontainer/dbt-run.sh`.
+- **`profiles/dbt.env` n'atteint pas `dbt1` nu.** dbt v2 lit le `.env` du
+  dossier du projet (un lien vers `profiles/dbt.env`), dbt Core 1.x non : seul
+  `just v1 …` (ou `dbt` dans `v1/`) lui donne ces variables. Un `env_var()` qui
+  retombe sur sa valeur par défaut change les sources lues, sans erreur.
+- **Après un rebuild, « Reload Window »** : les extensions dbt démarrent avant
+  que le hook ait reposé les moteurs.
 - **dbt v2 `deps` réécrit `package-lock.yml`** (il re-résout les versions) :
   c'est un changement à committer dans `v2`, pas un effet de bord à ignorer.
 - **`maximum_bytes_billed` ne plafonne pas le DDL.** Essai court avant course longue.
