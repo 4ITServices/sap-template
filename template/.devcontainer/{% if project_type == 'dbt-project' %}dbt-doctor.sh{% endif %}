@@ -179,7 +179,7 @@ if [ "$DEEP" = 1 ]; then
       ok "$V parses"
     elif [ "$V" = "v2" ]; then
       info "v2 does not parse yet — expected until the migration is done:"
-      printf '%s\n' "$OUT" | grep -E "Finished|error" | tail -n 2 | sed 's/^/       /'
+      printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'
     else
       ko "v1 does not parse" "just v1 parse"
       printf '%s\n' "$OUT" | tail -n 5 | sed 's/^/       /'

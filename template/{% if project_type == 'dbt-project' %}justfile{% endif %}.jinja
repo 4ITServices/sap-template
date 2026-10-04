@@ -11,7 +11,7 @@ default:
 
 # État de santé du container — ne répare rien (--deep : parse v1/v2 + jeton Google)
 doctor *args:
-    @bash .devcontainer/dbt-doctor.sh "$@"
+    @-bash .devcontainer/dbt-doctor.sh "$@"
 
 # (Re)poser worktrees, moteurs, verrous git et hub de profils — idempotent
 setup:
