@@ -75,6 +75,31 @@ and commit messages; this changelog starts at v0.8.12.
   `dbt-project` render and checks that nothing of it leaks into the other
   types.
 
+- **New `dbt-fleet` project type: several data products in one repository,
+  to migrate and refactor them together.** The dbt-project engine
+  (`lib-dbt.sh`, `dbt-run.sh`, `dbt-doctor.sh`) now works on a *current
+  product*: the single product of a dbt-project, or each line of the
+  project-owned `.devcontainer/products.conf` in a fleet. Per product:
+  worktrees `v1/<product>/` and `v2/<product>/` on branches `<product>/v1`
+  and `<product>/v2`, remote `up-<product>` (push-locked), mirror
+  `<product>/upstream` on origin.
+  - **One dbt Core version for every v1** (`DBT_V1_PINS`, copier question
+    `fleet_v1_pins`, default `dbt-core==1.11.11 dbt-bigquery==1.11.1`):
+    dbt Power User has one interpreter per window. `just doctor` lists the
+    products whose own pins still differ.
+  - **`global/`**, a dbt v2 project seeded once, pulls in the v2 of the
+    products flagged `GLOBAL` as local packages (managed block of
+    `global/packages.yml`, rewritten at each start). A naming macro gives
+    each product its own dataset namespace; writes are refused on relations
+    that two nodes would write, and `just destinations global` lists them.
+  - `just product-add`, `just products`, and every recipe takes the product:
+    `just v1 <product> …`, `just v2 <product> …`, `just global …`.
+  - Copier: a computed `dbt_workspace` flag (not stored in the answers)
+    selects the files shared by both dbt types; `fleet_v1_pins` is asked for
+    `dbt-fleet` only, the sandbox questions for both.
+- **Tests**: 47 offline fleet checks in `scripts/test-lib-dbt.sh` (173 in
+  all), and a `dbt-fleet` render in `scripts/test-template-render.sh`.
+
 ### Fixed (on the unreleased dbt-project type)
 
 - **The write guard now sees the hooks of installed packages.** It only

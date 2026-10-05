@@ -69,7 +69,7 @@ if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
   "$SAP_ADT_ECC_LAUNCHER" start
   mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
 fi
-{%- if project_type == "dbt-project" %}
+{%- if dbt_workspace %}
 
 # =============================================================================
 # dbt workspace (template-managed — lib-dbt.sh + dbt.conf)

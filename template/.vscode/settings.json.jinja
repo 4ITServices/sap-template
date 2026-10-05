@@ -1,7 +1,7 @@
 {
   "workbench.colorCustomizations": {
     "activityBar.background": "{{ workspace_color }}"
-  }{% if project_type == "dbt-project" %},
+  }{% if dbt_workspace %},
   "dbt.allowListFolders": ["v1"],
   "dbt.dbtMajorVersion": "v2",
   "files.watcherExclude": {
@@ -10,6 +10,9 @@
     "**/v1/**/logs/**": true,
     "**/v2/**/target/**": true,
     "**/v2/**/dbt_packages/**": true,
-    "**/v2/**/logs/**": true
+    "**/v2/**/logs/**": true{% if project_type == "dbt-fleet" %},
+    "**/global/target/**": true,
+    "**/global/dbt_packages/**": true,
+    "**/global/logs/**": true{% endif %}
   }{% endif %}
 }

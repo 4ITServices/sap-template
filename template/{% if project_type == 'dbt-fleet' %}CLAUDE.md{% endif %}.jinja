@@ -1,0 +1,171 @@
+# {{ project_name }} — Instructions Claude Code (SYNKRONIC)
+
+## Contexte Projet
+
+**Nom** : `{{ project_name }}`
+**Type** : `dbt-fleet`
+**Description** : {{ project_description }}
+**Stack** : une flotte de data products dbt BigQuery — dbt Core commun (venv `/opt/dbt-v1`) et dbt v2 (`~/.local/bin/dbt`), gcloud/bq, uv, just
+
+## Ce que contient ce dépôt
+
+Plusieurs projets dbt repris de leurs dépôts d'origine (déclarés dans
+`.devcontainer/products.conf`), chacun en deux versions, plus un projet qui
+réunit leurs v2 pour le refactoring croisé :
+
+| Dossier | Branche | Moteur | Rôle |
+|---|---|---|---|
+| `v1/<produit>/` | `<produit>/v1` | dbt Core commun — `dbt1` | le projet d'origine : la référence |
+| `v2/<produit>/` | `<produit>/v2` | dbt v2 — `dbtf` | la migration, puis le refactoring du produit |
+| `global/` | `main` | dbt v2 | les v2 marqués `GLOBAL` en packages locaux, et les modèles partagés |
+
+La branche `main` porte l'outillage et `global/`. Le code de chaque produit vit
+dans ses deux worktrees, ignorés par `main` : chaque worktree a son propre
+`git status`, sa branche et ses commits.
+
+Branches par produit :
+
+- `up-<produit>/<branche>` — le dépôt d'origine, en lecture seule (remote `up-<produit>`) ;
+- `<produit>/upstream` (sur `origin`) — son miroir exact ; `just upstream-pull <produit>` le rafraîchit ;
+- `<produit>/v1` — part du miroir ; n'y committer que ce que la migration exige côté 1.x ;
+- `<produit>/v2` — part de `<produit>/v1` ; migration, puis refactoring.
+
+**Une seule version de dbt Core pour toutes les v1** (`DBT_V1_PINS`, dans
+`.devcontainer/dbt.conf`) : dbt Power User n'a qu'un interpréteur par fenêtre.
+Un produit qui épingle une autre version tourne quand même sur celle-ci ;
+`just doctor` liste les montées de version à committer dans `<produit>/v1`, une
+fois le SQL compilé vérifié identique.
+
+## Règles absolues
+
+1. **Aucun push vers un dépôt d'origine.** Deux verrous git par hôte le rendent
+   impossible ; ne jamais les retirer ni les contourner. Livrer une branche à
+   l'origine est une décision humaine, prise hors session.
+2. **BigQuery — écriture confinée au bac à sable**
+{%- if bq_sandbox_project %} : le seul projet où l'on écrit est `{{ bq_sandbox_project }}`
+{%- if bq_dataset_prefix %}, dans des datasets préfixés `{{ bq_dataset_prefix }}`{% endif %}.
+{%- else %} déclaré dans `.devcontainer/dbt.conf` (`DBT_BQ_PROJECT`). Tant qu'il est
+   vide, aucune écriture n'est possible.
+{%- endif %}
+   Partout ailleurs : lecture seule stricte (`SELECT`, `bq ls/show`, `--dry_run`,
+   `INFORMATION_SCHEMA`). Les droits IAM du compte ne protègent de rien : c'est
+   cette règle qui protège. En cas de doute sur la cible d'une écriture : demander.
+3. **dbt s'invoque par `just v1 <produit> …`, `just v2 <produit> …`, `just global …`**
+   (ou `dbt` depuis le dossier du projet, qui passe par le même garde-fou).
+   `dbt1` et `dbtf` sont les moteurs bruts, sans garde-fou d'écriture.
+4. **Un moteur par worktree** : jamais dbt v2 dans `v1/`, jamais dbt Core dans
+   `v2/` ni dans `global/` — chacun écrit son `target/manifest.json`.
+5. **`v1/<produit>/` reste fidèle à l'origine.** Le refactoring se fait dans
+   `v2/` et `global/`.
+6. **Un modèle partagé vit dans `global/`**, pas dans un produit : un produit ne
+   lit jamais le code d'un autre produit par un chemin de fichier.
+7. Ne jamais committer `.env`, `.mcp.json`, `*.pem`.
+8. Activer TOUJOURS après `setObjectSource` (MCP ADT).
+
+## Les verrous (ne jamais en retirer un)
+
+| # | Verrou | Où |
+|---|---|---|
+| 1 | `DBT_PROFILES_DIR` → `profiles/` pour TOUT processus du container : les `profiles.yml` embarqués dans les produits (ils visent les vrais projets) ne sont jamais lus. Profil absent du hub = erreur, pas repli. | `devcontainer.json` (`containerEnv`), `~/.bashrc` |
+| 2 | Hub `profiles/profiles.yml` : un profil par nom demandé par les produits et par `global/`, tous vers le bac à sable. Le cycle de vie ajoute ceux qui manquent. | `profiles/` |
+| 3 | Garde-fou de `dbt-run.sh` : une écriture exige une sélection dont chaque nœud se résout dans le bac à sable ; dans `global/`, aucune table écrite par deux nœuds. `run-operation` refusé. Tant que `DBT_HOOKS_REVIEWED` vaut 0, toute commande qui exécuterait des hooks (projet ou packages) est refusée — sous dbt v2, `compile` et `show` compris. | `.devcontainer/dbt-run.sh`, `dbt.conf` |
+| 4 | Push vers chaque hôte d'origine impossible, même par URL explicite : `pushInsteadOf` global + `remote.up-<produit>.pushurl DISABLED`. | `.devcontainer/lib-dbt.sh` |
+
+Les boutons Run/Build/Preview des extensions dbt n'ont que les verrous 1, 2 et 4.
+
+## Le projet global
+
+`global/packages.yml` contient un bloc géré : un `local:` par produit marqué
+`GLOBAL` dans `products.conf` (et dont la v2 existe). dbt v2 installe les
+packages locaux en **liens symboliques** : ce que l'on modifie dans
+`v2/<produit>/` est vu tout de suite par `global/`.
+
+Nommage des datasets dans `global/` (`macros/generate_schema_name.sql`) : un
+espace de noms par produit, `<PREFIXE>_<PACKAGE>__<dataset>`, pour que deux
+produits qui portent les mêmes noms en production ne s'écrasent pas dans le bac
+à sable. ⚠ Un produit qui définit sa propre `generate_schema_name` la garde
+pour ses nœuds (constaté avec dbt 2.0.6) : elle doit lire `DATASET_PREFIX`
+pour tomber sous le préfixe personnel. `just destinations global` montre ce qui
+ne le fait pas, et les tables écrites par deux nœuds.
+
+`dispatch` et `flags` d'un package sont ignorés : seuls ceux de `global/`
+comptent. Un produit qui dépend d'un `dispatch` (macros de package qui
+surchargent celles de dbt) se comporte autrement dans `global/` que seul.
+
+## Cycle de travail
+
+```bash
+just doctor                         # état de toute la flotte
+just products                       # produits et worktrees
+just v1 <produit> parse             # dbt Core commun, hors ligne
+just v2 <produit> parse             # dbt v2, hors ligne
+just global parse                   # les v2 réunis
+just destinations <produit>         # v1 vs v2 : où chaque modèle serait écrit
+just destinations global            # espaces de noms et collisions du global
+just upstream-pull [<produit>]      # nouveautés de l'origine (lecture seule) + miroir
+just product-add <nom> <url-git> [branche] [dossier] [global]
+```
+
+Git se fait dans le worktree concerné : `cd v2/<produit> && git commit`, puis
+`git push -u origin <produit>/v2`. Reprendre l'origine :
+`cd v1/<produit> && git merge up-<produit>/<branche>`, puis
+`cd ../../v2/<produit> && git merge <produit>/v1`.
+
+## Migration v1 → v2 d'un produit (méthode)
+
+1. **v1 sans dépréciation**, sur la version commune :
+   `just v1 <produit> parse --show-all-deprecations --no-partial-parse`.
+2. **Corrections mécaniques** : `uvx dbt-autofix deprecations --path v2/<produit>/<dossier>`,
+   puis RELIRE le diff. Piège vérifié : dbt-autofix range sous `config:` une clé
+   jusque-là ignorée, qui devient alors ACTIVE. `just destinations <produit>`
+   après chaque passe : zéro écart inattendu.
+3. `just v2 <produit> parse` puis `compile`, comparés à v1.
+4. Seulement alors : `GLOBAL yes` dans `products.conf`, puis `just setup`.
+
+## Les deux extensions dbt
+
+- **dbt (dbt Labs)** pilote dbt v2 : `v2/*` et `global/`. Un serveur de langage
+  par projet, démarré à l'ouverture d'un de ses fichiers.
+- **dbt Power User** pilote dbt Core et ne voit que `v1/` (`dbt.allowListFolders`).
+
+⚠ L'extension officielle exécute de vraies requêtes BigQuery :
+`Ctrl/Cmd+Entrée` (« dbt: Preview File »), et « Compare (Beta) » lance un
+`dbt run` sans le dire (constaté sur 0.111.0). Pour les éviter : passer par
+`just`.
+
+## MCP SAP
+
+| Serveur | Emplacement | Transport | Usage |
+|---|---|---|---|
+| `sap-adt-mcp` | `/opt/sap-adt-mcp` (via `.devcontainer/mcp-servers.conf`) | streamable-http `127.0.0.1:8000/mcp` | ADT REST API — vues CDS, activation, transports |
+{%- if enable_ecc_stack %}
+| `sap-adt-ecc` | `/opt/sap-adt-mcp` (2ᵉ instance, si `.env.ecc` existe) | streamable-http `127.0.0.1:8001/mcp` | idem, ciblant SAP ECC EHP8 (NW 7.50) |
+{%- endif %}
+
+## Pièges connus
+
+- **`~/.gitconfig`, `~/.bashrc`, les deux moteurs vivent dans le FS du
+  container** : reposés par les hooks à chaque rebuild (`just setup` les rejoue).
+- **Les worktrees n'existent que dans le container** : leurs liens git sont des
+  chemins du container, verrouillés contre le `prune`.
+- **`dbt` dans un terminal est une fonction shell** (moteur et produit selon le
+  dossier). Dans un script : `dbt1`, `dbtf`, ou `bash .devcontainer/dbt-run.sh`.
+- **dbt v2 `deps` (et son premier `parse`) réécrit `package-lock.yml`** : un
+  changement à committer dans la branche v2 du produit.
+- **Sous dbt v2, `compile` et `show` exécutent les hooks `on-run-start`**.
+- **`profiles/dbt.env` sert toute la flotte** ; `profiles/env/<produit>.env`
+  le complète pour un produit (chargé par `just`, et lu par dbt v2 via le
+  `.env` de son dossier).
+- **`maximum_bytes_billed` ne plafonne pas le DDL.**
+
+## Commandes essentielles
+
+```bash
+just doctor / setup               # diagnostiquer / reposer l'environnement
+just products / product-add       # la flotte
+just v1 … / just v2 … / just global …
+just destinations [<produit>|global]
+just upstream-pull [<produit>]
+just gcp-login / gcp-whoami
+just                              # lister toutes les recettes
+```

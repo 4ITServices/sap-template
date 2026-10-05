@@ -1,0 +1,69 @@
+# {{ project_name }}
+
+{{ project_description }}
+
+Une flotte de data products dbt BigQuery repris de leurs dépôts d'origine :
+pour chacun, la version d'origine sur une version de dbt Core **commune**, sa
+migration vers dbt v2, et un projet `global/` qui réunit les v2 pour le
+refactoring croisé.
+
+```
+{{ project_name }}/         branche main : l'outillage et global/
+├── .devcontainer/          container, hooks, dbt.conf, products.conf (les produits)
+├── profiles/               hub de profils dbt (bac à sable) + dbt.env
+├── global/                 projet dbt v2 : les v2 en packages locaux + modèles partagés
+├── v1/<produit>/           worktree <produit>/v1 — projet d'origine, dbt Core commun
+└── v2/<produit>/           worktree <produit>/v2 — migration dbt v2, puis refactoring
+```
+
+Les worktrees sont des branches de CE dépôt. Ils n'apparaissent qu'une fois le
+container démarré.
+
+## Prérequis sur l'hôte
+
+- VS Code + Dev Containers, Docker.
+- `~/.ssh` : une clé autorisée sur les dépôts d'origine (montée en lecture seule).
+- `~/.config/gcloud` : créé au besoin ; l'authentification Google y est conservée.
+
+## Première ouverture
+
+1. Cloner ce dépôt, puis créer `.env` à partir de `.env.example`
+   (`GITHUB_PERSONAL_ACCESS_TOKEN`, `SAP_PASSWORD`).
+2. VS Code → **Reopen in Container**. Le premier build installe gcloud, les deux
+   moteurs et crée les worktrees de chaque produit.
+3. Dans le terminal du container : `just doctor`, puis `just gcp-login` (une fois par hôte).
+4. **Reload Window** : les extensions dbt cherchent projets et moteurs à
+   l'ouverture de la fenêtre. À refaire après chaque rebuild.
+
+## Vérifier que tout fonctionne
+
+```bash
+just doctor --deep                  # + parse de tous les projets, + jeton Google
+just products                       # les produits et leurs worktrees
+just v1 <produit> parse             # dbt Core commun
+just v2 <produit> parse             # dbt v2
+just global parse                   # les v2 marqués GLOBAL, réunis
+just destinations global            # espaces de noms par produit, collisions
+```
+
+Côté éditeur : un `.sql` de `v2/<produit>/` ou de `global/` active l'extension
+dbt Labs (vue *Lineage*) ; un `.sql` de `v1/<produit>/` est vu par dbt Power
+User.
+
+## Ingérer un data product
+
+```bash
+just product-add <nom> <url-git> [branche] [dossier-dbt] [global: yes|no]
+git add .devcontainer/products.conf && git commit -m "feat: ingest <nom>"
+just upstream-pull <nom>
+git -C v1/<nom> push -u origin <nom>/v1 && git -C v2/<nom> push -u origin <nom>/v2
+```
+
+`global` ne se met à `yes` qu'une fois la v2 du produit parse sans erreur.
+
+Règles, verrous et méthode : [`CLAUDE.md`](CLAUDE.md). Architecture du
+container : [`.devcontainer/README.md`](.devcontainer/README.md).
+
+## Auteur
+
+[{{ author_name }}](https://github.com/{{ github_org }}/{{ project_name }})

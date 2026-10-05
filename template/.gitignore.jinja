@@ -59,11 +59,16 @@ logs/
 
 # DevContainer artifacts
 .bash_history
-{%- if project_type == "dbt-project" %}
+{%- if dbt_workspace %}
 
 # dbt workspace — v1/ and v2/ are git worktrees of THIS repository (branches
+{%- if project_type == "dbt-fleet" %}
+# <product>/v1 and <product>/v2), never content of the tooling branch. The
+# .ignore file gives them back to the search tools.
+{%- else %}
 # v1 and v2), never content of the tooling branch. The .ignore file gives them
 # back to the search tools.
+{%- endif %}
 /v1/
 /v2/
 # Anonymous usage id that dbt writes next to the profiles it reads

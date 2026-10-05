@@ -207,7 +207,7 @@ O="$(STUB_LS_RC=1 RUN v2 run -s a)"
 has "$O" "destination is unknown" && pass "destination irrésoluble (dbt ls en échec) : refusée" || bad "destination inconnue acceptée ($O)"
 O="$(RUN v1 run -s a --full-refresh)"
 has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a --full-refresh" && pass "écriture dans le bac à sable : acceptée, arguments intacts" || bad "écriture légitime refusée ($O)"
-has "$(tail -1 "$STUB_LOG")" "--output json --output-keys database schema name resource_type -s a" && pass "…la sélection de l'utilisateur est celle qui est contrôlée" || bad "contrôle fait sur une autre sélection"
+has "$(tail -1 "$STUB_LOG")" "--output json --output-keys database schema alias name resource_type package_name -s a" && pass "…la sélection de l'utilisateur est celle qui est contrôlée" || bad "contrôle fait sur une autre sélection"
 O="$(RUN v1 compile -s a)"
 has "$O" "ARGS=compile -s a" && pass "lecture (compile) : aucun contrôle de destination" || bad "compile bloqué ($O)"
 
@@ -387,6 +387,112 @@ WS4="$W/ws4"; make_ws "$WS4"; conf "$WS4" 'DBT_BQ_PROJECT=""' 'DBT_BQ_DATASET=""
 OUT="$(life "$WS4" create)"
 refute "aucun profiles.yml généré" test -f "$WS4/profiles/profiles.yml"
 has "$OUT" "dbt stays LOCKED" && pass "…et le hook l'annonce" || bad "absence de hub non annoncée"
+
+# =============================================================================
+echo "== Flotte (dbt-fleet) : deux produits, une v1 commune, un projet global =="
+# mkup NAME SUBDIR PROFILE PIN — un dépôt d'origine local portant un projet dbt
+mkup() {
+  local N="$1" SUB="$2" PROF="$3" PIN="$4" D="$W/fleet-src/$1"
+  git init -q --bare -b main "$W/fleet-up/$N.git"
+  git clone -q "$W/fleet-up/$N.git" "$D" 2>/dev/null
+  mkdir -p "$D/$SUB/models"
+  printf 'name: %s\nprofile: "%s"\n' "${N//-/_}" "$PROF" > "$D/$SUB/dbt_project.yml"
+  printf 'dbt-core==%s\n' "$PIN" > "$D/$SUB/requirements.txt"
+  printf 'select 1\n' > "$D/$SUB/models/m_$N.sql"
+  printf 'target/\ndbt_packages/\nlogs/\n' > "$D/.gitignore"
+  git -C "$D" add -A && git -C "$D" commit -q -m "upstream $N" && git -C "$D" push -q origin main
+}
+mkup alpha dbt prof_alpha 1.9.8
+mkup beta . prof_shared 1.10.0
+mkup gamma dbt prof_shared 1.10.0
+git init -q --bare -b main "$W/fleet-origin.git"
+FW="$W/fleet"
+git clone -q "$W/fleet-origin.git" "$FW" 2>/dev/null
+mkdir -p "$FW/.devcontainer" "$FW/profiles/env" "$FW/global/macros"
+for f in lib-dbt.sh dbt-run.sh dbt-doctor.sh; do cp "$SRC/"*"$f"* "$FW/.devcontainer/$f"; done
+printf 'DBT_SEND_ANONYMOUS_USAGE_STATS=false\nFLEET_COMMON=1\n' > "$FW/profiles/dbt.env"
+printf 'BETA_ONLY=1\n' > "$FW/profiles/env/beta.env"
+printf '/v1/\n/v2/\n' > "$FW/.gitignore"
+cat > "$FW/.devcontainer/dbt.conf" <<EOF
+DBT_FLEET=1
+DBT_V1_PINS="dbt-core==1.10.0 dbt-bigquery==1.10.0"
+DBT_BQ_PROJECT="sandbox-prj"
+DBT_BQ_DATASET="JDOE_run"
+DBT_BQ_DATASET_PREFIX="JDOE"
+DBT_TARGET_NAME="prd"
+EOF
+cat > "$FW/.devcontainer/products.conf" <<EOF
+# NAME  URL  BRANCH  SUBDIR  GLOBAL
+alpha   $W/fleet-up/alpha.git  main  dbt  yes
+beta    $W/fleet-up/beta.git   -     .    no   # projet à la racine
+EOF
+printf 'name: fleet_global\nprofile: "prof_global"\n' > "$FW/global/dbt_project.yml"
+cp "$REPO_ROOT/template/"*"global"*"/packages.yml" "$FW/global/packages.yml"
+git -C "$FW" add -A && git -C "$FW" commit -q -m "fleet scaffold" && git -C "$FW" push -q origin main
+rm -rf "$DBT_V1_VENV" "$DBT_BIN_DIR"; : > "$STUB_LOG"
+OUT="$(life "$FW" create)"
+
+for x in "alpha v1" "alpha v2" "beta v1" "beta v2"; do set -- $x
+  check "$1 : $2/$1/ est un worktree sur la branche $1/$2" test "$(git -C "$FW/$2/$1" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$1/$2"
+done
+check "alpha/v1 part de son dépôt d'origine" test "$(git -C "$FW" rev-parse alpha/v1)" = "$(git -C "$W/fleet-up/alpha.git" rev-parse main)"
+check "alpha/v2 part de alpha/v1" test "$(git -C "$FW" rev-parse alpha/v2)" = "$(git -C "$FW" rev-parse alpha/v1)"
+[ "$(git -C "$FW" worktree list --porcelain | grep -c '^locked')" = 4 ] && pass "les quatre worktrees sont verrouillés" || bad "worktrees de la flotte non verrouillés"
+check "remote up-alpha : pushurl DISABLED" test "$(git -C "$FW" config --get remote.up-alpha.pushurl)" = DISABLED
+check "remote up-beta : pushurl DISABLED" test "$(git -C "$FW" config --get remote.up-beta.pushurl)" = DISABLED
+refute "un push vers un dépôt d'origine échoue" git -C "$FW/v1/alpha" push up-alpha alpha/v1:refs/heads/probe
+has "$(cat "$STUB_LOG")" "pip install --quiet --python $DBT_V1_VENV/bin/python dbt-core==1.10.0 dbt-bigquery==1.10.0" && pass "v1 commune : venv construit depuis DBT_V1_PINS" || bad "v1 commune : DBT_V1_PINS non utilisé"
+[ "$(grep -c '^uv venv' "$STUB_LOG")" = 1 ] && pass "…une seule venv pour toute la flotte" || bad "plusieurs venvs construites"
+grep -qxF "  - local: ../v2/alpha/dbt" "$FW/global/packages.yml" && pass "global/ : alpha (GLOBAL yes) en package local" || bad "global/ : alpha absent du bloc géré"
+refute "global/ : beta (GLOBAL no) n'y est pas" grep -q "v2/beta" "$FW/global/packages.yml"
+for pf in prof_alpha prof_shared prof_global; do grep -q "^$pf:" "$FW/profiles/profiles.yml" || { bad "hub : profil $pf manquant"; continue; }; done
+[ "$(grep -cE '^prof_(alpha|shared|global):' "$FW/profiles/profiles.yml")" = 3 ] && pass "hub : un profil par nom demandé (produits + global), sans doublon" || bad "hub de la flotte incomplet"
+check "alpha : .env de v2 -> profiles/dbt.env (commun)" test "$(readlink -f "$FW/v2/alpha/dbt/.env")" = "$(readlink -f "$FW/profiles/dbt.env")"
+check "beta : .env de v2 -> profiles/env/beta.env (propre au produit)" test "$(readlink -f "$FW/v2/beta/.env")" = "$(readlink -f "$FW/profiles/env/beta.env")"
+check "global/.env -> profiles/dbt.env" test "$(readlink -f "$FW/global/.env")" = "$(readlink -f "$FW/profiles/dbt.env")"
+check "racine propre (worktrees ignorés)" test -z "$(git -C "$FW" status --porcelain -- v1 v2)"
+
+FRUN() { ( cd "${CWD:-$FW}" && bash "$FW/.devcontainer/dbt-run.sh" "$@" ) 2>&1; }
+O="$(FRUN v1 alpha parse)"; has "$O" "ENGINE=$DBT_V1_VENV/bin/dbt CWD=$FW/v1/alpha/dbt " && has "$O" "PROFILES=$FW/profiles " && pass "just v1 alpha → dbt Core commun, dans v1/alpha/dbt" || bad "v1 alpha ($O)"
+O="$(FRUN v2 beta parse)"; has "$O" "ENGINE=$DBT_BIN_DIR/dbt CWD=$FW/v2/beta " && pass "just v2 beta → dbt v2, projet à la racine du worktree" || bad "v2 beta ($O)"
+O="$(FRUN v1 parse)"; has "$O" "which product?" && pass "sans produit : refusé, liste des produits" || bad "produit manquant non signalé ($O)"
+O="$(FRUN v1 nope parse)"; has "$O" "unknown product 'nope'" && pass "produit inconnu : refusé" || bad "produit inconnu accepté ($O)"
+O="$(CWD="$FW/v2/alpha/dbt/models" FRUN auto parse)"; has "$O" "CWD=$FW/v2/alpha/dbt/models" && has "$O" "ENGINE=$DBT_BIN_DIR/dbt" && pass "\`dbt\` dans v2/alpha/ → dbt v2 sur alpha" || bad "auto v2 alpha ($O)"
+O="$(CWD="$FW/global" FRUN auto parse)"; has "$O" "ENGINE=$DBT_BIN_DIR/dbt CWD=$FW/global " && pass "\`dbt\` dans global/ → dbt v2 sur global" || bad "auto global ($O)"
+O="$(FRUN global compile)"; has "$O" "packages are not installed" && has "$O" "just global deps" && pass "global : packages locaux pas encore installés → compile refusé" || bad "global sans packages ($O)"
+mkdir -p "$FW/global/dbt_packages"; ln -sfn ../../v2/alpha/dbt "$FW/global/dbt_packages/alpha"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && pass "…installés et sans hook : compile accepté" || bad "global compile ($O)"
+printf '{"database":"sandbox-prj","schema":"JDOE_X","alias":"T","name":"a","resource_type":"model","package_name":"alpha"}\n{"database":"sandbox-prj","schema":"JDOE_X","alias":"T","name":"b","resource_type":"model","package_name":"gamma"}\n' > "$W/ls-dup.jsonl"
+O="$(STUB_LS_FILE="$W/ls-dup.jsonl" FRUN global run -s a)"; has "$O" "written by several nodes" && has "$O" "alpha.a, gamma.b" && pass "global : deux nœuds écrivant la même table → écriture refusée" || bad "collision non détectée ($O)"
+O="$(STUB_LS_FILE="$W/ls-dup.jsonl" FRUN destinations global)"; has "$O" "1 relation(s) written by several nodes" && pass "just destinations global : collisions listées" || bad "destinations global ($O)"
+O="$(STUB_LS_FILE="$LS_OK" FRUN global run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "global : écriture dans le bac à sable, sans collision → acceptée" || bad "global run légitime refusé ($O)"
+
+O="$(FRUN product-add gamma "$W/fleet-up/gamma.git" main dbt yes 2>&1)"
+has "$O" "→ gamma declared" && pass "product-add : produit déclaré" || bad "product-add ($O)"
+grep -qE "^gamma +$W/fleet-up/gamma.git +main +dbt +yes" "$FW/.devcontainer/products.conf" && pass "…ligne ajoutée à products.conf" || bad "ligne products.conf inattendue"
+check "…worktree v2/gamma créé sur gamma/v2" test "$(git -C "$FW/v2/gamma" rev-parse --abbrev-ref HEAD 2>/dev/null)" = gamma/v2
+grep -qxF "  - local: ../v2/gamma/dbt" "$FW/global/packages.yml" && pass "…et ajouté au projet global (GLOBAL yes)" || bad "gamma absent du global"
+[ "$(grep -c '^uv venv' "$STUB_LOG")" = 1 ] && pass "…sans reconstruire la venv commune" || bad "venv reconstruite par product-add"
+has "$O" "nothing is pushed for you" && pass "…et rien n'est poussé" || bad "product-add : message de publication absent"
+O="$(FRUN product-add gamma "$W/fleet-up/gamma.git")"; has "$O" "already declared" && pass "product-add : doublon refusé" || bad "doublon accepté"
+O="$(FRUN product-add Bad_Name "$W/fleet-up/gamma.git")"; has "$O" "invalid product name" && pass "product-add : nom invalide refusé" || bad "nom invalide accepté"
+
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "alpha pins dbt-core 1.9.8, runs on 1.10.0" && pass "doctor : montée de version à committer signalée (alpha)" || bad "doctor : écart de version non signalé"
+! has "$O" "beta pins" && pass "…rien pour beta, déjà sur la version commune" || bad "doctor : faux écart pour beta"
+has "$O" "✅ v2 alpha dbt project: v2/alpha/dbt (profile 'prof_alpha')" && pass "doctor : projets de chaque produit listés" || bad "doctor : projets non listés"
+has "$O" "global/ dbt project (profile 'prof_global'): 2 product(s) as local packages" && pass "doctor : projet global et ses packages" || bad "doctor : global non vu ($(grep global <<<"$O" | head -2))"
+
+git -C "$FW" add .devcontainer/products.conf profiles/profiles.yml global/packages.yml && git -C "$FW" commit -q -m "fleet: products" && git -C "$FW" push -q origin main
+for N in alpha beta gamma; do for V in v1 v2; do git -C "$FW/$V/$N" push -q origin "$N/$V" 2>/dev/null; done; done
+O="$(cd "$FW" && bash .devcontainer/dbt-run.sh upstream-pull alpha 2>&1)"; has "$O" "mirror on origin: alpha/upstream" && pass "upstream-pull alpha : miroir alpha/upstream publié" || bad "upstream-pull ($O)"
+check "…présent sur origin" git -C "$W/fleet-origin.git" rev-parse --verify refs/heads/alpha/upstream
+FW2="$W/fleet2"; git clone -q "$W/fleet-origin.git" "$FW2" 2>/dev/null
+sed -i "s#$W/fleet-up/#$W/absent/#" "$FW2/.devcontainer/products.conf"
+OUT="$(life "$FW2" create)"
+[ "$(grep -c '<- origin/' <<<"$OUT")" = 6 ] && pass "clone neuf de la flotte : les 6 branches viennent d'origin" || bad "clone neuf : branches ($OUT)"
+refute "…sans aucun accès aux dépôts d'origine" grep -q "fetching up-" <<<"$OUT"
+check "…v2/gamma présent" test -f "$FW2/v2/gamma/dbt/dbt_project.yml"
 
 echo "== Aucune fuite hors du bac à sable de test =="
 refute "le vrai ~/.gitconfig n'a pas reçu le verrou" grep -q "git.invalid" /home/"$(id -un)"/.gitconfig

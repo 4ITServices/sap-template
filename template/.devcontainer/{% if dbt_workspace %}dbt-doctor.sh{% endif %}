@@ -5,10 +5,11 @@
 #
 # Checks, repairs nothing. Everything that lives in the container filesystem
 # (both engines, ~/.gitconfig, ~/.bashrc) is gone after a rebuild and must be
-# put back by the hooks: this script tells whether it is all there.
+# put back by the hooks: this script tells whether it is all there. In a
+# fleet, every product of .devcontainer/products.conf is checked.
 #
 #   just doctor           fast and offline
-#   just doctor --deep    also parses v1/ and v2/ and asks Google for a token
+#   just doctor --deep    also parses every project and asks Google for a token
 #
 # Repair: `just setup` (replays the lifecycle, idempotent).
 # Prints no secret: safe to paste as is.
@@ -28,6 +29,9 @@ ok()   { echo "  ✅ $1"; }
 ko()   { echo "  ❌ $1  ->  $2"; PROBLEMS=$((PROBLEMS + 1)); }
 info() { echo "  ·  $1"; }
 
+# label V — "v1" (single) or "v1 <product>" (fleet), for the current product
+label() { if [ -n "${P_NAME:-}" ]; then printf '%s %s' "$1" "$P_NAME"; else printf '%s' "$1"; fi; }
+
 echo "[tools]"
 for C in uv just git git-lfs gh gcloud bq tmux claude; do
   command -v "$C" >/dev/null 2>&1 && ok "$C" || ko "$C not found" "rebuild the container (feature / post-create)"
@@ -37,8 +41,8 @@ echo "[engines]"
 V1="$(_dbt_v1_version 2>/dev/null)"
 if [ -x "$DBT_V1_VENV/bin/dbt" ] && [ -n "$V1" ]; then
   case "$V1" in
-    1.*) ok "v1 = dbt Core $V1 ($DBT_V1_VENV)" ;;
-    *)   ko "v1 venv holds dbt $V1, not a 1.x" "check the pins of v1/, then: just setup" ;;
+    1.*) ok "v1 = dbt Core $V1 ($DBT_V1_VENV)${DBT_V1_PINS:+, shared by every v1 (DBT_V1_PINS)}" ;;
+    *)   ko "v1 venv holds dbt $V1, not a 1.x" "check the pins, then: just setup" ;;
   esac
 else
   ko "v1 engine missing ($DBT_V1_VENV)" "just setup"
@@ -55,77 +59,112 @@ esac
 [ "$(command -v dbt 2>/dev/null)" = "$DBT_BIN_DIR/dbt" ] \
   && ok "\`dbt\` on PATH is the v2 binary (what the dbt extension expects)" \
   || ko "\`dbt\` on PATH is '$(command -v dbt 2>/dev/null)'" "another dbt shadows $DBT_BIN_DIR/dbt"
-
-echo "[upstream — read-only]"
-HOST="$(_dbt_url_host "${DBT_UPSTREAM_URL:-}")"
-KH="$(_dbt_known_hosts)"
-if [ -z "$HOST" ]; then
-  ko "no upstream declared" "set DBT_UPSTREAM_URL in .devcontainer/dbt.conf"
-else
-  info "upstream: $DBT_UPSTREAM_URL (branch ${DBT_UPSTREAM_BRANCH:-main})"
-  if _dbt_url_is_ssh "$DBT_UPSTREAM_URL"; then
-    if [ -s "$KH" ]; then
-      ok "host key pinned: $(ssh-keygen -lf "$KH" 2>/dev/null | awk '{print $2" "$NF}' | paste -sd' ' -)"
-      git -C "$WS" ls-files --error-unmatch .devcontainer/upstream_known_hosts >/dev/null 2>&1 \
-        || ko "upstream_known_hosts is not committed" "check the fingerprints, then commit .devcontainer/upstream_known_hosts"
-    else
-      ko "no pinned host key for $HOST" "just setup (needs the network), then commit .devcontainer/upstream_known_hosts"
-    fi
-    git config --global --get core.sshCommand 2>/dev/null | grep -q upstream_known_hosts \
-      && ok "git uses the pinned key (core.sshCommand)" || ko "core.sshCommand not set" "just setup"
-  fi
-  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
-    git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "git@$HOST:" \
-      && ok "push lock, global (pushInsteadOf)" || ko "global push lock missing" "just setup"
-    [ "$(git -C "$WS" config --get remote.upstream.pushurl 2>/dev/null)" = "DISABLED" ] \
-      && ok "push lock, remote (pushurl)" || ko "remote.upstream.pushurl not DISABLED" "just setup"
-    # prove it: this push can only fail, and fails before any network access
-    if git -C "$WS" push --dry-run upstream "HEAD:refs/heads/doctor-probe" >/dev/null 2>&1; then
-      ko "a push to upstream was ACCEPTED by git" "just setup — and do not push"
-    else
-      ok "a push to upstream is refused by git (tried, dry-run)"
-    fi
-  else
-    ko "push to upstream is UNLOCKED" "set DBT_UPSTREAM_PUSH_LOCK=1 in .devcontainer/dbt.conf, then: just setup"
-  fi
+if dbt_is_fleet && [ -n "$V1" ]; then
+  # every v1 runs on the shared engine; a product that still pins another
+  # version is not wrong, it is a bump left to commit in its v1 branch
+  for N in $(dbt_products); do
+    dbt_use_product "$N" && P1="$(dbt_project_dir v1)" || continue
+    PIN="$(_dbt_project_core_pin "$P1")"
+    [ -z "$PIN" ] || [ "$PIN" = "$V1" ] || info "$N pins dbt-core $PIN, runs on $V1: commit the bump in $P_B1 once the compiled SQL matches"
+  done
 fi
 
-echo "[worktrees]"
-for V in $DBT_WORKTREES; do
-  if _dbt_is_worktree "$WS/$V"; then
-    B="$(git -C "$WS/$V" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    ok "$V/ on branch $B ($(git -C "$WS/$V" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$WS/$V" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
-    git -C "$WS" worktree list --porcelain 2>/dev/null | awk -v p="$WS/$V" '$1=="worktree"{f=(substr($0,10)==p)} f&&$1=="locked"{found=1} END{exit !found}' \
-      && ok "$V/ locked against prune" || ko "$V/ not locked" "just setup"
-    if P="$(dbt_project_dir "$V")"; then
-      ok "$V dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
+echo "[upstream — read-only]"
+KH="$(_dbt_known_hosts)"
+HOSTS=""
+while IFS= read -r U; do
+  H="$(_dbt_url_host "$U")"; [ -n "$H" ] || continue
+  case " $HOSTS " in *" $H "*) continue ;; esac
+  HOSTS="$HOSTS $H"
+  if _dbt_url_is_ssh "$U"; then
+    if ssh-keygen -F "$H" -f "$KH" >/dev/null 2>&1; then
+      ok "$H host key pinned: $(ssh-keygen -lf "$KH" 2>/dev/null | grep -F "$H" | awk '{print $2" "$NF}' | paste -sd' ' -)"
     else
-      ko "$V: dbt_project.yml not found" "set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf"
+      ko "no pinned host key for $H" "just setup (needs the network), then commit .devcontainer/upstream_known_hosts"
     fi
+  fi
+  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+    git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "git@$H:" \
+      && ok "push lock on $H, global (pushInsteadOf)" || ko "global push lock missing for $H" "just setup"
+  fi
+done < <(_dbt_upstream_urls)
+if [ -z "$HOSTS" ]; then
+  if dbt_is_fleet; then ko "no data product declared" "just product-add <name> <git-url>"; else ko "no upstream declared" "set DBT_UPSTREAM_URL in .devcontainer/dbt.conf"; fi
+else
+  [ -s "$KH" ] && { git -C "$WS" ls-files --error-unmatch .devcontainer/upstream_known_hosts >/dev/null 2>&1 \
+    || ko "upstream_known_hosts is not committed" "check the fingerprints, then commit .devcontainer/upstream_known_hosts"; }
+  git config --global --get core.sshCommand 2>/dev/null | grep -q upstream_known_hosts \
+    && ok "git uses the pinned keys (core.sshCommand)" || info "core.sshCommand does not use the pinned keys (an HTTPS upstream needs none)"
+  [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || ko "push to the upstream hosts is UNLOCKED" "set DBT_UPSTREAM_PUSH_LOCK=1 in .devcontainer/dbt.conf, then: just setup"
+fi
+for N in $(dbt_products); do
+  dbt_use_product "$N" || continue
+  [ -n "$P_URL" ] || continue
+  info "$(label upstream): $P_URL (branch $P_BRANCH)"
+  [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || continue
+  [ "$(git -C "$WS" config --get "remote.$P_REMOTE.pushurl" 2>/dev/null)" = "DISABLED" ] \
+    && ok "push lock, remote $P_REMOTE (pushurl)" || ko "remote.$P_REMOTE.pushurl not DISABLED" "just setup"
+  # prove it: this push can only fail, and fails before any network access
+  if git -C "$WS" push --dry-run "$P_REMOTE" "HEAD:refs/heads/doctor-probe" >/dev/null 2>&1; then
+    ko "a push to $P_REMOTE was ACCEPTED by git" "just setup — and do not push"
   else
-    ko "$V/ is not a worktree" "just setup"
+    ok "a push to $P_REMOTE is refused by git (tried, dry-run)"
   fi
 done
-BR="${DBT_UPSTREAM_BRANCH:-main}"
-if git -C "$WS" show-ref --verify --quiet "refs/remotes/upstream/$BR"; then
-  info "v1 is $(git -C "$WS" rev-list --count "v1..upstream/$BR" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "upstream/$BR..v1" 2>/dev/null) ahead of upstream/$BR (as last fetched: just upstream-pull)"
-  info "v2 is $(git -C "$WS" rev-list --count "v2..v1" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "v1..v2" 2>/dev/null) ahead of v1"
-else
-  info "upstream/$BR never fetched in this clone (branches came from origin): just upstream-pull"
+
+echo "[worktrees]"
+for N in $(dbt_products); do
+  dbt_use_product "$N" || continue
+  for V in $DBT_WORKTREES; do
+    W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
+    if _dbt_is_worktree "$W"; then
+      B="$(git -C "$W" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      ok "$SHOW on branch $B ($(git -C "$W" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$W" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
+      git -C "$WS" worktree list --porcelain 2>/dev/null | awk -v p="$W" '$1=="worktree"{f=(substr($0,10)==p)} f&&$1=="locked"{found=1} END{exit !found}' \
+        && ok "$SHOW locked against prune" || ko "$SHOW not locked" "just setup"
+      if P="$(dbt_project_dir "$V")"; then
+        ok "$(label "$V") dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
+      else
+        ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
+      fi
+    else
+      ko "$SHOW is not a worktree" "just setup"
+    fi
+  done
+  BR="$P_BRANCH"
+  if git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_REMOTE/$BR"; then
+    info "$P_B1 is $(git -C "$WS" rev-list --count "$P_B1..$P_REMOTE/$BR" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$P_B1" 2>/dev/null) ahead of $P_REMOTE/$BR (as last fetched: just upstream-pull${P_NAME:+ $P_NAME})"
+    info "$P_B2 is $(git -C "$WS" rev-list --count "$P_B2..$P_B1" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_B1..$P_B2" 2>/dev/null) ahead of $P_B1"
+  else
+    info "$P_REMOTE/$BR never fetched in this clone (branches came from origin): just upstream-pull${P_NAME:+ $P_NAME}"
+  fi
+done
+if dbt_is_fleet; then
+  if P="$(dbt_project_dir global)"; then
+    ok "global/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) product(s) as local packages"
+  else
+    info "no global/ dbt project"
+  fi
 fi
 
 echo "[profile hub]"
 [ "${DBT_PROFILES_DIR:-}" = "$WS/profiles" ] \
   && ok "DBT_PROFILES_DIR -> profiles/" \
-  || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only \`just v1|v2\`"
-NAME=""
-P1="$(dbt_project_dir v1)" && NAME="$(_dbt_profile_name "$P1")"
+  || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only the just recipes"
 if [ -f "$WS/profiles/profiles.yml" ]; then
-  if [ -n "$NAME" ] && grep -Eq "^['\"]?$NAME['\"]?:" "$WS/profiles/profiles.yml"; then
-    ok "profiles/profiles.yml declares '$NAME'"
-  else
-    ko "profiles/profiles.yml does not declare '${NAME:-?}'" "add it — dbt refuses to run without it"
-  fi
+  NAMES=""
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    P="$(dbt_project_dir v1)" || P="$(dbt_project_dir v2)" || continue
+    NAME="$(_dbt_profile_name "$P")"; [ -n "$NAME" ] && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  done
+  dbt_is_fleet && P="$(dbt_project_dir global)" && NAME="$(_dbt_profile_name "$P")" && [ -n "$NAME" ] \
+    && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  for NAME in $NAMES; do
+    _dbt_hub_has "$WS/profiles/profiles.yml" "$NAME" && ok "profiles/profiles.yml declares '$NAME'" \
+      || ko "profiles/profiles.yml does not declare '$NAME'" "add it — dbt refuses to run without it"
+  done
+  [ -n "$NAMES" ] || info "no project yet: no profile to check"
 else
   ko "profiles/profiles.yml missing: dbt is locked" "fill DBT_BQ_PROJECT / DBT_BQ_DATASET in .devcontainer/dbt.conf, then: just setup"
 fi
@@ -137,22 +176,33 @@ fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
 echo "[hooks — SQL the sandbox check cannot see]"
-for V in $DBT_WORKTREES; do
-  P="$(dbt_project_dir "$V")" || continue
+check_hooks() {   # check_hooks V PROJECT_DIR
+  local V="$1" P="$2" HOOKS
   if dbt_packages_unchecked "$P"; then
-    info "$V: packages not installed, their hooks are unknown — just $V deps"
-    continue
+    info "$(label "$V"): packages not installed, their hooks are unknown — $(dbt_just_cmd "$V") deps"
+    return
   fi
   HOOKS="$(dbt_hook_sources "$P")"
   if [ -z "$HOOKS" ]; then
-    ok "$V: no hook, neither in the project nor in its installed packages"
+    ok "$(label "$V"): no hook, neither in the project nor in its installed packages"
   elif [ "${DBT_HOOKS_REVIEWED:-0}" = "1" ]; then
-    ok "$V: hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+    ok "$(label "$V"): hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
   else
-    info "$V: hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+    info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
     info "    -> refused until DBT_HOOKS_REVIEWED=1 in dbt.conf: $(dbt_hook_commands "$V")"
   fi
+}
+for N in $(dbt_products); do
+  dbt_use_product "$N" || continue
+  for V in $DBT_WORKTREES; do
+    P="$(dbt_project_dir "$V")" || continue
+    check_hooks "$V" "$P"
+  done
 done
+if dbt_is_fleet && P="$(dbt_project_dir global)"; then
+  dbt_use_product "" >/dev/null 2>&1 || true
+  check_hooks global "$P"
+fi
 
 echo "[BigQuery auth]"
 ACCT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
@@ -250,18 +300,27 @@ fi
 
 if [ "$DEEP" = 1 ]; then
   echo "[parse — offline]"
-  for V in $DBT_WORKTREES; do
-    OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"
-    if [ $? -eq 0 ]; then
-      ok "$V parses"
-    elif [ "$V" = "v2" ]; then
-      info "v2 does not parse yet — expected until the migration is done:"
-      printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'
-    else
-      ko "v1 does not parse" "just v1 parse"
-      printf '%s\n' "$OUT" | tail -n 5 | sed 's/^/       /'
-    fi
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    for V in $DBT_WORKTREES; do
+      if dbt_is_fleet; then OUT="$(bash "$HERE/dbt-run.sh" "$V" "$N" parse 2>&1)"; else OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"; fi
+      if [ $? -eq 0 ]; then
+        ok "$(label "$V") parses"
+      elif [ "$V" = "v2" ]; then
+        info "$(label v2) does not parse yet — expected until the migration is done:"
+        printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'
+      else
+        ko "$(label v1) does not parse" "$(dbt_just_cmd v1) parse"
+        printf '%s\n' "$OUT" | tail -n 5 | sed 's/^/       /'
+      fi
+    done
   done
+  if dbt_is_fleet && dbt_project_dir global >/dev/null; then
+    dbt_use_product "" >/dev/null 2>&1 || true
+    OUT="$(bash "$HERE/dbt-run.sh" global parse 2>&1)"
+    if [ $? -eq 0 ]; then ok "global parses"; else
+      info "global does not parse yet:"; printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'; fi
+  fi
 fi
 
 echo

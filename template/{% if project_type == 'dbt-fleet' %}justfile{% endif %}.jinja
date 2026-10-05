@@ -1,0 +1,64 @@
+# {{ project_name }} — flotte dbt : v1 = dbt Core commun, v2 = dbt v2, global = les v2 réunis
+# ⚠ Arguments POSITIONNELS : `just v1 <produit> parse`, `just global parse`
+
+set positional-arguments
+
+# Lister les recettes disponibles
+default:
+    @just --list
+
+# --- Container ----------------------------------------------------------------
+
+# État de santé du container — ne répare rien (--deep : parse de tous les projets + jeton Google)
+doctor *args:
+    @-bash .devcontainer/dbt-doctor.sh "$@"
+
+# (Re)poser worktrees, moteurs, verrous git, projet global et hub de profils — idempotent
+setup:
+    @bash -c 'source .devcontainer/lib-dbt.sh && dbt_process "$PWD" create'
+
+# --- Data products ------------------------------------------------------------
+
+# Les produits de la flotte et l'état de leurs worktrees
+products:
+    @bash .devcontainer/dbt-run.sh products
+
+# Ingérer un produit : just product-add <nom> <url-git> [branche] [dossier-dbt] [global: yes|no]
+product-add name url branch='main' subdir='-' global='no':
+    @bash .devcontainer/dbt-run.sh product-add "$@"
+
+# --- dbt (voie gardée : hub de profils imposé, écritures contrôlées) ----------
+
+# dbt Core commun sur v1/<produit>/ : just v1 <produit> parse
+v1 product *args:
+    @bash .devcontainer/dbt-run.sh v1 "$@"
+
+# dbt v2 sur v2/<produit>/ : just v2 <produit> parse
+v2 product *args:
+    @bash .devcontainer/dbt-run.sh v2 "$@"
+
+# dbt v2 sur global/ (les v2 des produits en packages locaux) : just global parse
+global *args:
+    @bash .devcontainer/dbt-run.sh global "$@"
+
+# Où v1 et v2 écrivent chaque modèle (hors ligne) — un produit, tous, ou « global » (collisions)
+destinations target='':
+    @bash .devcontainer/dbt-run.sh destinations "$@"
+
+# --- Dépôts d'origine (lecture seule) -----------------------------------------
+
+# Récupérer la branche d'origine d'un produit (ou de tous) et rafraîchir son miroir sur origin
+upstream-pull product='':
+    @bash .devcontainer/dbt-run.sh upstream-pull "$@"
+
+# --- GCP / BigQuery -----------------------------------------------------------
+
+# Auth GCP : CLI (bq) puis ADC (dbt oauth) — conservée côté hôte (~/.config/gcloud)
+gcp-login:
+    gcloud auth login
+    gcloud auth application-default login
+
+# Qui est connecté (CLI + ADC)
+gcp-whoami:
+    @gcloud auth list 2>/dev/null || echo "gcloud non connecté"
+    @gcloud auth application-default print-access-token >/dev/null 2>&1 && echo "ADC (dbt oauth) : OK" || echo "ADC (dbt oauth) : absent ou expiré"

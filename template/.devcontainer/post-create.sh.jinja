@@ -157,7 +157,7 @@ if [ -f "$WORKSPACE_DIR/.env" ]; then
 fi
 source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
 mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" create
-{%- if project_type == "dbt-project" %}
+{%- if dbt_workspace %}
 
 # =============================================================================
 # dbt workspace (template-managed — lib-dbt.sh + dbt.conf): upstream access

@@ -1,19 +1,24 @@
 # =============================================================================
 # dbt workspace manifest — read by .devcontainer/lib-dbt.sh (lifecycle hooks,
-# dbt-run.sh, dbt-doctor.sh)
+# dbt-run.sh, dbt-doctor.sh){% if project_type == 'dbt-fleet' %}. The data products themselves are declared
+# in .devcontainer/products.conf.{% endif %}
 #
 # This file is PROJECT-OWNED after the first render (copier _skip_if_exists):
 # edit it freely, `copier update` will never overwrite it.
 # Shell syntax: KEY="value", no space around '='. Apply a change: just setup
 # =============================================================================
-
+{% if project_type == 'dbt-fleet' %}
+# --- Fleet: several data products, one per line of products.conf -----------
+DBT_FLEET=1
+{%- else %}
 # --- Upstream: the dbt repository being taken over (read-only) ---------------
 DBT_UPSTREAM_URL="{{ upstream_repo_url }}"
 DBT_UPSTREAM_BRANCH="{{ upstream_branch }}"
 # Folder that holds dbt_project.yml inside that repository ('.' = its root,
 # empty = auto-detect, possible when it has a single dbt_project.yml)
 DBT_PROJECT_SUBDIR="{{ dbt_project_subdir }}"
-# 1 = no push to the upstream host can leave this container (global
+{%- endif %}
+# 1 = no push to the upstream host{% if project_type == 'dbt-fleet' %}s{% endif %} can leave this container (global
 # pushInsteadOf + remote pushurl). Set to 0 only for the day a branch must be
 # delivered upstream, then put it back.
 DBT_UPSTREAM_PUSH_LOCK=1
@@ -22,12 +27,21 @@ DBT_UPSTREAM_PUSH_LOCK=1
 DBT_UPSTREAM_HTTPS_TO_SSH=1
 
 # --- Engines -----------------------------------------------------------------
+{%- if project_type == 'dbt-fleet' %}
+# v1 = dbt Core 1.x in the /opt/dbt-v1 venv, ONE version for every product
+# (dbt Power User has one interpreter per window). A product that pins
+# another version runs on this one; `just doctor` lists the bumps to commit.
+DBT_V1_PINS="{{ fleet_v1_pins }}"
+{%- else %}
 # v1 = dbt Core 1.x in the /opt/dbt-v1 venv, at the versions the project pins:
 # pyproject.toml, else requirements.txt, next to dbt_project.yml. Point at
 # another file (path relative to v1/), or give pins for a project that ships
-# none (e.g. "dbt-core~=1.10.0 dbt-bigquery~=1.10.0"):
+# none (e.g. "dbt-core~=1.10.0 dbt-bigquery~=1.10.0"). DBT_V1_PINS, when set,
+# wins over both (pip requirement strings).
+DBT_V1_PINS=""
 DBT_V1_REQUIREMENTS=""
 DBT_V1_FALLBACK_REQUIREMENTS=""
+{%- endif %}
 DBT_V1_PYTHON="{{ python_version }}"
 # v2 = dbt v2 at ~/.local/bin/dbt, installed once per container build:
 # latest | stable | canary | an exact version (2.0.6). Never upgraded on a

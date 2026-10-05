@@ -25,8 +25,9 @@ devcontainer.json
 | `post-start.sh` | template | `copier update` |
 | `lib-mcp.sh` | template | `copier update` (MCP lifecycle engine) |
 | `tmux-session.sh` | template | `copier update` (integrated-terminal tmux launcher) |
-| `lib-dbt.sh`, `dbt-run.sh`, `dbt-doctor.sh`, `features/google-cloud-cli/` | template | `copier update` (dbt-project only — dbt workspace engine) |
-| `dbt.conf`, `upstream_known_hosts` | **project** | developer (dbt-project only — `dbt.conf` is seeded once from the copier answers, `_skip_if_exists`; the pinned host keys are scanned once, then reviewed and committed) |
+| `lib-dbt.sh`, `dbt-run.sh`, `dbt-doctor.sh`, `features/google-cloud-cli/` | template | `copier update` (dbt-project and dbt-fleet — dbt workspace engine) |
+| `dbt.conf`, `upstream_known_hosts` | **project** | developer (dbt workspaces — `dbt.conf` is seeded once from the copier answers, `_skip_if_exists`; the pinned host keys are scanned once, then reviewed and committed) |
+| `products.conf`, `global/` seeds | **project** | developer (dbt-fleet — seeded once; the lifecycle only rewrites the managed block of `global/packages.yml`) |
 | `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten; to opt out, comment out every line — a *deleted* file is re-seeded by the next `copier update`) |
 | `post-create-project.sh` | **project** | developer (never overwritten by template) |
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
@@ -180,6 +181,47 @@ ripgrep-based search (VS Code, Claude Code), which `.gitignore` hides.
 
 `just doctor` checks all of the above and repairs nothing; `just setup`
 replays the lifecycle.
+
+### A fleet of data products (`project_type: dbt-fleet`)
+
+The same engine, for several data products in one repository, so that they
+can be refactored together. `.devcontainer/products.conf` (project-owned)
+declares them, one per line: `NAME URL [BRANCH] [SUBDIR] [GLOBAL]`.
+
+| Path | Branch | Engine |
+|---|---|---|
+| `v1/<product>/` | `<product>/v1` | dbt Core, ONE version for every product (`DBT_V1_PINS` in `dbt.conf`) |
+| `v2/<product>/` | `<product>/v2` | dbt v2 |
+| `global/` | `main` | dbt v2 — the v2 of the products flagged `GLOBAL`, as local packages |
+
+Per product: remote `up-<product>` (fetch-only, push-locked, one lock per
+upstream host), mirror `<product>/upstream` on origin. The rest is the
+single-product machinery, product by product: pinned host keys, locked and
+self-repairing worktrees, the profile hub (one profile per name asked by a
+product or by `global/`, appended when missing), the write guard.
+
+- **One dbt Core for all the v1.** dbt Power User has one interpreter per
+  window, so a fleet shares one venv. A product that pins another version
+  runs on the shared one; `just doctor` lists the bumps to commit in its v1
+  branch. Measured before choosing 1.11.11: two products pinned on 1.9.8 and
+  1.10.18 produce byte-identical manifests (nodes, relations, configs,
+  dependencies, code) under 1.11.11 — `compile` needs credentials, so the
+  compiled SQL is to be compared in the container.
+- **`global/`**: the lifecycle rewrites the managed block of
+  `global/packages.yml` with one `local:` entry per `GLOBAL yes` product
+  whose v2 exists. dbt v2 installs local packages as **symlinks** (checked
+  with 2.0.6): an edit in `v2/<product>/` is seen by `global/` at once.
+  Dataset naming there (`global/macros/generate_schema_name.sql`) gives each
+  product its own namespace, `<PREFIX>_<PACKAGE>__<dataset>`. dbt v2 applies
+  it to the packages that define no `generate_schema_name`; a package that
+  ships its own keeps it for its nodes. `dispatch` and `flags` of a package
+  are ignored — only those of `global/` count. Writes in `global/` are also
+  refused when a selected relation is written by two nodes;
+  `just destinations global` lists such collisions.
+- **Ingesting a product**: `just product-add <name> <url> [branch] [subdir]
+  [global]` appends the line and builds its worktrees. Nothing is pushed:
+  commit `products.conf`, then publish `<name>/upstream`, `<name>/v1`,
+  `<name>/v2` (the command prints how).
 
 ### Starting a new dbt-project repository
 

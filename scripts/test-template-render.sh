@@ -10,8 +10,9 @@
 # Puis claude_profile : vide = montage ~/.claude historique à l'identique ;
 # renseigné = ~/.claude-profiles/<profil> monté et créé par initializeCommand ;
 # devcontainer.json toujours valide (JSONC) ; un profil « ../x » est refusé.
-# Puis project_type=dbt-project : pas de squelette Python, l'outillage dbt
-# (lib-dbt.sh, dbt.conf, feature gcloud, hub de profils) présent et valide,
+# Puis project_type=dbt-project, et dbt-fleet (une flotte de produits) : pas
+# de squelette Python, l'outillage dbt (lib-dbt.sh, dbt.conf, feature gcloud,
+# hub de profils, products.conf et global/ pour la flotte) présent et valide,
 # et rien de tout cela ne fuit dans les autres types.
 #
 # Copier rend depuis une réf git : par défaut HEAD du repo courant. Les fichiers
@@ -211,6 +212,52 @@ if render false "$WORK/dbt-badsub" --data project_type=dbt-project --data "upstr
 else
   pass "DBT: dbt_project_subdir « ../x » refusé"
 fi
+
+echo "== project_type=dbt-fleet : flotte de data products (v1 commune, v2, global) =="
+if render false "$WORK/fleet" --data project_type=dbt-fleet \
+     --data bq_sandbox_project=sandbox-prj --data bq_sandbox_dataset=JDOE_run \
+     --data bq_dataset_prefix=JDOE --data dbt_target_name=prd; then
+  D="$WORK/fleet"
+  for absent in pyproject.toml .python-version Dockerfile src tests .github; do
+    [ -e "$D/$absent" ] && bad "FLEET: $absent ne devrait PAS exister" || pass "FLEET: pas de $absent"
+  done
+  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh \
+                 .devcontainer/dbt.conf .devcontainer/products.conf \
+                 .devcontainer/features/google-cloud-cli/install.sh .ignore profiles/dbt.env \
+                 global/dbt_project.yml global/packages.yml global/macros/generate_schema_name.sql \
+                 global/.gitignore justfile CLAUDE.md README.md; do
+    [ -f "$D/$present" ] && pass "FLEET: $present présent" || bad "FLEET: $present manquant"
+  done
+  grep -qxF 'DBT_FLEET=1' "$D/.devcontainer/dbt.conf" && pass "FLEET: dbt.conf en mode flotte" || bad "FLEET: DBT_FLEET absent"
+  grep -qxF 'DBT_V1_PINS="dbt-core==1.11.11 dbt-bigquery==1.11.1"' "$D/.devcontainer/dbt.conf" && pass "FLEET: version dbt Core commune par défaut" || bad "FLEET: DBT_V1_PINS inattendu"
+  grep -q '^DBT_UPSTREAM_URL' "$D/.devcontainer/dbt.conf" && bad "FLEET: DBT_UPSTREAM_URL ne devrait pas exister (products.conf)" || pass "FLEET: pas d'upstream unique dans dbt.conf"
+  ( set -u; . "$D/.devcontainer/dbt.conf" ) 2>/dev/null && pass "FLEET: dbt.conf est du shell valide" || bad "FLEET: dbt.conf non sourçable"
+  [ -z "$(sed -e 's/#.*//' "$D/.devcontainer/products.conf" | awk 'NF')" ] && pass "FLEET: products.conf amorcé sans produit actif" || bad "FLEET: products.conf contient un produit"
+  grep -qxF '  # >>> products (managed by .devcontainer/lib-dbt.sh from products.conf — edit products.conf, not this block) >>>' "$D/global/packages.yml" \
+    && pass "FLEET: global/packages.yml porte le bloc géré" || bad "FLEET: bloc géré absent de global/packages.yml"
+  grep -qx 'name: render_test' "$D/global/dbt_project.yml" && grep -qx 'profile: render-test' "$D/global/dbt_project.yml" \
+    && pass "FLEET: global/dbt_project.yml interpolé (nom, profil)" || bad "FLEET: global/dbt_project.yml non interpolé"
+  jsonc_ok "$D/$DC" && pass "FLEET: devcontainer.json valide (JSONC)" || bad "FLEET: devcontainer.json invalide"
+  grep -qF '"./features/google-cloud-cli": {}' "$D/$DC" && grep -qF '"DBT_PROFILES_DIR": "${containerWorkspaceFolder}/profiles",' "$D/$DC" \
+    && grep -qF '"dbtLabsInc.dbt",' "$D/$DC" && pass "FLEET: gcloud, hub de profils et extensions dbt" || bad "FLEET: devcontainer.json incomplet"
+  python3 -c "import json,sys; d=json.load(open('$D/.vscode/settings.json')); w=d['files.watcherExclude']; sys.exit(0 if d['dbt.allowListFolders']==['v1'] and w.get('**/global/dbt_packages/**') else 1)" \
+    && pass "FLEET: settings — Power User sur v1/, liens de global/dbt_packages non surveillés" || bad "FLEET: .vscode/settings.json inattendu"
+  grep -q 'dbt_workspace' "$D/.copier-answers.yml" && bad "FLEET: la variable calculée dbt_workspace est enregistrée" || pass "FLEET: dbt_workspace (calculée) absente des réponses"
+  grep -q 'just product-add' "$D/justfile" && grep -q '^v1 product \*args:' "$D/justfile" && pass "FLEET: justfile de flotte (product-add, v1 <produit>)" || bad "FLEET: justfile de flotte inattendu"
+  grep -q 'dbt-fleet' "$D/CLAUDE.md" && grep -q 'global/' "$D/CLAUDE.md" && pass "FLEET: CLAUDE.md de flotte" || bad "FLEET: CLAUDE.md inattendu"
+  sh_ok=1
+  for f in "$D"/.devcontainer/*.sh; do bash -n "$f" 2>/dev/null || { bad "FLEET: erreur de syntaxe dans ${f#"$D"/}"; sh_ok=0; }; done
+  [ "$sh_ok" -eq 1 ] && pass "FLEET: tous les scripts passent bash -n"
+  if grep -rlE '\{\{|\{%' "$D" --exclude='generate_schema_name.sql' 2>/dev/null | grep -q .; then
+    bad "FLEET: marqueurs Jinja non résolus :"; grep -rlE '\{\{|\{%' "$D" --exclude='generate_schema_name.sql'
+  else pass "FLEET: aucun marqueur Jinja non résolu (hors macro dbt, Jinja par nature)"; fi
+else
+  bad "FLEET: copier a échoué"
+fi
+grep -q 'dbt_workspace' "$WORK/off/.copier-answers.yml" && bad "OFF: dbt_workspace enregistrée dans les réponses" || pass "OFF: dbt_workspace absente des réponses"
+for leak in .devcontainer/products.conf global; do
+  [ -e "$WORK/dbt/$leak" ] && bad "DBT: $leak (flotte) ne devrait PAS exister en dbt-project" || pass "DBT: pas de $leak"
+done
 
 echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
 for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/dbt.conf \

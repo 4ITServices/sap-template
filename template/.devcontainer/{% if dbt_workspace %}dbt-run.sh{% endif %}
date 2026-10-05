@@ -1,0 +1,410 @@
+#!/bin/bash
+# =============================================================================
+# dbt-run.sh — the guarded way to run dbt in this workspace (TEMPLATE-OWNED)
+# Updated by `copier update` — do not edit in projects.
+#
+# Single product (dbt-project):
+#   dbt-run.sh v1 <dbt args…>            dbt Core 1.x on v1/      (just v1 …)
+#   dbt-run.sh v2 <dbt args…>            dbt v2 on v2/            (just v2 …)
+# Fleet of products (dbt-fleet):
+#   dbt-run.sh v1 <product> <dbt args…>  dbt Core 1.x on v1/<product>/
+#   dbt-run.sh v2 <product> <dbt args…>  dbt v2 on v2/<product>/
+#   dbt-run.sh global <dbt args…>        dbt v2 on global/ (the products' v2
+#                                        as local packages)
+#   dbt-run.sh products                  the products and their state
+#   dbt-run.sh product-add <name> <url> [branch] [subdir] [global]
+#                                        ingest a data product (just product-add)
+# Both:
+#   dbt-run.sh auto <dbt args…>          engine (and product) from the current
+#                                        directory — what the `dbt` function calls
+#   dbt-run.sh destinations [<product>|global]
+#                                        where each engine would write each
+#                                        node, and where v1 and v2 disagree
+#   dbt-run.sh upstream-pull [<product>] fetch upstream, refresh its mirror on
+#                                        origin (never merges)
+#
+# Every process of the container already gets the profile hub
+# (DBT_PROFILES_DIR). On top of it, this wrapper:
+#   - imposes the hub: --profiles-dir is refused
+#   - loads profiles/dbt.env (+ profiles/env/<product>.env in a fleet), the
+#     env vars the projects' Jinja needs
+#   - refuses run-operation (arbitrary macros) unless DBT_ALLOW_RUN_OPERATION=1
+#   - lets a write (run/build/seed/snapshot/clone/retry) through only with an
+#     explicit selection whose every node resolves into the sandbox: project
+#     DBT_BQ_PROJECT, dataset starting with DBT_BQ_DATASET_PREFIX — and, in
+#     global/, whose relations no other node of the project writes too
+#   - refuses every command that would execute hooks — the project's own or
+#     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
+#     commands run hooks depends on the engine: see dbt_hook_commands in
+#     lib-dbt.sh (dbt v2 runs them on compile and show too)
+# The raw engines (`dbt1`, `dbtf`) and the editor extensions' buttons bypass
+# these guards — they only get the hub.
+# =============================================================================
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="$(dirname "$HERE")"
+# shellcheck disable=SC1091
+source "$HERE/lib-dbt.sh"
+dbt_load_conf "$WS"
+
+die()    { echo "⛔ $*" >&2; exit 1; }
+refuse() { echo "⛔ $1" >&2; shift; for L in "$@"; do echo "   $L" >&2; done; exit 1; }
+
+MODE="${1:-}"
+[ $# -gt 0 ] && shift
+
+# select_product NAME — fleet only: NAME must be declared in products.conf
+select_product() {
+  local N="${1:-}" LIST
+  LIST="$(dbt_products | paste -sd' ' -)"
+  [ -n "$N" ] || die "which product? ${LIST:-none declared} — e.g. just ${MODE:-v1} <product> parse"
+  dbt_use_product "$N" && return 0
+  # a dbt command where the product belongs: the product was forgotten
+  case " parse compile run build test ls list seed snapshot deps show docs debug clean source freshness retry clone run-operation " in
+    *" $N "*) die "which product? ${LIST:-none declared} — e.g. just ${MODE:-v1} <product> $N" ;;
+  esac
+  die "unknown product '$N' — declared in .devcontainer/products.conf: ${LIST:-none}"
+}
+
+# -----------------------------------------------------------------------------
+# upstream-pull
+# -----------------------------------------------------------------------------
+upstream_pull_one() {
+  local BR="$P_BRANCH" OLD NEW V B
+  git -C "$WS" remote get-url "$P_REMOTE" >/dev/null 2>&1 || die "no '$P_REMOTE' remote — run: just setup"
+  OLD="$(git -C "$WS" rev-parse -q --verify "refs/remotes/$P_REMOTE/$BR" 2>/dev/null || true)"
+  echo "→ ${P_TAG}git fetch $P_REMOTE (read-only)"
+  git -C "$WS" fetch --no-tags "$P_REMOTE" || die "fetch failed (VPN? SSH key? pinned host key?)"
+  NEW="$(git -C "$WS" rev-parse -q --verify "refs/remotes/$P_REMOTE/$BR")" || die "$P_REMOTE has no branch '$BR'"
+  if [ "$OLD" = "$NEW" ]; then
+    echo "  $P_REMOTE/$BR unchanged (${NEW:0:9})"
+  else
+    echo "  $P_REMOTE/$BR: ${OLD:+${OLD:0:9} → }${NEW:0:9}"
+    git -C "$WS" --no-pager log --oneline -n 20 "${OLD:+$OLD..}$NEW"
+  fi
+  echo "→ mirror on origin: $P_MIRROR"
+  git -C "$WS" push origin "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
+    || echo "  WARNING: mirror not pushed (origin unreachable, or upstream history was rewritten)" >&2
+  for V in $DBT_WORKTREES; do
+    B="$(_dbt_br "$V")"
+    git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
+    echo "  $B: $(git -C "$WS" rev-list --count "$B..$P_REMOTE/$BR") commit(s) behind $P_REMOTE/$BR, $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$B") ahead"
+  done
+  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1"
+}
+
+upstream_pull() {
+  local N
+  if dbt_is_fleet && [ -z "${1:-}" ]; then
+    for N in $(dbt_products); do dbt_use_product "$N" && ( upstream_pull_one ); done
+  else
+    dbt_is_fleet && select_product "$1"
+    upstream_pull_one
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# destinations
+# -----------------------------------------------------------------------------
+destinations_one() {
+  local TMP V RC=0
+  TMP="$(mktemp -d)"
+  export_env
+  for V in $DBT_WORKTREES; do
+    if dbt_destinations "$V" > "$TMP/$V.tsv" && [ -s "$TMP/$V.tsv" ]; then
+      echo "== ${P_TAG}$V: $(wc -l < "$TMP/$V.tsv") node(s) =="
+      cut -f2,3 "$TMP/$V.tsv" | sort | uniq -c | sort -rn | sed 's/^/  /'
+    else
+      echo "== ${P_TAG}$V: no destination — \`$(dbt_just_cmd "$V") parse\` must pass first =="
+      : > "$TMP/$V.tsv"
+      RC=1
+    fi
+  done
+  python3 - "$TMP/v1.tsv" "$TMP/v2.tsv" "$P_TAG" <<'PY'
+import sys
+def load(path):
+    out = {}
+    for line in open(path):
+        p = line.rstrip("\n").split("\t")
+        if len(p) >= 4:
+            out[(p[0], p[3])] = (p[1], p[2])
+    return out
+a, b = load(sys.argv[1]), load(sys.argv[2])
+if not a or not b:
+    sys.exit(0)
+moved = sorted(k for k in a.keys() & b.keys() if a[k] != b[k])
+only1, only2 = sorted(a.keys() - b.keys()), sorted(b.keys() - a.keys())
+print(f"== {sys.argv[3]}v1 vs v2: {len(moved)} node(s) written elsewhere, {len(only1)} only in v1, {len(only2)} only in v2 ==")
+for k in moved:
+    print(f"  {k[0]} {k[1]}: {'.'.join(a[k])}  ->  {'.'.join(b[k])}")
+for k in only1:
+    print(f"  only in v1: {k[0]} {k[1]}")
+for k in only2:
+    print(f"  only in v2: {k[0]} {k[1]}")
+PY
+  rm -rf "$TMP"
+  return $RC
+}
+
+destinations_global() {
+  local TMP RC=0
+  TMP="$(mktemp)"
+  export_env
+  if dbt_destinations global > "$TMP" && [ -s "$TMP" ]; then
+    echo "== global: $(wc -l < "$TMP") node(s) =="
+    awk -F'\t' '{split($4, a, "."); print a[1] "\t" $2 "." $3}' "$TMP" | sort | uniq -c | sort -rn | head -n 40 | sed 's/^/  /'
+    python3 - "$TMP" <<'PY'
+import sys, collections
+rel = collections.defaultdict(list)
+for line in open(sys.argv[1]):
+    p = line.rstrip("\n").split("\t")
+    if len(p) >= 5:
+        rel[(p[1], p[2].upper(), p[4].upper())].append(p[3])
+dups = {k: v for k, v in rel.items() if len(v) > 1}
+print(f"== global: {len(dups)} relation(s) written by several nodes ==")
+for k, v in sorted(dups.items()):
+    print(f"  {'.'.join(k)} <- {', '.join(sorted(v))}")
+PY
+  else
+    echo "== global: no destination — \`just global parse\` must pass first =="
+    RC=1
+  fi
+  rm -f "$TMP"
+  return $RC
+}
+
+destinations() {
+  local N RC=0
+  if [ "${1:-}" = "global" ]; then destinations_global; return $?; fi
+  if dbt_is_fleet && [ -z "${1:-}" ]; then
+    for N in $(dbt_products); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
+    return $RC
+  fi
+  dbt_is_fleet && select_product "$1"
+  destinations_one
+}
+
+# -----------------------------------------------------------------------------
+# products (fleet)
+# -----------------------------------------------------------------------------
+products() {
+  local N V P B S
+  dbt_is_fleet || die "single-product workspace: no products.conf"
+  printf '%-18s %-6s %-10s %s\n' "PRODUCT" "GLOBAL" "UPSTREAM" "WORKTREES"
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    S=""
+    for V in $DBT_WORKTREES; do
+      P="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
+      if _dbt_is_worktree "$P"; then S="$S $V=$(git -C "$P" rev-parse --short HEAD 2>/dev/null)"; else S="$S $V=missing"; fi
+    done
+    printf '%-18s %-6s %-10s%s\n' "$N" "$( [ "$P_GLOBAL" = 1 ] && echo yes || echo no)" "$P_BRANCH" "$S"
+  done
+}
+
+# product_add NAME URL [BRANCH] [SUBDIR] [GLOBAL] — declare, then build its
+# worktrees. Never pushes: publishing the new branches is the user's call.
+product_add() {
+  local N="${1:-}" URL="${2:-}" BR="${3:-}" SUB="${4:-}" GL="${5:-}"
+  dbt_is_fleet || die "single-product workspace: no products.conf"
+  [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-add <name> <git-url> [branch] [subdir] [global: yes|no]"
+  printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
+  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/products.conf"; fi
+  case "$URL" in ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "'$URL' is not a git URL (git@host:group/repo.git, ssh://…, https://… or a local path)" ;; esac
+  case "${GL:-no}" in yes|no) ;; *) die "GLOBAL must be yes or no (got '$GL')" ;; esac
+  # keep the file line-terminated before appending
+  [ -s "$DBT_PRODUCTS_CONF" ] && [ -n "$(tail -c1 "$DBT_PRODUCTS_CONF")" ] && echo >> "$DBT_PRODUCTS_CONF"
+  printf '%-14s %s  %s  %s  %s\n' "$N" "$URL" "${BR:-main}" "${SUB:--}" "${GL:-no}" >> "$DBT_PRODUCTS_CONF"
+  echo "→ $N declared in .devcontainer/products.conf"
+  bash -c 'source "$1/.devcontainer/lib-dbt.sh" && dbt_process "$1" create' _ "$WS"
+  dbt_load_conf "$WS"
+  dbt_use_product "$N" || die "$N is not readable back from products.conf"
+  echo
+  echo "Next: commit .devcontainer/products.conf (and upstream_known_hosts if a new host was pinned),"
+  echo "then publish the branches — nothing is pushed for you:"
+  echo "  just upstream-pull $N && git -C ${P_SHOW1%/} push -u origin $P_B1 && git -C ${P_SHOW2%/} push -u origin $P_B2"
+}
+
+# -----------------------------------------------------------------------------
+# Running dbt
+# -----------------------------------------------------------------------------
+
+# The hub is imposed and the env files are loaded (fleet-wide, then the
+# product's own); nothing in them can move the lock.
+export_env() {
+  local F
+  for F in "$WS/profiles/dbt.env" "${P_ENV:-}"; do
+    [ -n "$F" ] && [ -f "$F" ] || continue
+    set -a
+    # shellcheck disable=SC1090
+    . "$F"
+    set +a
+  done
+  export DBT_PROFILES_DIR="$WS/profiles"
+  export DBT_SEND_ANONYMOUS_USAGE_STATS="${DBT_SEND_ANONYMOUS_USAGE_STATS:-false}"
+}
+
+run_dbt() {
+  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" SELECTED="" COLLECT=0 OUT BAD HOOKS ALL DUPS JCMD
+  local -a SEL=()
+  shift
+  JCMD="$(dbt_just_cmd "$V")"
+  PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
+  ENGINE="$(dbt_engine "$V")"
+  [ -x "$ENGINE" ] || die "engine $V not installed ($ENGINE) — run: just setup"
+
+  for A in "$@"; do
+    case "$A" in
+      --profiles-dir|--profiles-dir=*)
+        refuse "--profiles-dir is not allowed: the profile hub is imposed." \
+               "Edit profiles/profiles.yml instead." ;;
+      run|build|seed|snapshot|clone|retry) CMD_WRITE="$A" ;;
+      run-operation) CMD_RUNOP=1 ;;
+    esac
+    # any word naming a hook-running command arms the hook check: a model that
+    # happens to be called `test` costs a refusal, never a missed hook
+    case " $(dbt_hook_commands "$V") " in *" $A "*) [ -n "$CMD_HOOKS" ] || CMD_HOOKS="$A" ;; esac
+    # the arguments that decide WHICH nodes run and WHERE they resolve
+    case "$A" in
+      -s|--select|-m|--models|--model|--selector) SELECTED=1; SEL+=("$A"); COLLECT=1 ;;
+      --select=*|--models=*|--model=*|--selector=*) SELECTED=1; SEL+=("$A"); COLLECT=0 ;;
+      --exclude|--vars|--target|-t|--state|--indirect-selection) SEL+=("$A"); COLLECT=1 ;;
+      --exclude=*|--vars=*|--target=*|--state=*|--indirect-selection=*) SEL+=("$A"); COLLECT=0 ;;
+      -*) COLLECT=0 ;;
+      *) [ "$COLLECT" = 1 ] && SEL+=("$A") ;;
+    esac
+  done
+
+  export_env
+
+  if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
+    refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \
+           "Read the macro first; to allow it, set DBT_ALLOW_RUN_OPERATION=1 in .devcontainer/dbt.conf."
+  fi
+
+  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
+    if dbt_packages_unchecked "$PROJ"; then
+      refuse "\`dbt ${CMD_HOOKS:-$CMD_WRITE}\` can run hooks, and this project's packages are not installed:" \
+             "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"
+    fi
+    HOOKS="$(dbt_hook_sources "$PROJ")"
+    if [ -n "$HOOKS" ]; then
+      {
+        echo "⛔ \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` would run hooks nobody has reviewed yet. They run SQL outside"
+        echo "   any materialization, which the sandbox check cannot see. Declared in (under ${PROJ#"$WS"/}/):"
+        printf '%s\n' "$HOOKS" | head -n 12 | sed 's/^/     /'
+        [ "$(printf '%s\n' "$HOOKS" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$HOOKS" | wc -l) files)"
+        [ "$V" != v1 ] && echo "   (dbt v2 runs on-run-start hooks on compile and show too.)"
+        echo "   Read them, then set DBT_HOOKS_REVIEWED=1 in .devcontainer/dbt.conf."
+      } >&2
+      exit 1
+    fi
+  fi
+
+  if [ -n "$CMD_WRITE" ]; then
+    [ -f "$WS/profiles/profiles.yml" ] \
+      || refuse "no profile hub (profiles/profiles.yml): dbt has nowhere safe to write." \
+                "Fill DBT_BQ_PROJECT / DBT_BQ_DATASET in .devcontainer/dbt.conf, then: just setup"
+    [ -n "${DBT_BQ_PROJECT:-}" ] \
+      || refuse "DBT_BQ_PROJECT is empty in .devcontainer/dbt.conf: no sandbox declared, writes are refused."
+    [ "$CMD_WRITE" != "retry" ] \
+      || refuse "retry replays a previous selection that cannot be checked here." \
+                "Run the command again with an explicit --select."
+    [ -n "$SELECTED" ] \
+      || refuse "\`dbt $CMD_WRITE\` without a selection: never a whole project by accident." \
+                "Add --select <models>."
+    echo "[dbt:${P_NAME:+$P_NAME:}$V] checking where the selection would write…" >&2
+    OUT="$(dbt_destinations "$V" ${SEL[@]+"${SEL[@]}"})" \
+      || refuse "cannot resolve the selection (dbt ls failed): a write whose destination is unknown is refused." \
+                "See it fail with: $JCMD ls ${SEL[*]:-}"
+    BAD="$(printf '%s\n' "$OUT" | awk -F'\t' -v p="$DBT_BQ_PROJECT" -v x="${DBT_BQ_DATASET_PREFIX:-}" \
+      'NF>=4 && ($2!=p || (x!="" && index($3,x)!=1)) {print "   " $1 " " $4 " -> " $2 "." $3}')"
+    if [ -n "$BAD" ]; then
+      echo "⛔ \`dbt $CMD_WRITE\` refused: $(printf '%s\n' "$BAD" | wc -l) selected node(s) would be written outside the sandbox" >&2
+      echo "   (allowed: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, dataset starting with $DBT_BQ_DATASET_PREFIX}):" >&2
+      printf '%s\n' "$BAD" | head -n 15 >&2
+      [ "$(printf '%s\n' "$BAD" | wc -l)" -gt 15 ] && echo "   … (full list: just destinations${P_NAME:+ $P_NAME})" >&2
+      exit 1
+    fi
+    if [ "$V" = "global" ]; then
+      # several products in one project: two nodes writing the same table
+      # would overwrite each other in the sandbox
+      ALL="$(dbt_destinations global)" \
+        || refuse "cannot list every node of global/ (dbt ls failed): collisions cannot be ruled out."
+      DUPS="$(python3 - <(printf '%s\n' "$ALL") <(printf '%s\n' "$OUT") <<'PY'
+import sys, collections
+rel = collections.defaultdict(set)
+for line in open(sys.argv[1]):
+    p = line.rstrip("\n").split("\t")
+    if len(p) >= 5:
+        rel[(p[1], p[2].upper(), p[4].upper())].add(p[3])
+for line in open(sys.argv[2]):
+    p = line.rstrip("\n").split("\t")
+    if len(p) >= 5:
+        k = (p[1], p[2].upper(), p[4].upper())
+        if len(rel[k]) > 1:
+            print(f"   {'.'.join(k)} <- {', '.join(sorted(rel[k]))}")
+PY
+)"
+      [ -z "$DUPS" ] || { echo "⛔ \`dbt $CMD_WRITE\` refused: these relations are written by several nodes of global/:" >&2; printf '%s\n' "$DUPS" | sort -u | head -n 15 >&2; exit 1; }
+    fi
+    echo "[dbt:${P_NAME:+$P_NAME:}$V] $(printf '%s\n' "$OUT" | grep -c .) node(s), all inside the sandbox" >&2
+  fi
+
+  # Run from the project directory, unless the caller already stands in it
+  # (the `dbt` function: paths given on the command line stay relative).
+  case "$PWD/" in
+    "$PROJ/"*) ;;
+    *) cd "$PROJ" || die "cannot enter $PROJ" ;;
+  esac
+  exec "$ENGINE" "$@"
+}
+
+# auto — the engine (and the product) from the current directory
+run_auto() {
+  local REL N
+  case "$PWD/" in
+    "$WS/global/"*)
+      dbt_is_fleet && { run_dbt global "$@"; return; } ;;
+    "$WS/v1/"*|"$WS/v2/"*)
+      REL="${PWD#"$WS"/}"
+      if dbt_is_fleet; then
+        N="$(printf '%s' "$REL" | cut -d/ -f2)"
+        if [ -n "$N" ] && dbt_use_product "$N"; then run_dbt "${REL%%/*}" "$@"; return; fi
+      else
+        run_dbt "${REL%%/*}" "$@"; return
+      fi ;;
+  esac
+  # outside every project there is nothing to guard: plain dbt v2
+  # (`dbt --version`, `dbt system update`, `dbt login`…)
+  ENGINE="$(dbt_engine v2)"
+  [ -x "$ENGINE" ] || die "dbt v2 not installed ($ENGINE) — run: just setup"
+  exec "$ENGINE" "$@"
+}
+
+case "$MODE" in
+  v1|v2)
+    if dbt_is_fleet; then select_product "${1:-}"; shift; fi
+    run_dbt "$MODE" "$@" ;;
+  global)
+    dbt_is_fleet || die "no global/ project in a single-product workspace"
+    run_dbt global "$@" ;;
+  auto)
+    run_auto "$@" ;;
+  destinations)
+    destinations "${1:-}" ;;
+  upstream-pull)
+    upstream_pull "${1:-}" ;;
+  products)
+    products ;;
+  product-add)
+    product_add "$@" ;;
+  *)
+    if dbt_is_fleet; then
+      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | product-add <name> <url> [branch] [subdir] [global]" >&2
+    else
+      echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull" >&2
+    fi
+    exit 2 ;;
+esac

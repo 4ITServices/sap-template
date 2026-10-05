@@ -1,0 +1,18 @@
+# =============================================================================
+# Data products of this fleet — read by .devcontainer/lib-dbt.sh
+#
+# One product per line:   NAME  URL  [BRANCH]  [SUBDIR]  [GLOBAL]
+#   NAME    directory and branch namespace: worktrees v1/NAME and v2/NAME on
+#           branches NAME/v1 and NAME/v2 (lowercase, digits and '-')
+#   URL     git URL of the dbt repository taken over — read only, push locked
+#   BRANCH  the upstream branch to take over (default: main)
+#   SUBDIR  folder that holds dbt_project.yml in that repository
+#           ('.' = its root, '-' = auto-detect)
+#   GLOBAL  yes = pulled into global/ as a local package (its v2 must parse)
+# '-' = default value. Comments start with '#'.
+#
+# Add a product:  just product-add NAME URL [BRANCH] [SUBDIR] [GLOBAL]
+# This file is PROJECT-OWNED after the first render (copier _skip_if_exists).
+# =============================================================================
+# NAME          URL                                        BRANCH  SUBDIR  GLOBAL
+# sales         git@gitlab.example.com:data/dwh-sales.git  main    dbt     yes

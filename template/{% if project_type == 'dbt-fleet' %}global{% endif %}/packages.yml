@@ -1,0 +1,6 @@
+# The products' v2, as local packages. The managed block below is rewritten
+# from .devcontainer/products.conf (column GLOBAL) at every container start
+# and by `just setup`. Packages this project needs itself go OUTSIDE it.
+packages:
+  # >>> products (managed by .devcontainer/lib-dbt.sh from products.conf — edit products.conf, not this block) >>>
+  # <<< products <<<

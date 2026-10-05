@@ -13,7 +13,11 @@ _min_copier_version: "9.0"
 _skip_if_exists:
   - .devcontainer/mcp-servers.conf
   - .devcontainer/dbt.conf
+  - .devcontainer/products.conf
   - profiles/dbt.env
+  - global/dbt_project.yml
+  - global/packages.yml
+  - global/macros/generate_schema_name.sql
   - .abapgit.xml
 
 # Type-specific files are excluded via Jinja conditions in their path names
@@ -22,19 +26,19 @@ _skip_if_exists:
 # .abapgit.xml / abap/ in a project generated as mcp-server).
 #
 # The reverse case — a SHARED file that one type must not get — is listed
-# here instead of renaming the shared file. dbt-project is not a Python
-# package: its root only carries the tooling, the dbt code lives in the v1/
-# and v2/ worktrees. An excluded path is never rendered nor compared, so a
+# here instead of renaming the shared file. The dbt workspaces (dbt-project,
+# dbt-fleet) are not Python packages: their root only carries the tooling,
+# the dbt code lives in the v1/ and v2/ worktrees. An excluded path is never rendered nor compared, so a
 # file hand-added there later is left alone by `copier update`.
 _exclude:
-  - "{% if project_type == 'dbt-project' %}/pyproject.toml{% endif %}"
-  - "{% if project_type == 'dbt-project' %}/.python-version{% endif %}"
-  - "{% if project_type == 'dbt-project' %}/Dockerfile{% endif %}"
-  - "{% if project_type == 'dbt-project' %}/src{% endif %}"
-  - "{% if project_type == 'dbt-project' %}/tests{% endif %}"
-  - "{% if project_type == 'dbt-project' %}/.github/workflows/ci.yml{% endif %}"
+  - "{% if dbt_workspace %}/pyproject.toml{% endif %}"
+  - "{% if dbt_workspace %}/.python-version{% endif %}"
+  - "{% if dbt_workspace %}/Dockerfile{% endif %}"
+  - "{% if dbt_workspace %}/src{% endif %}"
+  - "{% if dbt_workspace %}/tests{% endif %}"
+  - "{% if dbt_workspace %}/.github/workflows/ci.yml{% endif %}"
   # (no workflow left without IaC: skip the folder rather than leave it empty)
-  - "{% if project_type == 'dbt-project' and not enable_iac %}/.github{% endif %}"
+  - "{% if dbt_workspace and not enable_iac %}/.github{% endif %}"
 
 # =============================================================================
 # Questions
@@ -65,8 +69,16 @@ project_type:
     - abap-project
     - fabric-pipeline
     - dbt-project
+    - dbt-fleet
     - base
   default: mcp-server
+
+# Computed, never asked nor stored: true for both dbt workspace types. Keeps
+# the conditional file names short ({% if dbt_workspace %}…{% endif %}).
+dbt_workspace:
+  type: bool
+  default: "{{ project_type in ['dbt-project', 'dbt-fleet'] }}"
+  when: false
 
 python_version:
   type: str
@@ -113,11 +125,14 @@ enable_ecc_stack:
     le port 8001 en plus du S/4HANA sur 8000 ? Génère .env.ecc.example, ajoute
     une entrée sap-adt-ecc dans .mcp.json.example et lance mcp-server-ecc.sh
     en post-start si .env.ecc existe.
-  when: "{{ project_type in ['mcp-server', 'abap-project', 'dbt-project'] }}"
+  when: "{{ project_type in ['mcp-server', 'abap-project', 'dbt-project', 'dbt-fleet'] }}"
 
-# --- dbt-project : reprise d'un projet dbt BigQuery existant ------------------
-# Ces réponses amorcent .devcontainer/dbt.conf, qui devient ensuite la
-# propriété du projet (_skip_if_exists) : c'est LUI que les hooks lisent.
+# --- dbt-project / dbt-fleet : reprise de projets dbt BigQuery existants ------
+# dbt-project reprend UN dépôt dbt ; dbt-fleet en regroupe plusieurs (déclarés
+# dans .devcontainer/products.conf) avec une v1 sur une version dbt Core
+# commune et un projet global/ qui réunit leurs v2. Ces réponses amorcent
+# .devcontainer/dbt.conf, qui devient ensuite la propriété du projet
+# (_skip_if_exists) : c'est LUI que les hooks lisent.
 
 upstream_repo_url:
   type: str
@@ -151,6 +166,16 @@ dbt_project_subdir:
     Chemin relatif simple attendu (ex: dbt), sans « .. »
     {% endif %}
 
+fleet_v1_pins:
+  type: str
+  help: >-
+    Version dbt Core COMMUNE à toutes les v1 de la flotte (paquets pip, une
+    seule venv pour tous les produits : dbt Power User n'a qu'un interpréteur
+    par fenêtre). Un produit qui épingle une autre version tourne quand même
+    sur celle-ci ; le doctor le signale.
+  default: "dbt-core==1.11.11 dbt-bigquery==1.11.1"
+  when: "{{ project_type == 'dbt-fleet' }}"
+
 bq_sandbox_project:
   type: str
   help: >-
@@ -158,13 +183,13 @@ bq_sandbox_project:
     généré + garde-fou d'écriture). Vide = aucun profil généré : dbt refuse
     de s'exécuter tant que profiles/profiles.yml n'est pas renseigné à la main.
   default: ""
-  when: "{{ project_type == 'dbt-project' }}"
+  when: "{{ dbt_workspace }}"
 
 bq_sandbox_dataset:
   type: str
   help: "Dataset par défaut du profil dbt dans le bac à sable (ex: JDOE_dbt_run)"
   default: ""
-  when: "{{ project_type == 'dbt-project' and bq_sandbox_project != '' }}"
+  when: "{{ dbt_workspace and bq_sandbox_project != '' }}"
 
 bq_dataset_prefix:
   type: str
@@ -173,13 +198,13 @@ bq_dataset_prefix:
     refuse une écriture qui viserait un dataset sans ce préfixe. Vide = pas
     de contrôle de préfixe (le contrôle du projet reste actif).
   default: ""
-  when: "{{ project_type == 'dbt-project' and bq_sandbox_project != '' }}"
+  when: "{{ dbt_workspace and bq_sandbox_project != '' }}"
 
 bq_location:
   type: str
   help: "Région BigQuery du profil dbt"
   default: EU
-  when: "{{ project_type == 'dbt-project' and bq_sandbox_project != '' }}"
+  when: "{{ dbt_workspace and bq_sandbox_project != '' }}"
 
 dbt_target_name:
   type: str
@@ -188,7 +213,7 @@ dbt_target_name:
     voient CE nom : mettre prd pour compiler comme en production tout en
     écrivant dans le bac à sable.
   default: dev
-  when: "{{ project_type == 'dbt-project' and bq_sandbox_project != '' }}"
+  when: "{{ dbt_workspace and bq_sandbox_project != '' }}"
 
 enable_tmux_claude_code_config:
   type: bool
@@ -223,5 +248,6 @@ workspace_color:
     {%- elif project_type == "abap-project" %}#3D1A00
     {%- elif project_type == "fabric-pipeline" %}#0E2A1A
     {%- elif project_type == "dbt-project" %}#9A3412
+    {%- elif project_type == "dbt-fleet" %}#7C2D12
     {%- elif project_type == "base" %}#374151
     {%- endif %}
