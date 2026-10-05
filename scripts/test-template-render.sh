@@ -33,6 +33,15 @@ fail=0
 pass() { printf '  \033[32mOK\033[0m   %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=1; }
 
+# headings_ok FILE HEADING... : each heading starts its own line, after a blank line
+headings_ok() {
+  local f="$1" h; shift
+  for h in "$@"; do
+    grep -qx "$h" "$f" || return 1
+    awk -v h="$h" '$0 == h { exit (prev != "") } { prev = $0 }' "$f" || return 1
+  done
+}
+
 render() {  # render <enable_bool> <out_dir> [extra copier args...]
   local enable=$1 out=$2; shift 2
   copier copy --vcs-ref "$VCS_REF" --defaults --quiet \
@@ -197,6 +206,7 @@ if render false "$WORK/dbt" --data project_type=dbt-project --data "upstream_rep
   grep -q '^sap-adt-mcp ' "$D/.devcontainer/mcp-servers.conf" && pass "DBT: sap-adt-mcp dans mcp-servers.conf" || bad "DBT: sap-adt-mcp non semé"
   grep -q "$DBT_URL" "$D/CLAUDE.md" && grep -q 'v1/dbt/' "$D/CLAUDE.md" && pass "DBT: CLAUDE.md interpolé (origine, dossier du projet)" || bad "DBT: CLAUDE.md non interpolé"
   grep -q '^## Coordination' "$D/CLAUDE.md" && bad "DBT: section Coordination sans coordinateur" || pass "DBT: produit autonome — pas de section Coordination"
+  headings_ok "$D/CLAUDE.md" '## Règles absolues' && pass "DBT: …et « Règles absolues » reste un titre à part entière" || bad "DBT: titre « Règles absolues » collé ($(grep -n 'Règles absolues' "$D/CLAUDE.md" | head -1))"
   if grep -rlE '\{\{|\{%' "$D" 2>/dev/null | grep -q .; then
     bad "DBT: marqueurs Jinja non résolus :"; grep -rlE '\{\{|\{%' "$D"
   else pass "DBT: aucun marqueur Jinja non résolu (tous fichiers)"; fi
@@ -213,6 +223,10 @@ if render false "$WORK/dbt-coord" --data project_type=dbt-project --data "upstre
     && pass "DBT: …rôle (global/) et mécanique (verrou) expliqués" || bad "DBT: Coordination incomplète"
   awk '/^## Coordination/{c=NR} /^## Règles absolues/{r=NR} END{exit !(c && r && c < r)}' "$D/CLAUDE.md" \
     && pass "DBT: …avant les règles absolues" || bad "DBT: Coordination mal placée"
+  headings_ok "$D/CLAUDE.md" '## Coordination — ce produit fait partie d'"'"'une flotte' '## Règles absolues' \
+    && pass "DBT: …titres séparés de ce qui précède par une ligne vide" || bad "DBT: titres collés autour de Coordination"
+  awk '/^Ce produit est suivi par un coordinateur/{ exit (prev != "") } { prev = $0 }' "$D/README.md" && grep -qx '## Prérequis sur l.hôte' "$D/README.md" \
+    && pass "DBT: …README : paragraphe et titre suivant bien séparés" || bad "DBT: README mal découpé autour du coordinateur"
   grep -qF "$COORD" "$D/README.md" && pass "DBT: README renvoie au coordinateur" || bad "DBT: README sans coordinateur"
   grep -qF "fleet_coordinator: '$COORD'" "$D/.copier-answers.yml" && pass "DBT: fleet_coordinator mémorisé (copier update le garde)" || bad "DBT: fleet_coordinator non mémorisé"
   if grep -rlE '\{\{|\{%' "$D" 2>/dev/null | grep -q .; then bad "DBT: marqueurs Jinja non résolus (coordination)"; else pass "DBT: aucun marqueur Jinja non résolu (coordination)"; fi
