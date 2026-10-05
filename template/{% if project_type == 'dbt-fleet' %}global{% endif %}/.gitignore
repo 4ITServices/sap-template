@@ -1,5 +1,7 @@
 target/
 dbt_packages/
+# dbt v2 keeps its own internal packages here (and appends this line itself)
+dbt_internal_packages/
 logs/
 .env
 package-lock.yml
