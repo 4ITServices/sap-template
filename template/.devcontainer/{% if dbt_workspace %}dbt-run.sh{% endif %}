@@ -213,12 +213,7 @@ products() {
 
 # The workspace token, for the product repositories, when the shell has none
 # (a hook got it from .env; a terminal may not have sourced it)
-load_token() {
-  [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && return 0
-  [ -f "$WS/.env" ] || return 0
-  GITHUB_PERSONAL_ACCESS_TOKEN="$(sed -n 's/^GITHUB_PERSONAL_ACCESS_TOKEN=//p' "$WS/.env" | tail -1 | tr -d '"'"'"'')"
-  export GITHUB_PERSONAL_ACCESS_TOKEN
-}
+load_token() { _dbt_load_token; }
 
 sync_products() {
   local N

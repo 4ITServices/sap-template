@@ -302,6 +302,15 @@ _dbt_git_home() {
   fi
 }
 
+# The workspace token when the caller has none: a hook sourced .env, a
+# terminal (`just setup`, `just sync`) may not have. Only that variable is read.
+_dbt_load_token() {
+  [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && return 0
+  [ -f "${DBT_WS:-}/.env" ] || return 0
+  GITHUB_PERSONAL_ACCESS_TOKEN="$(sed -n 's/^GITHUB_PERSONAL_ACCESS_TOKEN=//p' "$DBT_WS/.env" | tail -1 | tr -d '"'"'"'')"
+  export GITHUB_PERSONAL_ACCESS_TOKEN
+}
+
 # Fetch the current product's own repository (no-op for origin: it is the
 # clone itself).
 _dbt_fetch_home() {
@@ -1065,6 +1074,7 @@ dbt_process() {
     echo "[dbt] no .devcontainer/dbt.conf — nothing to manage"
     return 0
   fi
+  _dbt_load_token
   echo "[dbt] upstream access..."
   dbt_git_setup
   if dbt_is_fleet; then
