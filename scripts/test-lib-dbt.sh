@@ -212,10 +212,37 @@ O="$(RUN v1 compile -s a)"
 has "$O" "ARGS=compile -s a" && pass "lecture (compile) : aucun contrôle de destination" || bad "compile bloqué ($O)"
 
 printf "{{ config(post_hook='truncate table x') }}\nselect 1\n" > "$WS/v1/dbt/models/hooked.sql"
-O="$(RUN v1 run -s a)"; has "$O" "has hooks" && pass "projet avec hooks : écriture refusée tant que non relus" || bad "hooks non détectés ($O)"
+O="$(RUN v1 run -s a)"; has "$O" "hooks nobody has reviewed" && has "$O" "models/hooked.sql" && pass "post_hook dans un modèle : écriture refusée, fichier nommé" || bad "hook de modèle non détecté ($O)"
 conf "$WS" 'DBT_HOOKS_REVIEWED=1'
 O="$(RUN v1 run -s a)"; has "$O" "ARGS=run -s a" && pass "…acceptée après DBT_HOOKS_REVIEWED=1" || bad "hooks relus mais écriture refusée ($O)"
 rm -f "$WS/v1/dbt/models/hooked.sql"; conf "$WS"
+
+echo "== Hooks des packages installés, et commandes qui les exécutent selon le moteur =="
+printf 'name: fake\nprofile: "fake_profile"\n# on-run-start:\n#   - "{{ old_hook() }}"\n' > "$WS/v1/dbt/dbt_project.yml"
+O="$(RUN v1 run -s a)"; has "$O" "all inside the sandbox" && pass "hook en commentaire (# on-run-start:) : ignoré" || bad "commentaire pris pour un hook ($O)"
+git -C "$WS/v1" checkout -q -- dbt/dbt_project.yml
+for V in v1 v2; do mkdir -p "$WS/$V/dbt/dbt_packages/elem"; printf 'name: elem\non-run-end:\n  - "{{ elem.on_run_end() }}"\n' > "$WS/$V/dbt/dbt_packages/elem/dbt_project.yml"; done
+O="$(RUN v1 run -s a)"; has "$O" "hooks nobody has reviewed" && has "$O" "dbt_packages/elem/dbt_project.yml" && pass "on-run-end d'un package installé : écriture refusée, package nommé" || bad "hook de package non détecté ($O)"
+O="$(RUN v1 test)";            has "$O" "hooks nobody has reviewed" && pass "v1 test : refusé (dbt Core exécute les hooks sur test)" || bad "v1 test non gardé ($O)"
+O="$(RUN v1 source freshness)"; has "$O" "hooks nobody has reviewed" && pass "v1 source freshness : refusé (RunTask aussi)" || bad "v1 freshness non gardé ($O)"
+O="$(RUN v1 compile -s a)";    has "$O" "ARGS=compile -s a" && pass "v1 compile : accepté (dbt Core n'exécute aucun hook sur compile)" || bad "v1 compile bloqué à tort ($O)"
+O="$(RUN v1 ls)";              ! has "$O" "⛔" && has "$O" "log line" && pass "v1 ls : accepté" || bad "v1 ls bloqué à tort ($O)"
+O="$(RUN v2 compile -s a)";    has "$O" "hooks nobody has reviewed" && has "$O" "compile and show too" && pass "v2 compile : refusé (dbt v2 exécute on-run-start sur compile)" || bad "v2 compile non gardé ($O)"
+O="$(RUN v2 show -s a)";       has "$O" "hooks nobody has reviewed" && pass "v2 show : refusé" || bad "v2 show non gardé ($O)"
+O="$(RUN v2 parse)";           has "$O" "ARGS=parse" && pass "v2 parse : accepté (aucun hook)" || bad "v2 parse bloqué à tort ($O)"
+O="$(RUN v2 ls -s a)";         ! has "$O" "⛔" && has "$O" "log line" && pass "v2 ls : accepté (c'est lui qui résout les destinations)" || bad "v2 ls bloqué à tort ($O)"
+conf "$WS" 'DBT_HOOKS_REVIEWED=1'
+O="$(RUN v2 compile -s a)";    has "$O" "ARGS=compile -s a" && pass "…v2 compile accepté après DBT_HOOKS_REVIEWED=1" || bad "v2 compile refusé après relecture ($O)"
+O="$(RUN v1 test)";            has "$O" "ARGS=test" && pass "…v1 test accepté après DBT_HOOKS_REVIEWED=1" || bad "v1 test refusé après relecture ($O)"
+conf "$WS"
+rm -rf "$WS/v1/dbt/dbt_packages" "$WS/v2/dbt/dbt_packages"
+
+printf 'packages:\n  - package: acme/elem\n    version: 1.0.0\n' > "$WS/v2/dbt/packages.yml"
+O="$(RUN v2 compile -s a)"; has "$O" "packages are not installed" && has "$O" "just v2 deps" && pass "packages déclarés mais pas installés : hooks invérifiables, refusé" || bad "packages non installés non signalés ($O)"
+O="$(RUN v2 deps)";         has "$O" "ARGS=deps" && pass "…deps reste possible (aucun hook)" || bad "deps bloqué à tort ($O)"
+mkdir -p "$WS/v2/dbt/dbt_packages/elem"; printf 'name: elem\n' > "$WS/v2/dbt/dbt_packages/elem/dbt_project.yml"
+O="$(RUN v2 compile -s a)"; has "$O" "ARGS=compile -s a" && pass "…une fois installés et sans hook : accepté" || bad "packages installés sans hook mais refusé ($O)"
+rm -rf "$WS/v2/dbt/dbt_packages" "$WS/v2/dbt/packages.yml"
 
 conf "$WS" 'DBT_BQ_PROJECT=""'
 O="$(RUN v1 run -s a)"; has "$O" "DBT_BQ_PROJECT is empty" && pass "aucun bac à sable déclaré : toute écriture refusée" || bad "écriture sans bac à sable acceptée ($O)"
@@ -274,6 +301,13 @@ has "$O" "innoverio.vscode-dbt-power-user did NOT start in the last VS Code wind
 echo "2026-01-01 00:00:02.000 [error] Activating extension 'innoverio.vscode-dbt-power-user' failed: boom" >> "$LG/remoteexthost.log"
 O="$(DOC)"; has "$O" "❌ innoverio.vscode-dbt-power-user was activated and FAILED" && pass "activation en échec : signalée" || bad "échec d'activation non signalé ($O)"
 rm -rf "$HOME/.vscode-server"
+
+O="$( (cd "$WS" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null | sed -n '/^\[hooks/,/^\[BigQuery/p')"
+has "$O" "✅ v1: no hook, neither in the project nor in its installed packages" && pass "doctor : « aucun hook » dit quand c'est vrai" || bad "doctor : section hooks inattendue ($O)"
+mkdir -p "$WS/v2/dbt/dbt_packages/elem"; printf 'name: elem\non-run-end:\n  - "x"\n' > "$WS/v2/dbt/dbt_packages/elem/dbt_project.yml"
+O="$( (cd "$WS" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null | sed -n '/^\[hooks/,/^\[BigQuery/p')"
+has "$O" "v2: hooks in dbt_packages/elem/dbt_project.yml" && has "$O" "compile show docs" && pass "doctor : hooks d'un package listés, avec les commandes refusées" || bad "doctor : hooks de package non listés ($O)"
+rm -rf "$WS/v2/dbt/dbt_packages"
 
 # =============================================================================
 echo "== Clone neuf : les branches viennent d'origin, sans l'upstream =="

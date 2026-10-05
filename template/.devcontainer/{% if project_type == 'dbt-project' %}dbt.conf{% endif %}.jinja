@@ -49,6 +49,9 @@ DBT_TARGET_NAME="{{ dbt_target_name }}"
 # run-operation executes arbitrary macros: refused unless 1
 DBT_ALLOW_RUN_OPERATION=0
 # pre/post-hooks and on-run-* run SQL outside any materialization, possibly
-# against a source. When the project has some, writes are refused until a
-# human has read them and set this to 1.
+# against a source — the project's own, and those of its installed packages
+# (elementary, for one, writes its monitoring tables from on-run-end). When
+# there are some, every command that executes them is refused until a human
+# has read them and set this to 1: run, build, seed, snapshot, test, source
+# freshness — and under dbt v2 also compile and show. `just doctor` lists them.
 DBT_HOOKS_REVIEWED=0

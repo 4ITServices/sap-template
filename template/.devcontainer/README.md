@@ -155,9 +155,14 @@ ignored by `main`:
    A `run`/`build`/`seed`/`snapshot` needs an explicit selection, and every
    selected node must resolve (`dbt ls`, offline) to `DBT_BQ_PROJECT` — and to
    a dataset starting with `DBT_BQ_DATASET_PREFIX` when set. `run-operation`
-   is refused, and a project with hooks cannot write until
-   `DBT_HOOKS_REVIEWED=1`. The raw engines and the extensions' Run/Build
-   buttons only get the hub, not this guard.
+   is refused. Hooks — the project's own and those declared by its installed
+   packages (elementary ships on-run-start/end hooks) — block every command
+   that would execute them until `DBT_HOOKS_REVIEWED=1`. Which commands those
+   are depends on the engine: dbt Core runs them for run, build, seed,
+   snapshot, test and source freshness (its `RunTask` family); dbt v2 also for
+   compile and show. parse and ls run none under either engine, which is why
+   the guard can use `dbt ls` to resolve destinations. The raw engines and the
+   extensions' Run/Build buttons only get the hub, not this guard.
 
 BigQuery authentication uses the host's `~/.config/gcloud` (bind mount):
 `gcloud auth login` + `gcloud auth application-default login` once, valid for

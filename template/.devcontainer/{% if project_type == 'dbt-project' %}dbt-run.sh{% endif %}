@@ -20,7 +20,10 @@
 #   - lets a write (run/build/seed/snapshot/clone/retry) through only with an
 #     explicit selection whose every node resolves into the sandbox: project
 #     DBT_BQ_PROJECT, dataset starting with DBT_BQ_DATASET_PREFIX
-#   - refuses writes on a project that has hooks until DBT_HOOKS_REVIEWED=1
+#   - refuses every command that would execute hooks — the project's own or
+#     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
+#     commands run hooks depends on the engine: see dbt_hook_commands in
+#     lib-dbt.sh (dbt v2 runs them on compile and show too)
 # The raw engines (`dbt1`, `dbtf`) and the editor extensions' buttons bypass
 # these guards — they only get the hub.
 # =============================================================================
@@ -124,15 +127,8 @@ export_env() {
   export DBT_SEND_ANONYMOUS_USAGE_STATS="${DBT_SEND_ANONYMOUS_USAGE_STATS:-false}"
 }
 
-has_hooks() {
-  grep -rIlqiE --include='*.sql' --include='*.yml' --include='*.yaml' \
-    --exclude-dir=dbt_packages --exclude-dir=dbt_modules --exclude-dir=target \
-    --exclude-dir=logs --exclude-dir=.venv \
-    '(pre|post)[-_]hook|on-run-(start|end)' "$1" 2>/dev/null
-}
-
 run_dbt() {
-  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" SELECTED="" COLLECT=0 OUT BAD
+  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" SELECTED="" COLLECT=0 OUT BAD HOOKS
   local -a SEL=()
   shift
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $V/ (worktree missing, or set DBT_PROJECT_SUBDIR in dbt.conf) — run: just setup"
@@ -147,6 +143,9 @@ run_dbt() {
       run|build|seed|snapshot|clone|retry) CMD_WRITE="$A" ;;
       run-operation) CMD_RUNOP=1 ;;
     esac
+    # any word naming a hook-running command arms the hook check: a model that
+    # happens to be called `test` costs a refusal, never a missed hook
+    case " $(dbt_hook_commands "$V") " in *" $A "*) [ -n "$CMD_HOOKS" ] || CMD_HOOKS="$A" ;; esac
     # the arguments that decide WHICH nodes run and WHERE they resolve
     case "$A" in
       -s|--select|-m|--models|--model|--selector) SELECTED=1; SEL+=("$A"); COLLECT=1 ;;
@@ -165,6 +164,25 @@ run_dbt() {
            "Read the macro first; to allow it, set DBT_ALLOW_RUN_OPERATION=1 in .devcontainer/dbt.conf."
   fi
 
+  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
+    if dbt_packages_unchecked "$PROJ"; then
+      refuse "\`dbt ${CMD_HOOKS:-$CMD_WRITE}\` can run hooks, and this project's packages are not installed:" \
+             "their hooks cannot be checked. Install them first (no hook runs): just $V deps"
+    fi
+    HOOKS="$(dbt_hook_sources "$PROJ")"
+    if [ -n "$HOOKS" ]; then
+      {
+        echo "⛔ \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` would run hooks nobody has reviewed yet. They run SQL outside"
+        echo "   any materialization, which the sandbox check cannot see. Declared in (under ${PROJ#"$WS"/}/):"
+        printf '%s\n' "$HOOKS" | head -n 12 | sed 's/^/     /'
+        [ "$(printf '%s\n' "$HOOKS" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$HOOKS" | wc -l) files)"
+        [ "$V" = v2 ] && echo "   (dbt v2 runs on-run-start hooks on compile and show too.)"
+        echo "   Read them, then set DBT_HOOKS_REVIEWED=1 in .devcontainer/dbt.conf."
+      } >&2
+      exit 1
+    fi
+  fi
+
   if [ -n "$CMD_WRITE" ]; then
     [ -f "$WS/profiles/profiles.yml" ] \
       || refuse "no profile hub (profiles/profiles.yml): dbt has nowhere safe to write." \
@@ -177,11 +195,6 @@ run_dbt() {
     [ -n "$SELECTED" ] \
       || refuse "\`dbt $CMD_WRITE\` without a selection: never a whole project by accident." \
                 "Add --select <models>."
-    if has_hooks "$PROJ" && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
-      refuse "this project has hooks (pre/post-hook, on-run-*): they run SQL outside any" \
-             "materialization, possibly against a source — the sandbox check cannot see them." \
-             "Read them, then set DBT_HOOKS_REVIEWED=1 in .devcontainer/dbt.conf."
-    fi
     echo "[dbt:$V] checking where the selection would write…" >&2
     OUT="$(dbt_destinations "$V" ${SEL[@]+"${SEL[@]}"})" \
       || refuse "cannot resolve the selection (dbt ls failed): a write whose destination is unknown is refused." \

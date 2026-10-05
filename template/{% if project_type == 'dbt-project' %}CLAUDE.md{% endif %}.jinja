@@ -64,7 +64,7 @@ Branches :
 |---|---|---|
 | 1 | `DBT_PROFILES_DIR` → `profiles/` pour TOUT processus du container. dbt résout `--profiles-dir` > env > cwd > `~/.dbt` : les `profiles.yml` embarqués dans `v1/` et `v2/` (ils visent les vrais projets) ne sont jamais lus. Profil absent du hub = erreur, pas repli. | `devcontainer.json` (`containerEnv`), `~/.bashrc` |
 | 2 | Hub `profiles/profiles.yml` : le target porte le nom que voient les macros (`target.name`), mais projet et dataset sont ceux du bac à sable. | `profiles/` |
-| 3 | Garde-fou d'écriture de `dbt-run.sh` : un `run`/`build`/`seed`/`snapshot` exige une sélection, et chaque nœud sélectionné doit se résoudre dans le bac à sable (`dbt ls`). `run-operation` refusé ; un projet qui a des hooks ne peut écrire qu'après relecture (`DBT_HOOKS_REVIEWED`). | `.devcontainer/dbt-run.sh`, `dbt.conf` |
+| 3 | Garde-fou d'écriture de `dbt-run.sh` : un `run`/`build`/`seed`/`snapshot` exige une sélection, et chaque nœud sélectionné doit se résoudre dans le bac à sable (`dbt ls`). `run-operation` refusé. Tant que `DBT_HOOKS_REVIEWED` vaut 0, toute commande qui exécuterait des hooks (ceux du projet ET ceux des packages installés) est refusée : `run`, `build`, `seed`, `snapshot`, `test`, `source freshness`, et sous dbt v2 aussi `compile` et `show`. | `.devcontainer/dbt-run.sh`, `dbt.conf` |
 | 4 | Push vers l'hôte d'origine impossible, même par URL explicite : `url."DISABLED://".pushInsteadOf` global + `remote.upstream.pushurl DISABLED`. | `.devcontainer/lib-dbt.sh` (rejoué à chaque démarrage) |
 
 Les boutons Run/Build des extensions dbt n'ont que les verrous 1, 2 et 4 :
@@ -149,6 +149,9 @@ un simple restart du container répare.
 - **dbt v2 `deps` réécrit `package-lock.yml`** (il re-résout les versions) :
   c'est un changement à committer dans `v2`, pas un effet de bord à ignorer.
 - **`maximum_bytes_billed` ne plafonne pas le DDL.** Essai court avant course longue.
+- **Sous dbt v2, `compile` et `show` exécutent les hooks `on-run-start`** (dbt Core,
+  non). Un `compile` n'est donc en lecture seule que si le projet et ses packages
+  n'ont aucun hook : `just doctor` le dit, section `[hooks]`.
 
 ## Commandes essentielles
 

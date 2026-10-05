@@ -136,6 +136,24 @@ else
 fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
+echo "[hooks — SQL the sandbox check cannot see]"
+for V in $DBT_WORKTREES; do
+  P="$(dbt_project_dir "$V")" || continue
+  if dbt_packages_unchecked "$P"; then
+    info "$V: packages not installed, their hooks are unknown — just $V deps"
+    continue
+  fi
+  HOOKS="$(dbt_hook_sources "$P")"
+  if [ -z "$HOOKS" ]; then
+    ok "$V: no hook, neither in the project nor in its installed packages"
+  elif [ "${DBT_HOOKS_REVIEWED:-0}" = "1" ]; then
+    ok "$V: hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+  else
+    info "$V: hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+    info "    -> refused until DBT_HOOKS_REVIEWED=1 in dbt.conf: $(dbt_hook_commands "$V")"
+  fi
+done
+
 echo "[BigQuery auth]"
 ACCT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
 [ -n "$ACCT" ] && ok "gcloud/bq CLI: $ACCT" || ko "gcloud/bq CLI not logged in" "just gcp-login"

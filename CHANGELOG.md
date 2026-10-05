@@ -75,6 +75,22 @@ and commit messages; this changelog starts at v0.8.12.
   `dbt-project` render and checks that nothing of it leaks into the other
   types.
 
+### Fixed (on the unreleased dbt-project type)
+
+- **The write guard now sees the hooks of installed packages.** It only
+  scanned the project's own files, so the on-run-start/end hooks that a
+  package such as elementary declares in its `dbt_project.yml` went
+  unnoticed. Commented-out lines (`# on-run-start:`) no longer count.
+- **Hooks gate every command that executes them, per engine,** not only the
+  writes. dbt Core runs them for its `RunTask` family — run, build, seed,
+  snapshot, test, source freshness (read from dbt-core 1.11). dbt v2 also
+  runs on-run-start hooks for compile and show (observed with 2.0.6). Until
+  `DBT_HOOKS_REVIEWED=1`, those commands are refused, with the list of the
+  files that declare hooks. A project whose packages are not installed yet is
+  refused too: their hooks cannot be read (`just v1|v2 deps` first).
+- `just doctor` gains a `[hooks]` section: where the hooks are, and which
+  commands they block.
+
 ### Changed
 
 - `dbt-project` is not a Python package: the shared `pyproject.toml`, `src/`,

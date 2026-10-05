@@ -670,6 +670,56 @@ for line in sys.stdin:
 }
 
 # -----------------------------------------------------------------------------
+# Hooks — SQL that runs outside any materialization
+# -----------------------------------------------------------------------------
+
+# dbt_hook_commands V — the dbt commands that execute on-run-start/end hooks
+# under engine V (plus the pre/post-hooks of whatever they build).
+#   v1, dbt Core 1.x: the RunTask family — run, build, seed, snapshot, test,
+#       source freshness — and retry, which replays one of them. compile,
+#       show, ls, parse and docs run no hook (checked in dbt-core 1.11).
+#   v2, dbt v2: compile and show run the on-run-start hooks too (observed
+#       with 2.0.6); docs is counted in as a precaution. parse and ls run none.
+dbt_hook_commands() {
+  case "${1:-}" in
+    v1) printf '%s' "run build seed snapshot test freshness retry" ;;
+    v2) printf '%s' "run build seed snapshot test freshness retry clone compile show docs" ;;
+  esac
+}
+
+# dbt_hook_sources PROJECT_DIR — files that declare hooks, relative to the
+# project: its own SQL/YAML (pre/post-hook, on-run-*), and the dbt_project.yml
+# of every installed package — elementary, for one, ships on-run-start/end
+# hooks that write to its own tables. Commented-out lines (YAML '#', SQL '--')
+# do not count.
+dbt_hook_sources() {
+  local PROJ="${1:-}" RE='(pre|post)[-_]hook|on-run-(start|end)' F
+  [ -d "$PROJ" ] || return 0
+  {
+    grep -rIniE --include='*.sql' --include='*.yml' --include='*.yaml' \
+      --exclude-dir=dbt_packages --exclude-dir=dbt_modules --exclude-dir=target \
+      --exclude-dir=logs --exclude-dir=.venv "$RE" "$PROJ" 2>/dev/null
+    for F in "$PROJ"/dbt_packages/*/dbt_project.yml "$PROJ"/dbt_modules/*/dbt_project.yml; do
+      [ -f "$F" ] && grep -HniE "$RE" "$F" 2>/dev/null
+    done
+  } | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|--)' | cut -d: -f1 | sort -u \
+    | while IFS= read -r F; do printf '%s\n' "${F#"$PROJ"/}"; done
+  return 0
+}
+
+# dbt_packages_unchecked PROJECT_DIR — true when the project declares packages
+# that are not installed yet: their hooks cannot be read. (dbt v2 installs
+# missing packages by itself on its first parse or compile.)
+dbt_packages_unchecked() {
+  local PROJ="${1:-}" F
+  [ -d "$PROJ/dbt_packages" ] && [ -n "$(ls -A "$PROJ/dbt_packages" 2>/dev/null)" ] && return 1
+  for F in "$PROJ/packages.yml" "$PROJ/dependencies.yml"; do
+    [ -f "$F" ] && grep -qE '^[[:space:]]*-[[:space:]]*(package|git|local|tarball|private):' "$F" && return 0
+  done
+  return 1
+}
+
+# -----------------------------------------------------------------------------
 # Lifecycle entry point
 # -----------------------------------------------------------------------------
 
