@@ -28,6 +28,7 @@ refute() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; else pas
 has()  { grep -qF -- "$2" <<<"$1"; }
 
 # --- environnement factice ---------------------------------------------------
+REAL_USERBASE="$(python3 -m site --user-base 2>/dev/null)"
 export HOME="$W/home"; mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -493,6 +494,76 @@ OUT="$(life "$FW2" create)"
 [ "$(grep -c '<- origin/' <<<"$OUT")" = 6 ] && pass "clone neuf de la flotte : les 6 branches viennent d'origin" || bad "clone neuf : branches ($OUT)"
 refute "…sans aucun accès aux dépôts d'origine" grep -q "fetching up-" <<<"$OUT"
 check "…v2/gamma présent" test -f "$FW2/v2/gamma/dbt/dbt_project.yml"
+
+# =============================================================================
+echo "== Coordinateur : un produit dont les branches vivent dans son propre dépôt =="
+mkup delta dbt prof_shared 1.10.0
+git init -q --bare -b main "$W/homes/delta.git"
+( cd "$W/fleet-src/delta" && git push -q "$W/homes/delta.git" main:main main:upstream-main main:v1 main:v2 )
+printf 'delta   %s  main  dbt  no  %s\n' "$W/fleet-up/delta.git" "$W/homes/delta.git" >> "$FW/.devcontainer/products.conf"
+OUT="$(life "$FW" start)"
+check "delta : worktree v2/delta sur la branche locale delta/v2" test "$(git -C "$FW/v2/delta" rev-parse --abbrev-ref HEAD 2>/dev/null)" = delta/v2
+check "…qui suit home-delta/v2 (le v2 du dépôt du produit)" test "$(git -C "$FW" rev-parse --abbrev-ref 'delta/v2@{upstream}')" = home-delta/v2
+check "…remote home-delta = le dépôt du produit" test "$(git -C "$FW" remote get-url home-delta)" = "$W/homes/delta.git"
+check "push.default = upstream dans le coordinateur" test "$(git -C "$FW" config --get push.default)" = upstream
+( cd "$FW/v2/delta" && echo "refacto" >> dbt/models/m_delta.sql && git commit -q -am "refacto depuis le coordinateur" && git push -q ) 2>/dev/null
+check "git push depuis v2/delta : le commit arrive dans le v2 du dépôt du produit" test "$(git -C "$W/homes/delta.git" log -1 --format=%s v2)" = "refacto depuis le coordinateur"
+refute "…et rien n'est poussé sur l'origin du coordinateur" git -C "$W/fleet-origin.git" rev-parse --verify -q refs/heads/delta/v2
+git clone -q -b v2 "$W/homes/delta.git" "$W/delta-side" 2>/dev/null
+( cd "$W/delta-side" && echo "select 2" > dbt/models/side.sql && git add -A && git commit -q -m "travail dans le container du produit" && git push -q origin v2 ) 2>/dev/null
+SYNC() { ( cd "$FW" && bash .devcontainer/dbt-run.sh sync "$@" ) 2>&1; }
+O="$(SYNC delta)"; has "$O" "delta/v2: fast-forwarded 1 commit(s) from home-delta/v2" && pass "just sync delta : worktree propre avancé" || bad "sync avance rapide ($O)"
+check "…v2/delta voit le commit fait côté produit" test "$(git -C "$FW/v2/delta" log -1 --format=%s)" = "travail dans le container du produit"
+( cd "$W/delta-side" && echo "select 3" >> dbt/models/side.sql && git commit -q -am "encore côté produit" && git push -q origin v2 ) 2>/dev/null
+echo "en cours" >> "$FW/v2/delta/dbt/models/m_delta.sql"
+O="$(SYNC delta)"; has "$O" "NOT applied: uncommitted changes" && pass "sync : worktree modifié jamais touché" || bad "sync worktree modifié ($O)"
+check "…ses modifications sont intactes" grep -q "en cours" "$FW/v2/delta/dbt/models/m_delta.sql"
+( cd "$FW/v2/delta" && git commit -q -am "local, non poussé" )
+O="$(SYNC delta)"; has "$O" "DIVERGED from home-delta/v2 (1 local, 1 there)" && pass "sync : divergence signalée, rien fusionné" || bad "sync divergence ($O)"
+( cd "$FW/v2/delta" && git pull -q --rebase && git push -q ) 2>/dev/null
+O="$(SYNC delta)"; has "$O" "delta/v2: up to date with home-delta/v2" && pass "sync : à jour après pull + push" || bad "sync à jour ($O)"
+O="$(cd "$FW" && bash .devcontainer/dbt-run.sh upstream-pull delta 2>&1)"; has "$O" "mirror on home-delta: upstream-main" && pass "upstream-pull delta : miroir publié dans le dépôt du produit" || bad "upstream-pull home ($O)"
+refute "…pas sur l'origin du coordinateur" git -C "$W/fleet-origin.git" rev-parse --verify -q refs/heads/upstream-main
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "delta: branches live in $W/homes/delta.git (remote home-delta)" && pass "doctor : où vivent les branches du produit" || bad "doctor : home non affiché"
+has "$O" "delta/v2 = home-delta/v2" && pass "doctor : delta/v2 à jour de home-delta/v2" || bad "doctor : suivi non affiché ($(grep -F 'delta/v2' <<<"$O" | head -2))"
+git -C "$FW" add .devcontainer/products.conf profiles/profiles.yml global/packages.yml 2>/dev/null; git -C "$FW" commit -q -m "fleet: delta (own repository)"; git -C "$FW" push -q origin main
+FW3="$W/fleet3"; git clone -q "$W/fleet-origin.git" "$FW3" 2>/dev/null
+OUT="$(life "$FW3" create)"
+has "$OUT" "branch delta/v2 <- home-delta/v2" && pass "clone neuf du coordinateur : delta vient de son propre dépôt" || bad "clone neuf : delta ($OUT)"
+check "…et son v2 est celui du dépôt du produit" test "$(git -C "$FW3/v2/delta" rev-parse HEAD)" = "$(git -C "$W/homes/delta.git" rev-parse v2)"
+
+echo "== product-new : le dépôt dédié créé, rempli depuis l'origine, puis déclaré =="
+mkup epsilon dbt prof_eps 1.10.0
+mkdir -p "$W/gh/acme"
+cat > "$W/stubs/gh" <<'EOF'
+#!/bin/bash
+case "$1 $2" in
+  "repo view") [ -d "$GH_ROOT/$3.git" ] || exit 1; [ "${4:-}" = "--json" ] && echo "${GH_VISIBILITY:-PRIVATE}"; exit 0 ;;
+  "repo create") git init -q --bare -b main "$GH_ROOT/$3.git" ;;
+esac
+EOF
+chmod +x "$W/stubs/gh"
+git config --global url."file://$W/gh/".insteadOf "https://github.com/"
+printf '{_commit: HEAD, _src_path: %s, author_email: t@t, author_name: Tester, claude_profile: '"''"', github_org: acme, project_type: dbt-fleet}\n' "$REPO_ROOT" > "$FW/.copier-answers.yml"
+echo 'DBT_PRODUCT_REPO_PREFIX="fl-"' >> "$FW/.devcontainer/dbt.conf"
+O="$(cd "$FW" && GH_ROOT="$W/gh" GH_TOKEN=dummy PYTHONUSERBASE="$REAL_USERBASE" bash .devcontainer/dbt-run.sh product-new epsilon "$W/fleet-up/epsilon.git" main dbt no 2>&1)"
+has "$O" "→ acme/fl-epsilon: main, upstream-main, v1, v2 published" && pass "product-new : dépôt créé et publié" || bad "product-new ($(tail -5 <<<"$O"))"
+for b in main upstream-main v1 v2; do git -C "$W/gh/acme/fl-epsilon.git" rev-parse --verify -q "refs/heads/$b" >/dev/null || bad "product-new : branche $b absente du dépôt créé"; done
+check "…v1 = v2 = la branche d'origine" test "$(git -C "$W/gh/acme/fl-epsilon.git" rev-parse v2)" = "$(git -C "$W/fleet-up/epsilon.git" rev-parse main)"
+A="$(git -C "$W/gh/acme/fl-epsilon.git" show main:.copier-answers.yml 2>/dev/null)"
+has "$A" "project_type: dbt-project" && has "$A" "upstream_repo_url: $W/fleet-up/epsilon.git" && has "$A" "bq_sandbox_project: sandbox-prj" && pass "…son main est un dbt-project aux réponses de la flotte (bac à sable)" || bad "product-new : réponses inattendues ($A)"
+git -C "$W/gh/acme/fl-epsilon.git" show main:profiles/profiles.yml 2>/dev/null | grep -q '^prof_eps:' && pass "…son hub de profils est amorcé (profil du projet)" || bad "product-new : hub non amorcé"
+git -C "$W/gh/acme/fl-epsilon.git" show main:.devcontainer/upstream_known_hosts >/dev/null 2>&1 || git -C "$W/gh/acme/fl-epsilon.git" show main:profiles/dbt.env | grep -q FLEET_COMMON && pass "…il reprend le dbt.env de la flotte" || bad "product-new : dbt.env de la flotte absent"
+grep -qE "^epsilon +$W/fleet-up/epsilon.git +main +dbt +no +https://github.com/acme/fl-epsilon.git" "$FW/.devcontainer/products.conf" && pass "…déclaré dans products.conf, HOME = le nouveau dépôt" || bad "product-new : ligne products.conf inattendue"
+check "…worktree v2/epsilon qui suit home-epsilon/v2" test "$(git -C "$FW" rev-parse --abbrev-ref 'epsilon/v2@{upstream}' 2>/dev/null)" = home-epsilon/v2
+O="$(cd "$FW" && GH_ROOT="$W/gh" GH_TOKEN=dummy PYTHONUSERBASE="$REAL_USERBASE" bash .devcontainer/dbt-run.sh product-new epsilon "$W/fleet-up/epsilon.git" 2>&1)"; has "$O" "already declared" && pass "product-new : produit déjà déclaré refusé" || bad "product-new doublon ($O)"
+mkup zeta dbt prof_z 1.10.0
+O="$(cd "$FW" && GH_ROOT="$W/gh" GH_TOKEN=dummy GH_VISIBILITY=PUBLIC PYTHONUSERBASE="$REAL_USERBASE" bash .devcontainer/dbt-run.sh product-new zeta "$W/fleet-up/zeta.git" main dbt no 2>&1)"
+has "$O" "is not PRIVATE — nothing was pushed" && pass "product-new : dépôt non privé → aucun push" || bad "product-new visibilité ($(tail -3 <<<"$O"))"
+refute "…le dépôt reste vide" git -C "$W/gh/acme/fl-zeta.git" rev-parse --verify -q refs/heads/main
+refute "…et zeta n'est pas déclaré" grep -q '^zeta ' "$FW/.devcontainer/products.conf"
+git config --global --unset-all url."file://$W/gh/".insteadOf
 
 echo "== Aucune fuite hors du bac à sable de test =="
 refute "le vrai ~/.gitconfig n'a pas reçu le verrou" grep -q "git.invalid" /home/"$(id -un)"/.gitconfig

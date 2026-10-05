@@ -12,8 +12,15 @@
 #   dbt-run.sh global <dbt args…>        dbt v2 on global/ (the products' v2
 #                                        as local packages)
 #   dbt-run.sh products                  the products and their state
-#   dbt-run.sh product-add <name> <url> [branch] [subdir] [global]
-#                                        ingest a data product (just product-add)
+#   dbt-run.sh sync [<product>]          fetch where the products' branches
+#                                        live, fast-forward the clean worktrees
+#   dbt-run.sh product-add <name> <url> [branch] [subdir] [global] [home]
+#                                        declare a product whose repository
+#                                        exists (home = its own repo, or '-')
+#   dbt-run.sh product-new <name> <url> [branch] [subdir] [global]
+#                                        create the product's own repository
+#                                        (dbt-project), fill it from upstream,
+#                                        then declare it here
 # Both:
 #   dbt-run.sh auto <dbt args…>          engine (and product) from the current
 #                                        directory — what the `dbt` function calls
@@ -83,9 +90,9 @@ upstream_pull_one() {
     echo "  $P_REMOTE/$BR: ${OLD:+${OLD:0:9} → }${NEW:0:9}"
     git -C "$WS" --no-pager log --oneline -n 20 "${OLD:+$OLD..}$NEW"
   fi
-  echo "→ mirror on origin: $P_MIRROR"
-  git -C "$WS" push origin "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
-    || echo "  WARNING: mirror not pushed (origin unreachable, or upstream history was rewritten)" >&2
+  echo "→ mirror on $P_HOME: $P_MIRROR"
+  _dbt_git_home -C "$WS" push "$P_HOME" "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
+    || echo "  WARNING: mirror not pushed ($P_HOME unreachable, or upstream history was rewritten)" >&2
   for V in $DBT_WORKTREES; do
     B="$(_dbt_br "$V")"
     git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
@@ -191,7 +198,7 @@ destinations() {
 products() {
   local N V P B S
   dbt_is_fleet || die "single-product workspace: no products.conf"
-  printf '%-18s %-6s %-10s %s\n' "PRODUCT" "GLOBAL" "UPSTREAM" "WORKTREES"
+  printf '%-18s %-6s %-10s %-34s %s\n' "PRODUCT" "GLOBAL" "UPSTREAM" "WORKTREES" "BRANCHES LIVE IN"
   for N in $(dbt_products); do
     dbt_use_product "$N" || continue
     S=""
@@ -199,31 +206,132 @@ products() {
       P="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
       if _dbt_is_worktree "$P"; then S="$S $V=$(git -C "$P" rev-parse --short HEAD 2>/dev/null)"; else S="$S $V=missing"; fi
     done
-    printf '%-18s %-6s %-10s%s\n' "$N" "$( [ "$P_GLOBAL" = 1 ] && echo yes || echo no)" "$P_BRANCH" "$S"
+    printf '%-18s %-6s %-10s %-34s %s\n' "$N" "$( [ "$P_GLOBAL" = 1 ] && echo yes || echo no)" "$P_BRANCH" "${S# }" "${P_HOME_URL:-this repository (origin)}"
   done
 }
 
-# product_add NAME URL [BRANCH] [SUBDIR] [GLOBAL] — declare, then build its
-# worktrees. Never pushes: publishing the new branches is the user's call.
+# The workspace token, for the product repositories, when the shell has none
+# (a hook got it from .env; a terminal may not have sourced it)
+load_token() {
+  [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && return 0
+  [ -f "$WS/.env" ] || return 0
+  GITHUB_PERSONAL_ACCESS_TOKEN="$(sed -n 's/^GITHUB_PERSONAL_ACCESS_TOKEN=//p' "$WS/.env" | tail -1 | tr -d '"'"'"'')"
+  export GITHUB_PERSONAL_ACCESS_TOKEN
+}
+
+sync_products() {
+  local N
+  dbt_is_fleet || { dbt_use_product ""; dbt_sync; return; }
+  load_token
+  if [ -n "${1:-}" ]; then select_product "$1"; dbt_sync; return; fi
+  for N in $(dbt_products); do dbt_use_product "$N" && dbt_sync; done
+}
+
+# product_add NAME URL [BRANCH] [SUBDIR] [GLOBAL] [HOME] — declare, then
+# build its worktrees. HOME = the product's own repository (where its v1/v2
+# live), '-' = this repository. Never pushes: publishing is the user's call.
 product_add() {
-  local N="${1:-}" URL="${2:-}" BR="${3:-}" SUB="${4:-}" GL="${5:-}"
+  local N="${1:-}" URL="${2:-}" BR="${3:-}" SUB="${4:-}" GL="${5:-}" HOMEU="${6:-}"
   dbt_is_fleet || die "single-product workspace: no products.conf"
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-add <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/products.conf"; fi
   case "$URL" in ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "'$URL' is not a git URL (git@host:group/repo.git, ssh://…, https://… or a local path)" ;; esac
   case "${GL:-no}" in yes|no) ;; *) die "GLOBAL must be yes or no (got '$GL')" ;; esac
+  case "${HOMEU:--}" in -|ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "HOME must be a git URL or '-' (got '$HOMEU')" ;; esac
+  load_token
   # keep the file line-terminated before appending
   [ -s "$DBT_PRODUCTS_CONF" ] && [ -n "$(tail -c1 "$DBT_PRODUCTS_CONF")" ] && echo >> "$DBT_PRODUCTS_CONF"
-  printf '%-14s %s  %s  %s  %s\n' "$N" "$URL" "${BR:-main}" "${SUB:--}" "${GL:-no}" >> "$DBT_PRODUCTS_CONF"
+  printf '%-14s %s  %s  %s  %s  %s\n' "$N" "$URL" "${BR:-main}" "${SUB:--}" "${GL:-no}" "${HOMEU:--}" >> "$DBT_PRODUCTS_CONF"
   echo "→ $N declared in .devcontainer/products.conf"
   bash -c 'source "$1/.devcontainer/lib-dbt.sh" && dbt_process "$1" create' _ "$WS"
   dbt_load_conf "$WS"
   dbt_use_product "$N" || die "$N is not readable back from products.conf"
   echo
-  echo "Next: commit .devcontainer/products.conf (and upstream_known_hosts if a new host was pinned),"
-  echo "then publish the branches — nothing is pushed for you:"
-  echo "  just upstream-pull $N && git -C ${P_SHOW1%/} push -u origin $P_B1 && git -C ${P_SHOW2%/} push -u origin $P_B2"
+  echo "Next: commit .devcontainer/products.conf (and upstream_known_hosts if a new host was pinned)."
+  if [ "$P_HOME" = "origin" ]; then
+    echo "Then publish the branches — nothing is pushed for you:"
+    echo "  just upstream-pull $N && git -C ${P_SHOW1%/} push -u origin $P_B1 && git -C ${P_SHOW2%/} push -u origin $P_B2"
+  fi
+}
+
+# product_new NAME URL [BRANCH] [SUBDIR] [GLOBAL] — the coordinator model in
+# one command: create the product's own repository from the template
+# (project_type dbt-project, the coordinator's sandbox answers), fill it from
+# upstream (main = tooling, upstream-<br> = mirror, v1 = v2 = the upstream
+# branch), push it — PRIVATE, checked before any push — then declare it here.
+product_new() {
+  local N="${1:-}" URL="${2:-}" BR="${3:-main}" SUB="${4:--}" GL="${5:-no}"
+  local A ORG SRC REF REPO HOMEU TMP R PROF
+  dbt_is_fleet || die "single-product workspace: no products.conf"
+  [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-new <name> <git-url> [branch] [subdir] [global: yes|no]"
+  printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
+  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/products.conf"; fi
+  case "$GL" in yes|no) ;; *) die "GLOBAL must be yes or no (got '$GL')" ;; esac
+  command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) not found"
+  command -v copier >/dev/null 2>&1 || die "copier not found"
+  load_token
+  export GH_TOKEN="${GH_TOKEN:-${GITHUB_PERSONAL_ACCESS_TOKEN:-}}"
+  [ -n "$GH_TOKEN" ] || die "no GitHub token: set GITHUB_PERSONAL_ACCESS_TOKEN in .env"
+  A="$WS/.copier-answers.yml"
+  ORG="$(sed -nE 's/.*github_org: ([^,}]+).*/\1/p' "$A" | head -1 | tr -d "' ")"
+  SRC="$(sed -nE 's/.*_src_path: ([^,}]+).*/\1/p' "$A" | head -1 | tr -d "' ")"
+  REF="$(sed -nE 's/.*_commit: ([^,}]+).*/\1/p' "$A" | head -1 | tr -d "' ")"
+  [ -n "$ORG" ] && [ -n "$SRC" ] || die "cannot read github_org / _src_path from .copier-answers.yml"
+  REPO="${DBT_PRODUCT_REPO_PREFIX:-}$N"
+  HOMEU="https://github.com/$ORG/$REPO.git"
+  if gh repo view "$ORG/$REPO" >/dev/null 2>&1; then
+    die "$ORG/$REPO already exists — declare it instead: just product-add $N $URL $BR $SUB $GL $HOMEU"
+  fi
+  TMP="$(mktemp -d)"
+  R="$TMP/$REPO"
+  # shellcheck disable=SC2329
+  ans() { sed -nE "s/.*[{ ]$1: ([^,}]+).*/\1/p" "$A" | head -1 | sed -E "s/^'(.*)'$/\1/"; }
+  echo "→ rendering $REPO (dbt-project, template ${REF:-latest})"
+  copier copy ${REF:+--vcs-ref "$REF"} --defaults --quiet \
+    --data "project_name=$REPO" \
+    --data "project_description=Reprise dbt de $N : dbt Core 1.x et migration dbt v2 (coordonné par $(basename "$WS"))" \
+    --data project_type=dbt-project \
+    --data "upstream_repo_url=$URL" --data "upstream_branch=$BR" --data "dbt_project_subdir=$( [ "$SUB" = "-" ] && echo "" || echo "$SUB")" \
+    --data "bq_sandbox_project=${DBT_BQ_PROJECT:-}" --data "bq_sandbox_dataset=${DBT_BQ_DATASET:-}" \
+    --data "bq_dataset_prefix=${DBT_BQ_DATASET_PREFIX:-}" --data "bq_location=${DBT_BQ_LOCATION:-EU}" \
+    --data "dbt_target_name=${DBT_TARGET_NAME:-dev}" \
+    --data "author_name=$(ans author_name)" --data "author_email=$(ans author_email)" \
+    --data "github_org=$ORG" --data "claude_profile=$(ans claude_profile)" \
+    "$SRC" "$R" >/dev/null 2>"$TMP/copier.log" || { tail -n 5 "$TMP/copier.log" >&2; rm -rf "$TMP"; die "copier failed"; }
+  # same host keys and the same fleet-wide env as the coordinator
+  [ -f "$WS/.devcontainer/upstream_known_hosts" ] && cp "$WS/.devcontainer/upstream_known_hosts" "$R/.devcontainer/"
+  cp "$WS/profiles/dbt.env" "$R/profiles/dbt.env"
+  git -C "$R" init -q -b main
+  git -C "$R" remote add upstream "$URL"
+  git -C "$R" config remote.upstream.pushurl DISABLED
+  git -C "$R" config remote.upstream.tagOpt --no-tags
+  echo "→ fetching $URL ($BR)"
+  GIT_TERMINAL_PROMPT=0 timeout 300 git -C "$R" fetch --quiet --no-tags upstream "$BR" \
+    || { rm -rf "$TMP"; die "cannot fetch $URL ($BR): VPN? SSH key? pinned host key?"; }
+  git -C "$R" update-ref "refs/remotes/upstream/$BR" FETCH_HEAD
+  # the product repository's own hub, seeded like its first start would
+  PROF="$(git -C "$R" show "upstream/$BR:$( [ "$SUB" = "-" ] || [ "$SUB" = "." ] && echo "" || echo "$SUB/")dbt_project.yml" 2>/dev/null \
+    | sed -nE "s/^profile:[[:space:]]*['\"]?([^'\"#[:space:]]+).*/\1/p" | head -1)"
+  if [ -n "$PROF" ] && [ -n "${DBT_BQ_PROJECT:-}" ] && [ -n "${DBT_BQ_DATASET:-}" ]; then
+    { _dbt_hub_header; _dbt_hub_profile "$PROF"; } > "$R/profiles/profiles.yml"
+  fi
+  git -C "$R" add -A
+  git -C "$R" -c user.name="$(ans author_name)" -c user.email="$(ans author_email)" commit -q \
+    -m "chore: scaffold from sap-template (dbt-project, ${REF:-latest}), created by $(basename "$WS")"
+  git -C "$R" branch -q --no-track v1 "upstream/$BR"
+  git -C "$R" branch -q --no-track v2 v1
+  echo "→ creating $ORG/$REPO (private)"
+  gh repo create "$ORG/$REPO" --private --description "Reprise dbt de $N : dbt Core 1.x et migration dbt v2" >/dev/null \
+    || { rm -rf "$TMP"; die "gh repo create $ORG/$REPO failed"; }
+  [ "$(gh repo view "$ORG/$REPO" --json visibility --jq .visibility 2>/dev/null)" = "PRIVATE" ] \
+    || { rm -rf "$TMP"; die "$ORG/$REPO is not PRIVATE — nothing was pushed; fix its visibility first"; }
+  git -C "$R" remote add origin "$HOMEU"
+  _dbt_git_home -C "$R" push --quiet origin main "refs/remotes/upstream/$BR:refs/heads/upstream-$BR" v1 v2 \
+    || { rm -rf "$TMP"; die "push to $ORG/$REPO failed — the repository exists, empty or partial: check it"; }
+  rm -rf "$TMP"
+  echo "→ $ORG/$REPO: main, upstream-$BR, v1, v2 published"
+  product_add "$N" "$URL" "$BR" "$SUB" "$GL" "$HOMEU"
 }
 
 # -----------------------------------------------------------------------------
@@ -400,9 +508,13 @@ case "$MODE" in
     products ;;
   product-add)
     product_add "$@" ;;
+  product-new)
+    product_new "$@" ;;
+  sync)
+    sync_products "${1:-}" ;;
   *)
     if dbt_is_fleet; then
-      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | product-add <name> <url> [branch] [subdir] [global]" >&2
+      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
     else
       echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull" >&2
     fi

@@ -19,16 +19,26 @@ réunit leurs v2 pour le refactoring croisé :
 | `v2/<produit>/` | `<produit>/v2` | dbt v2 — `dbtf` | la migration, puis le refactoring du produit |
 | `global/` | `main` | dbt v2 | les v2 marqués `GLOBAL` en packages locaux, et les modèles partagés |
 
-La branche `main` porte l'outillage et `global/`. Le code de chaque produit vit
-dans ses deux worktrees, ignorés par `main` : chaque worktree a son propre
-`git status`, sa branche et ses commits.
+**Ce dépôt est un coordinateur.** Sa branche `main` porte l'outillage,
+`products.conf` et `global/` — l'effort du dbt global. Les branches de chaque
+produit vivent dans **le dépôt dédié du produit** (colonne `HOME` de
+`products.conf`, remote `home-<produit>`) ; les worktrees `v1/<produit>/` et
+`v2/<produit>/` les suivent : un `git push` depuis un worktree part dans le
+dépôt du produit, jamais ici. Chaque worktree a son propre `git status`.
 
-Branches par produit :
+Branches, dans le dépôt de chaque produit :
 
-- `up-<produit>/<branche>` — le dépôt d'origine, en lecture seule (remote `up-<produit>`) ;
-- `<produit>/upstream` (sur `origin`) — son miroir exact ; `just upstream-pull <produit>` le rafraîchit ;
-- `<produit>/v1` — part du miroir ; n'y committer que ce que la migration exige côté 1.x ;
-- `<produit>/v2` — part de `<produit>/v1` ; migration, puis refactoring.
+- `upstream-<branche>` — le miroir exact du dépôt d'origine (lu ici par le remote `up-<produit>`, en lecture seule) ; `just upstream-pull <produit>` le rafraîchit ;
+- `v1` — part du miroir ; n'y committer que ce que la migration exige côté 1.x ;
+- `v2` — part de `v1` ; migration, puis refactoring.
+
+Localement, elles s'appellent `<produit>/v1` et `<produit>/v2`. Un produit dont
+`HOME` vaut `-` garde ses branches dans ce dépôt (`<produit>/…` sur `origin`).
+
+Le dépôt d'un produit reste utilisable seul (gabarit `dbt-project`, son propre
+container). Les deux voient les mêmes branches : `just sync` (aussi lancé à
+chaque démarrage) récupère les dépôts des produits et avance les worktrees
+propres ; un worktree modifié, en avance ou divergent est signalé, jamais touché.
 
 **Une seule version de dbt Core pour toutes les v1** (`DBT_V1_PINS`, dans
 `.devcontainer/dbt.conf`) : dbt Power User n'a qu'un interpréteur par fenêtre.
@@ -58,7 +68,9 @@ fois le SQL compilé vérifié identique.
 5. **`v1/<produit>/` reste fidèle à l'origine.** Le refactoring se fait dans
    `v2/` et `global/`.
 6. **Un modèle partagé vit dans `global/`**, pas dans un produit : un produit ne
-   lit jamais le code d'un autre produit par un chemin de fichier.
+   lit jamais le code d'un autre produit par un chemin de fichier. Déplacer un
+   modèle d'un produit vers `global/` = deux commits dans deux dépôts (le retrait
+   dans le dépôt du produit, l'ajout ici) : même identifiant dans les deux messages.
 7. Ne jamais committer `.env`, `.mcp.json`, `*.pem`.
 8. Activer TOUJOURS après `setObjectSource` (MCP ADT).
 
@@ -102,12 +114,14 @@ just v2 <produit> parse             # dbt v2, hors ligne
 just global parse                   # les v2 réunis
 just destinations <produit>         # v1 vs v2 : où chaque modèle serait écrit
 just destinations global            # espaces de noms et collisions du global
+just sync [<produit>]               # dépôts des produits -> worktrees (avance rapide, propres seulement)
 just upstream-pull [<produit>]      # nouveautés de l'origine (lecture seule) + miroir
-just product-add <nom> <url-git> [branche] [dossier] [global]
+just product-new <nom> <url-gitlab> [branche] [dossier] [global]   # crée le dépôt dédié, privé
 ```
 
-Git se fait dans le worktree concerné : `cd v2/<produit> && git commit`, puis
-`git push -u origin <produit>/v2`. Reprendre l'origine :
+Git se fait dans le worktree concerné : `cd v2/<produit> && git commit && git push`
+— le push part dans le dépôt du produit. `global/` se committe ici, sur `main`.
+Avant de travailler sur un produit : `just sync <produit>`. Reprendre l'origine :
 `cd v1/<produit> && git merge up-<produit>/<branche>`, puis
 `cd ../../v2/<produit> && git merge <produit>/v1`.
 
@@ -162,7 +176,8 @@ Git se fait dans le worktree concerné : `cd v2/<produit> && git commit`, puis
 
 ```bash
 just doctor / setup               # diagnostiquer / reposer l'environnement
-just products / product-add       # la flotte
+just products / sync              # la flotte, la mise à jour
+just product-new / product-add    # ingérer un produit
 just v1 … / just v2 … / just global …
 just destinations [<produit>|global]
 just upstream-pull [<produit>]

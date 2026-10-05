@@ -23,8 +23,16 @@ setup:
 products:
     @bash .devcontainer/dbt-run.sh products
 
-# Ingérer un produit : just product-add <nom> <url-git> [branche] [dossier-dbt] [global: yes|no]
-product-add name url branch='main' subdir='-' global='no':
+# Récupérer les dépôts des produits et avancer les worktrees propres (aussi fait à chaque démarrage)
+sync product='':
+    @bash .devcontainer/dbt-run.sh sync "$@"
+
+# Nouveau produit, avec son propre dépôt GitHub créé (privé) : just product-new <nom> <url-gitlab> [branche] [dossier-dbt] [global]
+product-new name url branch='main' subdir='-' global='no':
+    @bash .devcontainer/dbt-run.sh product-new "$@"
+
+# Produit dont le dépôt existe déjà : just product-add <nom> <url-gitlab> [branche] [dossier] [global] [url-du-dépôt-produit]
+product-add name url branch='main' subdir='-' global='no' home='-':
     @bash .devcontainer/dbt-run.sh product-add "$@"
 
 # --- dbt (voie gardée : hub de profils imposé, écritures contrôlées) ----------

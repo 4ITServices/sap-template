@@ -194,11 +194,21 @@ declares them, one per line: `NAME URL [BRANCH] [SUBDIR] [GLOBAL]`.
 | `v2/<product>/` | `<product>/v2` | dbt v2 |
 | `global/` | `main` | dbt v2 — the v2 of the products flagged `GLOBAL`, as local packages |
 
-Per product: remote `up-<product>` (fetch-only, push-locked, one lock per
-upstream host), mirror `<product>/upstream` on origin. The rest is the
-single-product machinery, product by product: pinned host keys, locked and
-self-repairing worktrees, the profile hub (one profile per name asked by a
-product or by `global/`, appended when missing), the write guard.
+Per product: remote `up-<product>` (the upstream: fetch-only, push-locked,
+one lock per upstream host). Its branches live either in **its own
+repository** — column `HOME`, remote `home-<product>`, the coordinator
+model: the worktrees track its `v1`/`v2` (`push.default=upstream`, so `git
+push` goes there), its mirror is `upstream-<branch>`, and this repository only
+holds `main` — or here (`HOME -`: `<product>/v1`, `<product>/v2`,
+`<product>/upstream` on origin). A product repository is a plain dbt-project
+repository, usable alone. `just sync` (also run at each start, unless
+`DBT_SYNC_ON_START=0`) fetches every home and fast-forwards the clean
+worktrees; dirty, ahead or diverged ones are reported, never touched. Hooks
+fetch the homes with the workspace token (`GITHUB_PERSONAL_ACCESS_TOKEN`,
+`.env`) for that invocation only. The rest is the single-product machinery,
+product by product: pinned host keys, locked and self-repairing worktrees,
+the profile hub (one profile per name asked by a product or by `global/`,
+appended when missing), the write guard.
 
 - **One dbt Core for all the v1.** dbt Power User has one interpreter per
   window, so a fleet shares one venv. A product that pins another version
@@ -218,10 +228,13 @@ product or by `global/`, appended when missing), the write guard.
   are ignored — only those of `global/` count. Writes in `global/` are also
   refused when a selected relation is written by two nodes;
   `just destinations global` lists such collisions.
-- **Ingesting a product**: `just product-add <name> <url> [branch] [subdir]
-  [global]` appends the line and builds its worktrees. Nothing is pushed:
-  commit `products.conf`, then publish `<name>/upstream`, `<name>/v1`,
-  `<name>/v2` (the command prints how).
+- **Ingesting a product**: `just product-new <name> <url> [branch] [subdir]
+  [global]` renders a dbt-project repository from the same template version
+  (with the fleet's sandbox answers), fills it from upstream (`main`,
+  `upstream-<branch>`, `v1` = `v2` = the upstream branch, its hub seeded),
+  creates `<github_org>/<DBT_PRODUCT_REPO_PREFIX><name>` — private, checked
+  before anything is pushed — then declares it. `just product-add … [home]`
+  declares a product whose repository exists.
 
 ### Starting a new dbt-project repository
 

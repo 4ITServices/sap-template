@@ -143,8 +143,8 @@ upstream_repo_url:
   default: ""
   when: "{{ project_type == 'dbt-project' }}"
   validator: >-
-    {% if project_type == 'dbt-project' and not (upstream_repo_url | regex_search('^(ssh://|https://|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:).+')) %}
-    URL git attendue (git@hôte:groupe/depot.git, ssh://… ou https://…)
+    {% if project_type == 'dbt-project' and not (upstream_repo_url | regex_search('^(ssh://|https://|file://|/|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:).+')) %}
+    URL git attendue (git@hôte:groupe/depot.git, ssh://…, https://…, ou un chemin local)
     {% endif %}
 
 upstream_branch:

@@ -97,7 +97,21 @@ and commit messages; this changelog starts at v0.8.12.
   - Copier: a computed `dbt_workspace` flag (not stored in the answers)
     selects the files shared by both dbt types; `fleet_v1_pins` is asked for
     `dbt-fleet` only, the sandbox questions for both.
-- **Tests**: 47 offline fleet checks in `scripts/test-lib-dbt.sh` (173 in
+- **Coordinator model** (column `HOME` of `products.conf`): a product's
+  branches can live in its **own** repository — a plain dbt-project repo,
+  usable alone. The fleet then only holds `main` (tooling, `products.conf`,
+  `global/`); worktree branches `<product>/v1|v2` track `home-<product>/v1|v2`
+  and `push.default=upstream` sends `git push` there; the upstream mirror is
+  the product repo's `upstream-<branch>`. `just sync` (also at each start,
+  `DBT_SYNC_ON_START`) fetches every home and fast-forwards the clean
+  worktrees — dirty, ahead or diverged ones are reported, never touched.
+  Hooks fetch the homes with the workspace token, for that invocation only.
+- **`just product-new <name> <url> …`**: renders the product's dbt-project
+  repository from the fleet's template version and sandbox answers, fills it
+  from upstream (`main`, `upstream-<branch>`, `v1` = `v2`, hub seeded),
+  creates `<github_org>/<DBT_PRODUCT_REPO_PREFIX><name>` — private, checked
+  before anything is pushed — then declares it.
+- **Tests**: 76 offline fleet checks in `scripts/test-lib-dbt.sh` (202 in
   all), and a `dbt-fleet` render in `scripts/test-template-render.sh`.
 
 ### Fixed (on the unreleased dbt-project type)

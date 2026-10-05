@@ -115,11 +115,22 @@ done
 echo "[worktrees]"
 for N in $(dbt_products); do
   dbt_use_product "$N" || continue
+  [ "$P_HOME" != "origin" ] && info "$N: branches live in $P_HOME_URL (remote $P_HOME)"
   for V in $DBT_WORKTREES; do
     W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
     if _dbt_is_worktree "$W"; then
       B="$(git -C "$W" rev-parse --abbrev-ref HEAD 2>/dev/null)"
       ok "$SHOW on branch $B ($(git -C "$W" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$W" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
+      EXP="$(_dbt_br "$V")"
+      [ "$B" = "$EXP" ] || ko "$SHOW is on '$B', not on its branch $EXP" "finish the rebase/merge in progress, or: git -C ${SHOW%/} checkout $EXP"
+      U="$P_HOME/$(_dbt_hbr "$V")"
+      if [ -n "${P_NAME:-}" ] && git -C "$WS" show-ref --verify --quiet "refs/remotes/$U"; then
+        read -r AH BE <<< "$(git -C "$WS" rev-list --left-right --count "$EXP...$U" 2>/dev/null)"
+        [ "${AH:-0}${BE:-0}" = "00" ] && info "$EXP = $U (as last fetched: just sync)" \
+          || info "$EXP: ${AH:-?} ahead / ${BE:-?} behind $U (as last fetched) — just sync, git push"
+        [ "$(git -C "$WS" rev-parse --abbrev-ref "$EXP@{upstream}" 2>/dev/null)" = "$U" ] \
+          || ko "$EXP does not track $U" "just setup"
+      fi
       git -C "$WS" worktree list --porcelain 2>/dev/null | awk -v p="$W" '$1=="worktree"{f=(substr($0,10)==p)} f&&$1=="locked"{found=1} END{exit !found}' \
         && ok "$SHOW locked against prune" || ko "$SHOW not locked" "just setup"
       if P="$(dbt_project_dir "$V")"; then

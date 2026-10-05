@@ -1,7 +1,7 @@
 # =============================================================================
 # Data products of this fleet — read by .devcontainer/lib-dbt.sh
 #
-# One product per line:   NAME  URL  [BRANCH]  [SUBDIR]  [GLOBAL]
+# One product per line:   NAME  URL  [BRANCH]  [SUBDIR]  [GLOBAL]  [HOME]
 #   NAME    directory and branch namespace: worktrees v1/NAME and v2/NAME on
 #           branches NAME/v1 and NAME/v2 (lowercase, digits and '-')
 #   URL     git URL of the dbt repository taken over — read only, push locked
@@ -9,10 +9,17 @@
 #   SUBDIR  folder that holds dbt_project.yml in that repository
 #           ('.' = its root, '-' = auto-detect)
 #   GLOBAL  yes = pulled into global/ as a local package (its v2 must parse)
+#   HOME    the product's OWN repository, where its branches live (v1, v2,
+#           upstream-<branch>) — the coordinator model: this repository then
+#           only holds main and global/, and `git push` from a worktree goes
+#           there. '-' = the branches live in this repository instead.
 # '-' = default value. Comments start with '#'.
 #
-# Add a product:  just product-add NAME URL [BRANCH] [SUBDIR] [GLOBAL]
+# New product, with its own repository created for you:
+#   just product-new NAME URL [BRANCH] [SUBDIR] [GLOBAL]
+# Product whose repository already exists:
+#   just product-add NAME URL [BRANCH] [SUBDIR] [GLOBAL] [HOME]
 # This file is PROJECT-OWNED after the first render (copier _skip_if_exists).
 # =============================================================================
-# NAME          URL                                        BRANCH  SUBDIR  GLOBAL
-# sales         git@gitlab.example.com:data/dwh-sales.git  main    dbt     yes
+# NAME   URL                                        BRANCH  SUBDIR  GLOBAL  HOME
+# sales  git@gitlab.example.com:data/dwh-sales.git  main    dbt     yes     https://github.com/acme/dwh-sales.git

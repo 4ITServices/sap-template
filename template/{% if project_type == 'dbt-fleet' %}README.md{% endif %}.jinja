@@ -8,16 +8,18 @@ migration vers dbt v2, et un projet `global/` qui réunit les v2 pour le
 refactoring croisé.
 
 ```
-{{ project_name }}/         branche main : l'outillage et global/
+{{ project_name }}/         branche main : l'outillage et global/ (le coordinateur)
 ├── .devcontainer/          container, hooks, dbt.conf, products.conf (les produits)
 ├── profiles/               hub de profils dbt (bac à sable) + dbt.env
 ├── global/                 projet dbt v2 : les v2 en packages locaux + modèles partagés
-├── v1/<produit>/           worktree <produit>/v1 — projet d'origine, dbt Core commun
-└── v2/<produit>/           worktree <produit>/v2 — migration dbt v2, puis refactoring
+├── v1/<produit>/           worktree de la branche v1 du dépôt du produit — dbt Core commun
+└── v2/<produit>/           worktree de sa branche v2 — migration dbt v2, puis refactoring
 ```
 
-Les worktrees sont des branches de CE dépôt. Ils n'apparaissent qu'une fois le
-container démarré.
+Chaque produit a son propre dépôt (colonne `HOME` de `products.conf`) : ses
+branches y vivent, et un `git push` depuis `v1/<produit>` ou `v2/<produit>`
+part là-bas. Ce dépôt-ci ne porte que l'outillage et `global/`. Les worktrees
+n'apparaissent qu'une fois le container démarré.
 
 ## Prérequis sur l'hôte
 
@@ -53,11 +55,15 @@ User.
 ## Ingérer un data product
 
 ```bash
-just product-add <nom> <url-git> [branche] [dossier-dbt] [global: yes|no]
-git add .devcontainer/products.conf && git commit -m "feat: ingest <nom>"
-just upstream-pull <nom>
-git -C v1/<nom> push -u origin <nom>/v1 && git -C v2/<nom> push -u origin <nom>/v2
+just product-new <nom> <url-gitlab> [branche] [dossier-dbt] [global: yes|no]
+git add .devcontainer/products.conf profiles/profiles.yml && git commit -m "feat: ingest <nom>"
 ```
+
+`product-new` crée le dépôt dédié du produit (privé, vérifié avant tout push),
+le remplit depuis GitLab (`main` = outillage, `upstream-<branche>` = miroir,
+`v1` = `v2` = la branche d'origine), puis le déclare ici et crée ses worktrees.
+Pour un produit dont le dépôt existe déjà :
+`just product-add <nom> <url-gitlab> <branche> <dossier> <global> <url-du-dépôt>`.
 
 `global` ne se met à `yes` qu'une fois la v2 du produit parse sans erreur.
 

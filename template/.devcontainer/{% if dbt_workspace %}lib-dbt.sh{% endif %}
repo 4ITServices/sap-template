@@ -12,10 +12,16 @@
 #     v1/            branch v1            v1/<product>/   branch <product>/v1
 #     v2/            branch v2            v2/<product>/   branch <product>/v2
 #     remote upstream                     remote up-<product>
-#     mirror on origin: upstream-<br>     mirror on origin: <product>/upstream
-#                                         global/  a dbt v2 project that pulls
+#     mirror on origin: upstream-<br>     global/  a dbt v2 project that pulls
 #                                                  the v2 of the products in
 #                                                  as local packages
+#
+# Where a fleet product's branches LIVE (column HOME of products.conf):
+#   - its own repository (a dbt-project repo, the coordinator model): remote
+#     home-<product>; the worktrees track its v1/v2, `git push` goes there,
+#     the mirror is its upstream-<br>; this repository only holds main
+#   - or this repository (HOME '-'): <product>/v1, <product>/v2 and the
+#     mirror <product>/upstream on origin
 # Every per-product function works on the CURRENT product, chosen with
 # dbt_use_product (no argument in single mode).
 #
@@ -44,7 +50,7 @@
 # Include guard (tolerates double-sourcing)
 [ -n "${_LIB_DBT_LOADED:-}" ] && return 0
 _LIB_DBT_LOADED=1
-LIB_DBT_VERSION=2
+LIB_DBT_VERSION=3
 
 # Install locations — overridable for tests
 DBT_V1_VENV="${DBT_V1_VENV:-/opt/dbt-v1}"
@@ -93,7 +99,8 @@ dbt_is_fleet() { [ "${DBT_FLEET:-0}" = "1" ]; }
 # Products
 # -----------------------------------------------------------------------------
 
-# products.conf, one product per line:  NAME  URL  [BRANCH]  [SUBDIR]  [GLOBAL]
+# products.conf, one product per line:
+#   NAME  URL  [BRANCH]  [SUBDIR]  [GLOBAL]  [HOME]
 # ('-' = default, '#' starts a comment). Printed without comments/blank lines.
 _dbt_products_lines() {
   [ -f "${DBT_PRODUCTS_CONF:-}" ] || return 0
@@ -106,14 +113,16 @@ dbt_products() {
 }
 
 # dbt_use_product [NAME] — make NAME the current product. Sets:
-#   P_NAME P_URL P_BRANCH P_SUBDIR P_GLOBAL P_REMOTE P_MIRROR
-#   P_B1 P_B2 (branches)  P_WT1 P_WT2 (worktrees)  P_SHOW1 P_SHOW2 (display)
-#   P_ENV (env file)  P_TAG (log prefix)
+#   P_NAME P_URL P_BRANCH P_SUBDIR P_GLOBAL P_REMOTE (upstream remote)
+#   P_HOME P_HOME_URL (remote where the branches live) P_HB1 P_HB2 P_MIRROR
+#   (branch names THERE)  P_B1 P_B2 (local branches)  P_WT1 P_WT2 (worktrees)
+#   P_SHOW1 P_SHOW2 (display)  P_ENV (env file)  P_TAG (log prefix)
 dbt_use_product() {
-  local N="${1:-}" L URL BR SUB GL REST
+  local N="${1:-}" L URL BR SUB GL HOMEU REST
   if ! dbt_is_fleet; then
     P_NAME=""; P_URL="${DBT_UPSTREAM_URL:-}"; P_BRANCH="${DBT_UPSTREAM_BRANCH:-main}"
     P_SUBDIR="${DBT_PROJECT_SUBDIR:-}"; P_GLOBAL=0
+    P_HOME="origin"; P_HOME_URL=""; P_HB1="v1"; P_HB2="v2"
     P_REMOTE="upstream"; P_MIRROR="upstream-$P_BRANCH"; P_B1="v1"; P_B2="v2"
     P_WT1="$DBT_WS/v1"; P_WT2="$DBT_WS/v2"; P_SHOW1="v1/"; P_SHOW2="v2/"
     P_ENV="$DBT_WS/profiles/dbt.env"; P_TAG=""
@@ -121,16 +130,24 @@ dbt_use_product() {
   fi
   # no product selected yet: every P_* is defined (callers run under set -u)
   P_NAME=""; P_URL=""; P_BRANCH="main"; P_SUBDIR=""; P_GLOBAL=0; P_REMOTE=""; P_MIRROR=""
+  P_HOME="origin"; P_HOME_URL=""; P_HB1=""; P_HB2=""
   P_B1=""; P_B2=""; P_WT1=""; P_WT2=""; P_SHOW1=""; P_SHOW2=""; P_ENV="$DBT_WS/profiles/dbt.env"; P_TAG=""
   [ -n "$N" ] && [ "$N" != "-" ] || return 1
   L="$(_dbt_products_lines | awk -v n="$N" '$1==n' | head -1)"
   [ -n "$L" ] || return 1
-  read -r _ URL BR SUB GL REST <<< "$L"
+  read -r _ URL BR SUB GL HOMEU REST <<< "$L"
   [ "${BR:-}" = "-" ] && BR=""
   [ "${SUB:-}" = "-" ] && SUB=""
+  [ "${HOMEU:-}" = "-" ] && HOMEU=""
   P_NAME="$N"; P_URL="$URL"; P_BRANCH="${BR:-main}"; P_SUBDIR="${SUB:-}"
   case "${GL:-}" in yes|true|1|global) P_GLOBAL=1 ;; *) P_GLOBAL=0 ;; esac
-  P_REMOTE="up-$N"; P_MIRROR="$N/upstream"; P_B1="$N/v1"; P_B2="$N/v2"
+  P_REMOTE="up-$N"; P_B1="$N/v1"; P_B2="$N/v2"
+  if [ -n "${HOMEU:-}" ]; then
+    # its own repository (a dbt-project repo): same branch names as there
+    P_HOME="home-$N"; P_HOME_URL="$HOMEU"; P_HB1="v1"; P_HB2="v2"; P_MIRROR="upstream-$P_BRANCH"
+  else
+    P_HOME="origin"; P_HOME_URL=""; P_HB1="$N/v1"; P_HB2="$N/v2"; P_MIRROR="$N/upstream"
+  fi
   P_WT1="$DBT_WS/v1/$N"; P_WT2="$DBT_WS/v2/$N"; P_SHOW1="v1/$N/"; P_SHOW2="v2/$N/"
   if [ -f "$DBT_WS/profiles/env/$N.env" ]; then P_ENV="$DBT_WS/profiles/env/$N.env"; else P_ENV="$DBT_WS/profiles/dbt.env"; fi
   P_TAG="[$N] "
@@ -138,6 +155,7 @@ dbt_use_product() {
 }
 
 _dbt_wt()   { case "$1" in v1) printf '%s' "$P_WT1" ;; v2) printf '%s' "$P_WT2" ;; esac; }
+_dbt_hbr()  { case "$1" in v1) printf '%s' "$P_HB1" ;; v2) printf '%s' "$P_HB2" ;; esac; }
 _dbt_br()   { case "$1" in v1) printf '%s' "$P_B1" ;; v2) printf '%s' "$P_B2" ;; esac; }
 _dbt_show() { case "$1" in v1) printf '%s' "$P_SHOW1" ;; v2) printf '%s' "$P_SHOW2" ;; global) printf 'global/' ;; esac; }
 
@@ -270,6 +288,27 @@ _dbt_fetch_upstream() {
     timeout 300 git -C "$DBT_WS" fetch --quiet --no-tags "$P_REMOTE" >>"$DBT_LOG" 2>&1
 }
 
+# git against a product's own repository. A hook has no credential helper: an
+# https://github.com URL gets the workspace token (GITHUB_PERSONAL_ACCESS_TOKEN,
+# .env) for this invocation only — never written to .git/config. From a
+# terminal, VS Code's credential helper does the same job.
+# Bounded (5 min): a hook must never hang on the network.
+_dbt_git_home() {
+  if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 timeout 300 \
+      git -c "url.https://x-access-token:${GITHUB_PERSONAL_ACCESS_TOKEN}@github.com/.insteadOf=https://github.com/" "$@"
+  else
+    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 timeout 300 git "$@"
+  fi
+}
+
+# Fetch the current product's own repository (no-op for origin: it is the
+# clone itself).
+_dbt_fetch_home() {
+  [ "$P_HOME" != "origin" ] || return 0
+  _dbt_git_home -C "$DBT_WS" fetch --quiet --no-tags "$P_HOME" >>"$DBT_LOG" 2>&1
+}
+
 # -----------------------------------------------------------------------------
 # Worktrees
 # -----------------------------------------------------------------------------
@@ -286,10 +325,10 @@ _dbt_is_worktree() {
 _dbt_has_ref() { git -C "$DBT_WS" show-ref --verify --quiet "$1"; }
 
 # Where the upstream branch can be read from, without the network if possible:
-# the upstream remote, else its mirror on origin.
+# the upstream remote, else its mirror where the product's branches live.
 _dbt_upstream_base() {
   local BR="$P_BRANCH"
-  if ! _dbt_has_ref "refs/remotes/$P_REMOTE/$BR" && ! _dbt_has_ref "refs/remotes/origin/$P_MIRROR"; then
+  if ! _dbt_has_ref "refs/remotes/$P_REMOTE/$BR" && ! _dbt_has_ref "refs/remotes/$P_HOME/$P_MIRROR"; then
     if git -C "$DBT_WS" remote get-url "$P_REMOTE" >/dev/null 2>&1; then
       echo "  ${P_TAG}fetching $P_REMOTE ($BR)..." >&2
       _dbt_fetch_upstream || echo "  ${P_TAG}WARNING: upstream fetch failed (details: $DBT_LOG)" >&2
@@ -297,28 +336,32 @@ _dbt_upstream_base() {
   fi
   if _dbt_has_ref "refs/remotes/$P_REMOTE/$BR"; then
     printf '%s' "$P_REMOTE/$BR"
-  elif _dbt_has_ref "refs/remotes/origin/$P_MIRROR"; then
-    printf '%s' "origin/$P_MIRROR"
+  elif _dbt_has_ref "refs/remotes/$P_HOME/$P_MIRROR"; then
+    printf '%s' "$P_HOME/$P_MIRROR"
   else
     return 1
   fi
 }
 
-# _dbt_ensure_branch V — the local branch exists: from origin when it was
-# already published, else v1 from the upstream branch and v2 from v1.
+# _dbt_ensure_branch V — the local branch exists: from where the product's
+# branches live when they were already published (origin, or the product's
+# own repository), else v1 from the upstream branch and v2 from v1.
 _dbt_ensure_branch() {
-  local V="$1" B BASE
-  B="$(_dbt_br "$V")"
+  local V="$1" B HB BASE
+  B="$(_dbt_br "$V")"; HB="$(_dbt_hbr "$V")"
   _dbt_has_ref "refs/heads/$B" && return 0
-  if _dbt_has_ref "refs/remotes/origin/$B"; then
-    git -C "$DBT_WS" branch --quiet --track "$B" "origin/$B" >>"$DBT_LOG" 2>&1 \
-      && echo "  ${P_TAG}branch $B <- origin/$B" && return 0
+  if [ "$P_HOME" != "origin" ] && ! _dbt_has_ref "refs/remotes/$P_HOME/$HB"; then
+    _dbt_fetch_home || echo "  ${P_TAG}WARNING: cannot fetch $P_HOME_URL (token? network?) — retried at the next start"
+  fi
+  if _dbt_has_ref "refs/remotes/$P_HOME/$HB"; then
+    git -C "$DBT_WS" branch --quiet --track "$B" "$P_HOME/$HB" >>"$DBT_LOG" 2>&1 \
+      && echo "  ${P_TAG}branch $B <- $P_HOME/$HB" && return 0
   fi
   if [ "$V" != "v1" ] && _dbt_has_ref "refs/heads/$P_B1"; then
     BASE="$P_B1"
   else
     BASE="$(_dbt_upstream_base)" || {
-      echo "  ${P_TAG}WARNING: no source for branch $B: neither origin/$B nor the upstream branch is reachable."
+      echo "  ${P_TAG}WARNING: no source for branch $B: neither $P_HOME/$HB nor the upstream branch is reachable."
       echo "           Check the VPN / SSH key, then run: just setup"
       return 1
     }
@@ -349,6 +392,17 @@ dbt_ensure_worktrees() {
     else
       git -C "$WS" config --unset-all "remote.$P_REMOTE.pushurl" 2>/dev/null || true
     fi
+  fi
+
+  # The product's own repository: where its branches are fetched from and
+  # pushed to (the coordinator model). Tags would mix several products.
+  if [ "$P_HOME" != "origin" ] && [ -n "$P_HOME_URL" ]; then
+    if git -C "$WS" remote get-url "$P_HOME" >/dev/null 2>&1; then
+      git -C "$WS" remote set-url "$P_HOME" "$P_HOME_URL"
+    else
+      git -C "$WS" remote add "$P_HOME" "$P_HOME_URL"
+    fi
+    git -C "$WS" config "remote.$P_HOME.tagOpt" --no-tags
   fi
 
   for V in $DBT_WORKTREES; do
@@ -391,6 +445,41 @@ dbt_ensure_worktrees() {
     # lock, a `git worktree prune` (or an automatic gc) run on the host side
     # would drop its administrative files.
     git -C "$WS" worktree lock --reason "devcontainer path, not visible from the host: never prune" "$P" >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+# dbt_sync — bring the current product's worktrees up to date with where its
+# branches live: fetch, then fast-forward each CLEAN worktree that is only
+# behind. A dirty, ahead or diverged worktree is reported, never touched.
+dbt_sync() {
+  local V W B U AHEAD BEHIND
+  if [ "$P_HOME" != "origin" ]; then
+    _dbt_fetch_home || { echo "  ${P_TAG}WARNING: cannot fetch $P_HOME ($P_HOME_URL) — not synced"; return 0; }
+  else
+    _dbt_git_home -C "$DBT_WS" fetch --quiet --no-tags origin >>"$DBT_LOG" 2>&1 \
+      || { echo "  ${P_TAG}WARNING: cannot fetch origin — not synced"; return 0; }
+  fi
+  for V in $DBT_WORKTREES; do
+    W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"; U="$P_HOME/$(_dbt_hbr "$V")"
+    _dbt_is_worktree "$W" || continue
+    if ! _dbt_has_ref "refs/remotes/$U"; then echo "  ${P_TAG}$B: not published yet ($U missing)"; continue; fi
+    read -r AHEAD BEHIND <<< "$(git -C "$DBT_WS" rev-list --left-right --count "$B...$U" 2>/dev/null)"
+    if [ "${AHEAD:-0}" = 0 ] && [ "${BEHIND:-0}" = 0 ]; then
+      echo "  ${P_TAG}$B: up to date with $U"
+    elif [ "${AHEAD:-0}" = 0 ]; then
+      if [ -n "$(git -C "$W" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        echo "  ${P_TAG}$B: $BEHIND new commit(s) on $U, NOT applied: uncommitted changes in $(_dbt_show "$V")"
+      elif git -C "$W" merge --ff-only --quiet "$U" >>"$DBT_LOG" 2>&1; then
+        echo "  ${P_TAG}$B: fast-forwarded $BEHIND commit(s) from $U"
+      else
+        echo "  ${P_TAG}$B: fast-forward from $U failed (details: $DBT_LOG)"
+      fi
+    elif [ "${BEHIND:-0}" = 0 ]; then
+      echo "  ${P_TAG}$B: $AHEAD local commit(s) not pushed — git -C $(_dbt_show "$V") push"
+    else
+      echo "  ${P_TAG}$B: DIVERGED from $U ($AHEAD local, $BEHIND there) — merge or rebase by hand"
+    fi
   done
   return 0
 }
@@ -988,6 +1077,13 @@ dbt_process() {
       fi
       dbt_use_product "$N" && dbt_ensure_worktrees
     done
+    # a worktree branch (<product>/v2) and its counterpart in the product's
+    # own repository (v2) differ by name: \`git push\` must follow the upstream
+    git -C "$DBT_WS" config push.default upstream 2>/dev/null || true
+    if [ "$MODE" = "start" ] && [ "${DBT_SYNC_ON_START:-1}" != "0" ]; then
+      echo "[dbt] sync with where the products' branches live..."
+      for N in $(dbt_products); do dbt_use_product "$N" && dbt_sync; done
+    fi
   else
     echo "[dbt] worktrees..."
     dbt_use_product "" && dbt_ensure_worktrees

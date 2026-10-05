@@ -10,6 +10,13 @@
 {% if project_type == 'dbt-fleet' %}
 # --- Fleet: several data products, one per line of products.conf -----------
 DBT_FLEET=1
+# At each start, fetch where every product's branches live and fast-forward
+# the clean worktrees (dirty, ahead or diverged ones are reported, never
+# touched). 0 = only `just sync` does it.
+DBT_SYNC_ON_START=1
+# `just product-new <name> …` creates the product's own repository as
+# <github_org>/<DBT_PRODUCT_REPO_PREFIX><name>
+DBT_PRODUCT_REPO_PREFIX=""
 {%- else %}
 # --- Upstream: the dbt repository being taken over (read-only) ---------------
 DBT_UPSTREAM_URL="{{ upstream_repo_url }}"
