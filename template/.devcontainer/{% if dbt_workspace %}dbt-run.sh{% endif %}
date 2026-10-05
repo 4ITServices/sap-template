@@ -103,6 +103,7 @@ upstream_pull_one() {
 
 upstream_pull() {
   local N
+  load_token   # the mirror is pushed where the product's branches live
   if dbt_is_fleet && [ -z "${1:-}" ]; then
     for N in $(dbt_products); do dbt_use_product "$N" && ( upstream_pull_one ); done
   else
