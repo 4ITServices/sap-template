@@ -21,6 +21,10 @@ branches y vivent, et un `git push` depuis `v1/<produit>` ou `v2/<produit>`
 part là-bas. Ce dépôt-ci ne porte que l'outillage et `global/`. Les worktrees
 n'apparaissent qu'une fois le container démarré.
 
+`.devcontainer/products.lock` (`just lock`) enregistre le commit exact de
+chaque produit avec lequel `global/` a été validé : il se committe avec le
+changement de `global/` qu'il accompagne.
+
 ## Prérequis sur l'hôte
 
 - VS Code + Dev Containers, Docker.

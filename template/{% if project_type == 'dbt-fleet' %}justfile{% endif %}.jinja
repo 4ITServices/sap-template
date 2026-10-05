@@ -27,6 +27,26 @@ products:
 sync product='':
     @bash .devcontainer/dbt-run.sh sync "$@"
 
+# --- Le verrou (.devcontainer/products.lock) ----------------------------------
+
+# Verrouiller le commit exact de chaque v1/v2 (poussés seulement) — à committer avec le changement de global/
+lock product='':
+    @bash .devcontainer/dbt-run.sh lock "$@"
+
+# Où en est chaque worktree par rapport au verrou
+lock-status:
+    @bash .devcontainer/dbt-run.sh lock-status
+
+# Rejouer l'état verrouillé (worktrees détachés aux commits du verrou)
+lock-checkout product='':
+    @bash .devcontainer/dbt-run.sh lock-checkout "$@"
+
+# Remettre les worktrees sur leurs branches après un lock-checkout
+lock-release product='':
+    @bash .devcontainer/dbt-run.sh lock-release "$@"
+
+# --- Ingestion ----------------------------------------------------------------
+
 # Nouveau produit, avec son propre dépôt GitHub créé (privé) : just product-new <nom> <url-gitlab> [branche] [dossier-dbt] [global]
 product-new name url branch='main' subdir='-' global='no':
     @bash .devcontainer/dbt-run.sh product-new "$@"

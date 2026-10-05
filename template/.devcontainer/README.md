@@ -228,6 +228,14 @@ appended when missing), the write guard.
   are ignored — only those of `global/` count. Writes in `global/` are also
   refused when a selected relation is written by two nodes;
   `just destinations global` lists such collisions.
+- **The lock**: `.devcontainer/products.lock` (`just lock`) records the
+  exact commit of every product's v1 and v2 — pushed commits only, worktrees
+  on their branches. Committed with the change of `global/` it goes with, it
+  says which product versions each state of `global/` was validated with:
+  the one thing submodules would record, without a pointer commit for every
+  product commit. `just lock-status`, `just doctor` and the end of `just sync`
+  report the drift; `just lock-checkout` replays a locked state (detached
+  worktrees), `just lock-release` goes back to the branches.
 - **Ingesting a product**: `just product-new <name> <url> [branch] [subdir]
   [global]` renders a dbt-project repository from the same template version
   (with the fleet's sandbox answers), fills it from upstream (`main`,

@@ -111,7 +111,14 @@ and commit messages; this changelog starts at v0.8.12.
   from upstream (`main`, `upstream-<branch>`, `v1` = `v2`, hub seeded),
   creates `<github_org>/<DBT_PRODUCT_REPO_PREFIX><name>` — private, checked
   before anything is pushed — then declares it.
-- **Tests**: 76 offline fleet checks in `scripts/test-lib-dbt.sh` (202 in
+- **The fleet lock, `.devcontainer/products.lock`**: `just lock` records the
+  exact commit of every product's v1 and v2 (pushed commits only, worktrees
+  on their branches), to be committed with the change of `global/` it goes
+  with — which product versions each state of `global/` was validated with,
+  without submodules. `just lock-status` / `just doctor` / `just sync` report
+  the drift, `just lock-checkout` replays a locked state, `just lock-release`
+  returns to the branches.
+- **Tests**: 96 offline fleet checks in `scripts/test-lib-dbt.sh` (222 in
   all), and a `dbt-fleet` render in `scripts/test-template-render.sh`.
 
 ### Fixed (on the unreleased dbt-project type)

@@ -69,6 +69,7 @@ dbt_load_conf() {
   DBT_WS="${1:-${WORKSPACE_DIR:-$(pwd)}}"
   DBT_CONF="$DBT_WS/.devcontainer/dbt.conf"
   DBT_PRODUCTS_CONF="$DBT_WS/.devcontainer/products.conf"
+  DBT_LOCK_FILE="$DBT_WS/.devcontainer/products.lock"
   DBT_FLEET=0
   DBT_UPSTREAM_URL=""
   DBT_UPSTREAM_BRANCH="main"
@@ -491,6 +492,55 @@ dbt_sync() {
     fi
   done
   return 0
+}
+
+# -----------------------------------------------------------------------------
+# Fleet lock — .devcontainer/products.lock
+# -----------------------------------------------------------------------------
+# The exact commit of every product's v1 and v2, as last locked (`just lock`).
+# Committed with the change of global/ it goes with, it tells which product
+# versions each state of global/ was validated with — the one thing submodules
+# would record, without their bookkeeping. Lines: PRODUCT VERSION COMMIT SOURCE
+
+# _dbt_lock_get PRODUCT VERSION — the locked commit, or nothing
+_dbt_lock_get() {
+  [ -f "${DBT_LOCK_FILE:-}" ] || return 0
+  awk -v p="$1" -v v="$2" '$1==p && $2==v {print $3; exit}' "$DBT_LOCK_FILE"
+}
+
+# dbt_lock_status V — one word for the current product's worktree V against
+# the lock, then the details:
+#   nolock | unlocked | same | ahead N | behind N | diverged | unknown | missing
+dbt_lock_status() {
+  local V="$1" W B L C AH BE
+  [ -f "${DBT_LOCK_FILE:-}" ] || { echo "nolock"; return 0; }
+  W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
+  _dbt_is_worktree "$W" || { echo "missing"; return 0; }
+  L="$(_dbt_lock_get "$P_NAME" "$V")"
+  [ -n "$L" ] || { echo "unlocked"; return 0; }
+  git -C "$DBT_WS" cat-file -e "$L^{commit}" 2>/dev/null || { echo "unknown $L"; return 0; }
+  C="$(git -C "$W" rev-parse HEAD 2>/dev/null)"
+  [ "$C" = "$L" ] && { echo "same $L"; return 0; }
+  read -r AH BE <<< "$(git -C "$DBT_WS" rev-list --left-right --count "$C...$L" 2>/dev/null)"
+  if [ "${BE:-0}" = 0 ]; then echo "ahead ${AH:-?} $L"
+  elif [ "${AH:-0}" = 0 ]; then echo "behind ${BE:-?} $L"
+  else echo "diverged $L"; fi
+}
+
+# dbt_lock_describe V — the same, as a sentence
+dbt_lock_describe() {
+  local ST N L
+  read -r ST N L <<< "$(dbt_lock_status "$1")"
+  case "$ST" in
+    nolock)   echo "no products.lock yet" ;;
+    missing)  echo "no worktree" ;;
+    unlocked) echo "not in products.lock — just lock" ;;
+    unknown)  echo "locked at ${N:0:9}, a commit not fetched here — just sync" ;;
+    same)     echo "= lock (${N:0:9})" ;;
+    ahead)    echo "$N commit(s) since the lock (${L:0:9}) — just lock once global/ is validated" ;;
+    behind)   echo "$N commit(s) BEHIND the lock (${L:0:9}) — just sync" ;;
+    diverged) echo "DIVERGED from the lock (${N:0:9}) — the locked commit is not in this history" ;;
+  esac
 }
 
 # dbt_project_dir V — the directory that holds dbt_project.yml: worktree V of

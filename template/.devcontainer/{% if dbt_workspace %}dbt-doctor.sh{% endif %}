@@ -158,6 +158,20 @@ if dbt_is_fleet; then
   fi
 fi
 
+if dbt_is_fleet; then
+  echo "[lock — .devcontainer/products.lock]"
+  if [ ! -f "$DBT_LOCK_FILE" ]; then
+    info "no products.lock yet — just lock, then commit it with global/"
+  else
+    git -C "$WS" ls-files --error-unmatch .devcontainer/products.lock >/dev/null 2>&1 \
+      || info "products.lock is not committed yet — commit it with the global/ change it goes with"
+    for N in $(dbt_products); do
+      dbt_use_product "$N" || continue
+      for V in $DBT_WORKTREES; do info "$(_dbt_show "$V") $(dbt_lock_describe "$V")"; done
+    done
+  fi
+fi
+
 echo "[profile hub]"
 [ "${DBT_PROFILES_DIR:-}" = "$WS/profiles" ] \
   && ok "DBT_PROFILES_DIR -> profiles/" \

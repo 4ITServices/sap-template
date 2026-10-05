@@ -17,6 +17,11 @@
 #   dbt-run.sh product-add <name> <url> [branch] [subdir] [global] [home]
 #                                        declare a product whose repository
 #                                        exists (home = its own repo, or '-')
+#   dbt-run.sh lock [<product>]          write .devcontainer/products.lock: the
+#                                        exact commit of every v1/v2 (pushed ones only)
+#   dbt-run.sh lock-status               where each worktree stands against the lock
+#   dbt-run.sh lock-checkout [<product>] put the worktrees at the locked commits
+#   dbt-run.sh lock-release [<product>]  back on their branches
 #   dbt-run.sh product-new <name> <url> [branch] [subdir] [global]
 #                                        create the product's own repository
 #                                        (dbt-project), fill it from upstream,
@@ -216,11 +221,136 @@ products() {
 load_token() { _dbt_load_token; }
 
 sync_products() {
-  local N
+  local N V MOVED=0 ST
   dbt_is_fleet || { dbt_use_product ""; dbt_sync; return; }
   load_token
   if [ -n "${1:-}" ]; then select_product "$1"; dbt_sync; return; fi
   for N in $(dbt_products); do dbt_use_product "$N" && dbt_sync; done
+  [ -f "$DBT_LOCK_FILE" ] || return 0
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    for V in $DBT_WORKTREES; do
+      read -r ST _ <<< "$(dbt_lock_status "$V")"
+      [ "$ST" = same ] || MOVED=$((MOVED + 1))
+    done
+  done
+  if [ "$MOVED" = 0 ]; then echo "lock: every worktree is at its locked commit"
+  else echo "lock: $MOVED worktree(s) away from products.lock — just lock-status"; fi
+}
+
+# -----------------------------------------------------------------------------
+# The fleet lock (.devcontainer/products.lock)
+# -----------------------------------------------------------------------------
+
+# lock [PRODUCT] — record the current commit of each v1/v2. Only commits that
+# are PUSHED where the product's branches live: a lock that names a commit
+# nobody else can fetch would replay nothing. Uncommitted changes are not
+# part of a commit, hence of the lock: they are reported.
+lock_write() {
+  local ONLY="${1:-}" N V W B U C BAD="" WARN="" TMP OLD NEWL OLDC CHANGES=""
+  dbt_is_fleet || die "single-product workspace: nothing to lock"
+  [ -z "$ONLY" ] || select_product "$ONLY"
+  load_token
+  TMP="$(mktemp)"
+  {
+    echo "# products.lock — the exact commit of every product's v1 and v2 (just lock)."
+    echo "# Commit it with the change of global/ it goes with: \`git log -p\` on this file"
+    echo "# then tells which product versions each state of global/ was validated with."
+    echo "# Generated — edit with \`just lock\`, not by hand. Replay: just lock-checkout"
+    echo "# PRODUCT        VERSION  COMMIT                                    SOURCE"
+  } > "$TMP"
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    if [ -n "$ONLY" ] && [ "$N" != "$ONLY" ]; then
+      for V in $DBT_WORKTREES; do grep -E "^$N +$V " "$DBT_LOCK_FILE" 2>/dev/null >> "$TMP"; done
+      continue
+    fi
+    _dbt_fetch_home >/dev/null 2>&1 || true
+    for V in $DBT_WORKTREES; do
+      W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"; U="$P_HOME/$(_dbt_hbr "$V")"
+      if ! _dbt_is_worktree "$W"; then BAD="$BAD"$'\n'"   $N $V: no worktree (just setup)"; continue; fi
+      C="$(git -C "$W" rev-parse HEAD)"
+      [ "$(git -C "$W" rev-parse --abbrev-ref HEAD)" = "$B" ] \
+        || BAD="$BAD"$'\n'"   $N $V: $(_dbt_show "$V") is not on $B (a replayed lock? just lock-release)"
+      if ! git -C "$DBT_WS" show-ref --verify --quiet "refs/remotes/$U" || ! git -C "$DBT_WS" merge-base --is-ancestor "$C" "$U" 2>/dev/null; then
+        BAD="$BAD"$'\n'"   $N $V: ${C:0:9} is not pushed to $U — git -C $(_dbt_show "$V") push"
+      fi
+      [ -z "$(git -C "$W" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+        || WARN="$WARN"$'\n'"   $N $V: uncommitted changes in $(_dbt_show "$V") — not part of the lock"
+      printf '%-14s %-8s %s  %s\n' "$N" "$V" "$C" "${P_HOME_URL:-origin}#$(_dbt_hbr "$V")" >> "$TMP"
+      OLDC="$(_dbt_lock_get "$N" "$V")"
+      if [ "$OLDC" != "$C" ]; then
+        if [ -n "$OLDC" ] && git -C "$DBT_WS" cat-file -e "$OLDC^{commit}" 2>/dev/null; then
+          CHANGES="$CHANGES"$'\n'"   $N $V: ${OLDC:0:9} → ${C:0:9} ($(git -C "$DBT_WS" rev-list --count "$OLDC..$C" 2>/dev/null) commit(s))"
+        else
+          CHANGES="$CHANGES"$'\n'"   $N $V: ${OLDC:+${OLDC:0:9} → }${C:0:9}"
+        fi
+      fi
+    done
+  done
+  if [ -n "$BAD" ]; then
+    rm -f "$TMP"
+    echo "⛔ products.lock NOT written:$BAD" >&2
+    exit 1
+  fi
+  [ -z "$WARN" ] || printf '⚠ not part of the lock:%s\n' "$WARN"
+  if [ -z "$CHANGES" ] && [ -f "$DBT_LOCK_FILE" ]; then
+    rm -f "$TMP"; echo "products.lock already up to date"; return 0
+  fi
+  cat "$TMP" > "$DBT_LOCK_FILE"; rm -f "$TMP"
+  echo "products.lock written:$CHANGES"
+  echo "Commit it with the global/ change it goes with: git add .devcontainer/products.lock"
+}
+
+lock_status() {
+  local N V
+  dbt_is_fleet || die "single-product workspace: no lock"
+  [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/products.lock yet — just lock"; return 0; }
+  for N in $(dbt_products); do
+    dbt_use_product "$N" || continue
+    for V in $DBT_WORKTREES; do printf '  %-24s %s\n' "$(_dbt_show "$V")" "$(dbt_lock_describe "$V")"; done
+  done
+}
+
+# lock-checkout [PRODUCT] — replay the locked state: each worktree detached
+# at its locked commit. Refused on a worktree with uncommitted changes.
+lock_checkout() {
+  local ONLY="${1:-}" N V W L DONE=0
+  dbt_is_fleet || die "single-product workspace: no lock"
+  [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/products.lock — nothing to replay"
+  [ -z "$ONLY" ] || select_product "$ONLY"
+  load_token
+  for N in $(dbt_products); do
+    [ -z "$ONLY" ] || [ "$N" = "$ONLY" ] || continue
+    dbt_use_product "$N" || continue
+    for V in $DBT_WORKTREES; do
+      W="$(_dbt_wt "$V")"; L="$(_dbt_lock_get "$N" "$V")"
+      [ -n "$L" ] && _dbt_is_worktree "$W" || continue
+      [ -z "$(git -C "$W" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+        || die "$(_dbt_show "$V") has uncommitted changes — commit or stash them first"
+      git -C "$DBT_WS" cat-file -e "$L^{commit}" 2>/dev/null || _dbt_fetch_home >/dev/null 2>&1 || true
+      git -C "$W" checkout --quiet --detach "$L" || die "cannot check out ${L:0:9} in $(_dbt_show "$V")"
+      echo "  $(_dbt_show "$V") at the locked ${L:0:9} (detached)"; DONE=$((DONE + 1))
+    done
+  done
+  echo "$DONE worktree(s) replayed. Back on the branches: just lock-release"
+}
+
+lock_release() {
+  local ONLY="${1:-}" N V W B
+  dbt_is_fleet || die "single-product workspace: no lock"
+  [ -z "$ONLY" ] || select_product "$ONLY"
+  for N in $(dbt_products); do
+    [ -z "$ONLY" ] || [ "$N" = "$ONLY" ] || continue
+    dbt_use_product "$N" || continue
+    for V in $DBT_WORKTREES; do
+      W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
+      _dbt_is_worktree "$W" || continue
+      [ "$(git -C "$W" rev-parse --abbrev-ref HEAD)" = "$B" ] && continue
+      git -C "$W" checkout --quiet "$B" && echo "  $(_dbt_show "$V") back on $B" \
+        || echo "  WARNING: cannot go back to $B in $(_dbt_show "$V") (uncommitted changes?)"
+    done
+  done
 }
 
 # product_add NAME URL [BRANCH] [SUBDIR] [GLOBAL] [HOME] — declare, then
@@ -508,9 +638,17 @@ case "$MODE" in
     product_new "$@" ;;
   sync)
     sync_products "${1:-}" ;;
+  lock)
+    lock_write "${1:-}" ;;
+  lock-status)
+    lock_status ;;
+  lock-checkout)
+    lock_checkout "${1:-}" ;;
+  lock-release)
+    lock_release "${1:-}" ;;
   *)
     if dbt_is_fleet; then
-      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
+      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | lock [<product>] | lock-status | lock-checkout [<product>] | lock-release [<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
     else
       echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull" >&2
     fi

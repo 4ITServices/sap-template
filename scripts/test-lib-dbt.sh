@@ -565,6 +565,42 @@ refute "…le dépôt reste vide" git -C "$W/gh/acme/fl-zeta.git" rev-parse --ve
 refute "…et zeta n'est pas déclaré" grep -q '^zeta ' "$FW/.devcontainer/products.conf"
 git config --global --unset-all url."file://$W/gh/".insteadOf
 
+# =============================================================================
+echo "== Verrou de la flotte (.devcontainer/products.lock) =="
+LK() { ( cd "$FW" && bash .devcontainer/dbt-run.sh "$@" ) 2>&1; }
+LOCKF="$FW/.devcontainer/products.lock"
+O="$(LK lock)"; has "$O" "products.lock written" && pass "just lock : verrou écrit" || bad "lock ($O)"
+[ "$(grep -cE '^[a-z]' "$LOCKF")" = 10 ] && pass "…une ligne par produit et par version (5 × v1/v2)" || bad "lock : $(grep -cE '^[a-z]' "$LOCKF") lignes"
+grep -qE "^delta +v2 +$(git -C "$FW" rev-parse delta/v2)  $W/homes/delta.git#v2$" "$LOCKF" && pass "…commit exact et source (dépôt du produit#branche)" || bad "lock : ligne delta v2 inattendue"
+grep -qE "^alpha +v1 +$(git -C "$FW" rev-parse alpha/v1)  origin#alpha/v1$" "$LOCKF" && pass "…produit hébergé ici : source origin" || bad "lock : ligne alpha v1 inattendue"
+O="$(LK lock)"; has "$O" "already up to date" && pass "relancé sans changement : fichier inchangé" || bad "lock idempotent ($O)"
+O="$(LK lock-status)"; has "$O" "= lock" && ! has "$O" "since the lock" && pass "lock-status : tout est au verrou" || bad "lock-status ($O)"
+( cd "$FW/v2/delta" && echo "-- local" >> dbt/models/m_delta.sql && git commit -q -am "local, pas encore poussé" )
+cp "$LOCKF" "$W/lock.before"
+O="$(LK lock)"; has "$O" "NOT written" && has "$O" "is not pushed to home-delta/v2" && pass "commit non poussé : verrou refusé" || bad "lock non poussé ($O)"
+check "…et le fichier n'a pas bougé" cmp -s "$LOCKF" "$W/lock.before"
+O="$(LK lock-status)"; has "$O" "v2/delta/                1 commit(s) since the lock" && pass "lock-status : 1 commit depuis le verrou" || bad "lock-status avance ($O)"
+( cd "$FW/v2/delta" && git push -q ) 2>/dev/null
+O="$(LK lock)"; has "$O" "delta v2: " && has "$O" "(1 commit(s))" && pass "poussé : verrou mis à jour, l'écart est nommé" || bad "lock mise à jour ($O)"
+echo "-- en cours" >> "$FW/v2/delta/dbt/models/m_delta.sql"
+O="$(LK lock)"; has "$O" "not part of the lock" && has "$O" "uncommitted changes in v2/delta/" && pass "modification non commitée : signalée, hors verrou" || bad "lock + modif ($O)"
+git -C "$FW/v2/delta" checkout -q -- dbt/models/m_delta.sql
+LOCKED="$(git -C "$FW" rev-parse delta/v2)"
+( cd "$W/delta-side" && git pull -q --rebase origin v2 && echo "select 4" >> dbt/models/side.sql && git commit -q -am "après le verrou" && git push -q origin v2 ) 2>/dev/null
+O="$(SYNC delta)"; has "$O" "fast-forwarded 1 commit(s)" || bad "sync avant rejeu ($O)"
+O="$(SYNC)"; has "$O" "lock: 1 worktree(s) away from products.lock" && pass "just sync : résumé de l'écart au verrou" || bad "sync résumé ($(tail -2 <<<"$O"))"
+O="$(LK lock-checkout delta)"; has "$O" "at the locked ${LOCKED:0:9} (detached)" && pass "lock-checkout delta : état verrouillé rejoué" || bad "lock-checkout ($O)"
+check "…v2/delta au commit verrouillé" test "$(git -C "$FW/v2/delta" rev-parse HEAD)" = "$LOCKED"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "v2/delta/ is on 'HEAD', not on its branch delta/v2" && pass "doctor : worktree rejoué signalé" || bad "doctor rejeu"
+O="$(LK lock)"; has "$O" "is not on delta/v2" && pass "…et un état rejoué ne peut pas être verrouillé" || bad "lock d'un état rejoué ($O)"
+O="$(LK lock-release delta)"; has "$O" "back on delta/v2" && pass "lock-release : retour sur la branche" || bad "lock-release ($O)"
+check "…à la pointe de delta/v2" test "$(git -C "$FW/v2/delta" rev-parse HEAD)" = "$(git -C "$FW" rev-parse delta/v2)"
+echo "-- sale" >> "$FW/v2/delta/dbt/models/m_delta.sql"
+O="$(LK lock-checkout delta)"; has "$O" "uncommitted changes" && pass "lock-checkout refusé sur un worktree modifié" || bad "lock-checkout sale ($O)"
+git -C "$FW/v2/delta" checkout -q -- dbt/models/m_delta.sql
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null | sed -n '/^\[lock/,/^\[profile/p')"
+has "$O" "v2/delta/ 1 commit(s) since the lock" && has "$O" "products.lock is not committed yet" && pass "doctor : section [lock] (écarts, verrou à committer)" || bad "doctor [lock] ($O)"
+
 echo "== Aucune fuite hors du bac à sable de test =="
 refute "le vrai ~/.gitconfig n'a pas reçu le verrou" grep -q "git.invalid" /home/"$(id -un)"/.gitconfig
 check "l'upstream n'a toujours qu'une branche" test "$(git -C "$W/upstream.git" for-each-ref refs/heads | wc -l)" = 1

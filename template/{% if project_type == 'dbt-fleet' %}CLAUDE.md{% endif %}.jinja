@@ -85,6 +85,26 @@ fois le SQL compilé vérifié identique.
 
 Les boutons Run/Build/Preview des extensions dbt n'ont que les verrous 1, 2 et 4.
 
+## Le verrou (`.devcontainer/products.lock`)
+
+Les worktrees suivent toujours le dernier état des produits ; le verrou garde
+la trace des versions avec lesquelles `global/` a été validé — ce qu'un
+sous-module enregistrerait, sans son « bump » à chaque commit.
+
+- `just lock` écrit le commit exact de chaque `v1`/`v2`. Il refuse un commit
+  qui n'est pas poussé dans le dépôt du produit (personne d'autre ne pourrait
+  le rejouer) et un worktree qui n'est pas sur sa branche.
+- **Le verrou se committe avec le changement de `global/` qu'il accompagne** :
+  `git log -p .devcontainer/products.lock` dit alors, pour chaque état de
+  `global/`, avec quelles versions des produits il a été validé. Un modèle
+  déplacé d'un produit vers `global/` : pousser le retrait dans le produit,
+  puis `just lock`, puis committer l'ajout dans `global/` et le verrou ensemble.
+- `just lock-status` (et `just doctor`, et la fin de `just sync`) montre ce qui
+  a bougé depuis le verrou.
+- Rejouer un état passé : `git checkout <commit du coordinateur>`, puis
+  `just lock-checkout` (worktrees détachés aux commits verrouillés), et
+  `just lock-release` pour revenir sur les branches.
+
 ## Le projet global
 
 `global/packages.yml` contient un bloc géré : un `local:` par produit marqué
@@ -115,6 +135,7 @@ just global parse                   # les v2 réunis
 just destinations <produit>         # v1 vs v2 : où chaque modèle serait écrit
 just destinations global            # espaces de noms et collisions du global
 just sync [<produit>]               # dépôts des produits -> worktrees (avance rapide, propres seulement)
+just lock / lock-status             # verrouiller les versions des produits / voir les écarts au verrou
 just upstream-pull [<produit>]      # nouveautés de l'origine (lecture seule) + miroir
 just product-new <nom> <url-gitlab> [branche] [dossier] [global]   # crée le dépôt dédié, privé
 ```
@@ -177,6 +198,7 @@ Avant de travailler sur un produit : `just sync <produit>`. Reprendre l'origine 
 ```bash
 just doctor / setup               # diagnostiquer / reposer l'environnement
 just products / sync              # la flotte, la mise à jour
+just lock / lock-status           # le verrou des versions (+ lock-checkout / lock-release)
 just product-new / product-add    # ingérer un produit
 just v1 … / just v2 … / just global …
 just destinations [<produit>|global]
