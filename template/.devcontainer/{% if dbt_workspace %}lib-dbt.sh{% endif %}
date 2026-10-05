@@ -958,8 +958,14 @@ _dbt_v1_deps() {
   [ ! -d "$PROJ/dbt_packages" ] || return 0
   [ -f "$PROJ/packages.yml" ] || [ -f "$PROJ/dependencies.yml" ] || return 0
   echo "[dbt] ${P_TAG}v1 packages (dbt deps)..."
-  ( cd "$PROJ" && GIT_TERMINAL_PROMPT=0 DBT_PROFILES_DIR="$DBT_WS/profiles" "$DBT_V1_VENV/bin/dbt" deps >>"$DBT_LOG" 2>&1 ) \
-    && echo "  dbt deps done" || echo "  WARNING: dbt deps failed (details: $DBT_LOG) — retry: $(dbt_just_cmd v1) deps"
+  # one retry: a git host may refuse a burst of SSH connections (several
+  # products installing private packages in a row) — observed, transient
+  if ( cd "$PROJ" && GIT_TERMINAL_PROMPT=0 DBT_PROFILES_DIR="$DBT_WS/profiles" "$DBT_V1_VENV/bin/dbt" deps >>"$DBT_LOG" 2>&1 ) \
+     || { sleep 5; ( cd "$PROJ" && GIT_TERMINAL_PROMPT=0 DBT_PROFILES_DIR="$DBT_WS/profiles" "$DBT_V1_VENV/bin/dbt" deps >>"$DBT_LOG" 2>&1 ); }; then
+    echo "  dbt deps done"
+  else
+    echo "  WARNING: dbt deps failed twice (details: $DBT_LOG) — retry: $(dbt_just_cmd v1) deps"
+  fi
 }
 
 # dbt_process WORKSPACE MODE — MODE 'create' also installs the v1 packages.
