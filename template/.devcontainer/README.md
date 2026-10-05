@@ -203,7 +203,12 @@ holds `main` — or here (`HOME -`: `<product>/v1`, `<product>/v2`,
 `<product>/upstream` on origin). A product repository is a plain dbt-project
 repository, usable alone. `just sync` (also run at each start, unless
 `DBT_SYNC_ON_START=0`) fetches every home and fast-forwards the clean
-worktrees; dirty, ahead or diverged ones are reported, never touched. Hooks
+worktrees; dirty, ahead or diverged ones are reported, never touched. It
+prints the subjects of the commits it brings in and names the branches of a
+product repository that are not followed here (a `v3` opened there). The
+product side learns about the coordinator from the « Coordination » section
+of its `CLAUDE.md` (copier answer `fleet_coordinator`, set by
+`just product-new`). Hooks
 fetch the homes with the workspace token (`GITHUB_PERSONAL_ACCESS_TOKEN`,
 `.env`) for that invocation only. The rest is the single-product machinery,
 product by product: pinned host keys, locked and self-repairing worktrees,

@@ -118,8 +118,24 @@ and commit messages; this changelog starts at v0.8.12.
   without submodules. `just lock-status` / `just doctor` / `just sync` report
   the drift, `just lock-checkout` replays a locked state, `just lock-release`
   returns to the branches.
-- **Tests**: 96 offline fleet checks in `scripts/test-lib-dbt.sh` (222 in
-  all), and a `dbt-fleet` render in `scripts/test-template-render.sh`.
+- **The coordinator and its products talk through git and `CLAUDE.md`.** A
+  product repository is often worked on by its own session, which does not
+  know the coordinator exists. New question `fleet_coordinator`
+  (`dbt-project` only, empty = standalone product): when set, the product's
+  `CLAUDE.md` gains a « Coordination » section — the role of `global/`, the
+  shared `v1`/`v2` branches, the lock pointing at its commits, the shared
+  `dbt.env` and `DATASET_PREFIX` convention, and what follows (pull before,
+  push after, no rewrite of published history, cross-product work goes to
+  `global/`, structural changes are said in the commit message) — and its
+  README points to it. `product-new` fills it with the coordinator's `origin`
+  URL; an existing product gets it with `copier update --data
+  fleet_coordinator=<url>`. In the other direction, `just sync` now prints the
+  subjects of the commits it fast-forwards (eight at most) and names the
+  branches of a product repository the coordinator does not follow (a `v3`
+  opened there is a structural change to report).
+- **Tests**: 101 offline fleet checks in `scripts/test-lib-dbt.sh` (227 in
+  all), and `dbt-fleet` and coordinated-product renders in
+  `scripts/test-template-render.sh`.
 
 ### Fixed (on the unreleased dbt-project type)
 
@@ -136,6 +152,12 @@ and commit messages; this changelog starts at v0.8.12.
   refused too: their hooks cannot be read (`just v1|v2 deps` first).
 - `just doctor` gains a `[hooks]` section: where the hooks are, and which
   commands they block.
+- **`just destinations` no longer counts the sandbox prefix as a move.** A v1
+  faithful to upstream may not read `DATASET_PREFIX` while its v2 does, so
+  every v2 node was reported « written elsewhere ». The comparison now strips
+  the sandbox prefix (`DBT_BQ_DATASET_PREFIX`, `DATASET_PREFIX`, with or
+  without its trailing `_`) on both sides; the listing still shows the real
+  names, and case still counts (BigQuery datasets are case-sensitive).
 
 ### Changed
 

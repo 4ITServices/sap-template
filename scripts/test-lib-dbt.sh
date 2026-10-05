@@ -270,6 +270,15 @@ cp "$W/stubs/dbt-split" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-split" "$DBT_BI
 O="$(RUN destinations)"
 has "$O" "1 node(s) written elsewhere" && has "$O" "model a: sandbox-prj.JDOE_run  ->  sandbox-prj.JDOE_other" && pass "un modèle déplacé par v2 est signalé" || bad "écart de destination non signalé ($O)"
 has "$O" "only in v2: model b" && pass "un modèle présent d'un seul côté est signalé" || bad "modèle orphelin non signalé"
+printf '{"database":"sandbox-prj","schema":"run","name":"a","resource_type":"model"}\n' > "$W/dest-v1-bare.jsonl"
+printf '{"database":"sandbox-prj","schema":"JDOE_run","name":"a","resource_type":"model"}\n' > "$W/dest-v2-pfx.jsonl"
+cat > "$W/stubs/dbt-split" <<EOF
+#!/bin/bash
+case "\$0" in *dbt-v1*) cat "$W/dest-v1-bare.jsonl" ;; *) cat "$W/dest-v2-pfx.jsonl" ;; esac
+EOF
+cp "$W/stubs/dbt-split" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-split" "$DBT_BIN_DIR/dbt"
+O="$(RUN destinations)"
+has "$O" "0 node(s) written elsewhere (sandbox prefix JDOE_ ignored)" && pass "v1 sans le préfixe du bac à sable, v2 avec : pas un déplacement" || bad "préfixe du bac à sable compté comme un déplacement ($O)"
 cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
 
 # =============================================================================
@@ -513,6 +522,7 @@ git clone -q -b v2 "$W/homes/delta.git" "$W/delta-side" 2>/dev/null
 ( cd "$W/delta-side" && echo "select 2" > dbt/models/side.sql && git add -A && git commit -q -m "travail dans le container du produit" && git push -q origin v2 ) 2>/dev/null
 SYNC() { ( cd "$FW" && bash .devcontainer/dbt-run.sh sync "$@" ) 2>&1; }
 O="$(SYNC delta)"; has "$O" "delta/v2: fast-forwarded 1 commit(s) from home-delta/v2" && pass "just sync delta : worktree propre avancé" || bad "sync avance rapide ($O)"
+has "$O" "travail dans le container du produit" && pass "…et le sujet du commit reçu est affiché" || bad "sync : commit reçu non listé ($O)"
 check "…v2/delta voit le commit fait côté produit" test "$(git -C "$FW/v2/delta" log -1 --format=%s)" = "travail dans le container du produit"
 ( cd "$W/delta-side" && echo "select 3" >> dbt/models/side.sql && git commit -q -am "encore côté produit" && git push -q origin v2 ) 2>/dev/null
 echo "en cours" >> "$FW/v2/delta/dbt/models/m_delta.sql"
@@ -522,6 +532,9 @@ check "…ses modifications sont intactes" grep -q "en cours" "$FW/v2/delta/dbt/
 O="$(SYNC delta)"; has "$O" "DIVERGED from home-delta/v2 (1 local, 1 there)" && pass "sync : divergence signalée, rien fusionné" || bad "sync divergence ($O)"
 ( cd "$FW/v2/delta" && git pull -q --rebase && git push -q ) 2>/dev/null
 O="$(SYNC delta)"; has "$O" "delta/v2: up to date with home-delta/v2" && pass "sync : à jour après pull + push" || bad "sync à jour ($O)"
+refute "…aucune branche non suivie signalée (main, upstream-main, v1, v2)" grep -q "not followed here" <<<"$O"
+git -C "$W/delta-side" push -q origin v2:v3 2>/dev/null
+O="$(SYNC delta)"; grep -q "NOTE: branches in home-delta not followed here: v3\$" <<<"$O" && pass "sync : une branche v3 ouverte côté produit est nommée" || bad "sync : branche non suivie tue ($O)"
 O="$(cd "$FW" && bash .devcontainer/dbt-run.sh upstream-pull delta 2>&1)"; has "$O" "mirror on home-delta: upstream-main" && pass "upstream-pull delta : miroir publié dans le dépôt du produit" || bad "upstream-pull home ($O)"
 refute "…pas sur l'origin du coordinateur" git -C "$W/fleet-origin.git" rev-parse --verify -q refs/heads/upstream-main
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
@@ -556,6 +569,8 @@ has "$A" "project_type: dbt-project" && has "$A" "upstream_repo_url: $W/fleet-up
 git -C "$W/gh/acme/fl-epsilon.git" show main:profiles/profiles.yml 2>/dev/null | grep -q '^prof_eps:' && pass "…son hub de profils est amorcé (profil du projet)" || bad "product-new : hub non amorcé"
 git -C "$W/gh/acme/fl-epsilon.git" show main:.devcontainer/upstream_known_hosts >/dev/null 2>&1 || git -C "$W/gh/acme/fl-epsilon.git" show main:profiles/dbt.env | grep -q FLEET_COMMON && pass "…il reprend le dbt.env de la flotte" || bad "product-new : dbt.env de la flotte absent"
 grep -qE "^epsilon +$W/fleet-up/epsilon.git +main +dbt +no +https://github.com/acme/fl-epsilon.git" "$FW/.devcontainer/products.conf" && pass "…déclaré dans products.conf, HOME = le nouveau dépôt" || bad "product-new : ligne products.conf inattendue"
+C="$(git -C "$W/gh/acme/fl-epsilon.git" show main:CLAUDE.md 2>/dev/null)"
+grep -q '^## Coordination' <<<"$C" && has "$C" "$W/fleet-origin.git" && pass "…son CLAUDE.md explique le coordinateur et le nomme" || bad "product-new : section Coordination absente"
 check "…worktree v2/epsilon qui suit home-epsilon/v2" test "$(git -C "$FW" rev-parse --abbrev-ref 'epsilon/v2@{upstream}' 2>/dev/null)" = home-epsilon/v2
 O="$(cd "$FW" && GH_ROOT="$W/gh" GH_TOKEN=dummy PYTHONUSERBASE="$REAL_USERBASE" bash .devcontainer/dbt-run.sh product-new epsilon "$W/fleet-up/epsilon.git" 2>&1)"; has "$O" "already declared" && pass "product-new : produit déjà déclaré refusé" || bad "product-new doublon ($O)"
 mkup zeta dbt prof_z 1.10.0

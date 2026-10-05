@@ -153,6 +153,16 @@ upstream_branch:
   default: main
   when: "{{ project_type == 'dbt-project' }}"
 
+fleet_coordinator:
+  type: str
+  help: >-
+    URL du dépôt coordinateur (type dbt-fleet) qui suit les branches v1/v2 de
+    ce produit, s'il y en a un. Ajoute au CLAUDE.md la section « Coordination »
+    : le rôle du projet global/, sa mécanique et les règles à respecter ici.
+    Vide = produit autonome.
+  default: ""
+  when: "{{ project_type == 'dbt-project' }}"
+
 dbt_project_subdir:
   type: str
   help: >-

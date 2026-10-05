@@ -134,8 +134,16 @@ destinations_one() {
       RC=1
     fi
   done
-  python3 - "$TMP/v1.tsv" "$TMP/v2.tsv" "$P_TAG" <<'PY'
+  python3 - "$TMP/v1.tsv" "$TMP/v2.tsv" "$P_TAG" "${DBT_BQ_DATASET_PREFIX:-}" "${DATASET_PREFIX:-}" <<'PY'
 import sys
+# The sandbox prefix is how a branch reaches the sandbox, not a move: v1,
+# faithful to upstream, may not read DATASET_PREFIX while v2 does.
+pfxs = sorted({x.rstrip("_").upper() for x in sys.argv[4:6] if x.rstrip("_")}, key=len, reverse=True)
+def norm(schema):
+    for x in pfxs:
+        if schema.upper().startswith(x + "_"):
+            return schema[len(x) + 1:]
+    return schema
 def load(path):
     out = {}
     for line in open(path):
@@ -146,9 +154,10 @@ def load(path):
 a, b = load(sys.argv[1]), load(sys.argv[2])
 if not a or not b:
     sys.exit(0)
-moved = sorted(k for k in a.keys() & b.keys() if a[k] != b[k])
+moved = sorted(k for k in a.keys() & b.keys() if (a[k][0], norm(a[k][1])) != (b[k][0], norm(b[k][1])))
 only1, only2 = sorted(a.keys() - b.keys()), sorted(b.keys() - a.keys())
-print(f"== {sys.argv[3]}v1 vs v2: {len(moved)} node(s) written elsewhere, {len(only1)} only in v1, {len(only2)} only in v2 ==")
+note = f" (sandbox prefix {'/'.join(x + '_' for x in pfxs)} ignored)" if pfxs else ""
+print(f"== {sys.argv[3]}v1 vs v2: {len(moved)} node(s) written elsewhere{note}, {len(only1)} only in v1, {len(only2)} only in v2 ==")
 for k in moved:
     print(f"  {k[0]} {k[1]}: {'.'.join(a[k])}  ->  {'.'.join(b[k])}")
 for k in only1:
@@ -424,6 +433,7 @@ product_new() {
     --data "dbt_target_name=${DBT_TARGET_NAME:-dev}" \
     --data "author_name=$(ans author_name)" --data "author_email=$(ans author_email)" \
     --data "github_org=$ORG" --data "claude_profile=$(ans claude_profile)" \
+    --data "fleet_coordinator=$(git -C "$WS" remote get-url origin 2>/dev/null | sed -E 's#^https://[^@]*@#https://#; s#^git@([^:]+):#https://\1/#; s#^(https://.*)\.git$#\1#')" \
     "$SRC" "$R" >/dev/null 2>"$TMP/copier.log" || { tail -n 5 "$TMP/copier.log" >&2; rm -rf "$TMP"; die "copier failed"; }
   # same host keys and the same fleet-wide env as the coordinator
   [ -f "$WS/.devcontainer/upstream_known_hosts" ] && cp "$WS/.devcontainer/upstream_known_hosts" "$R/.devcontainer/"

@@ -17,6 +17,12 @@ dans le même container.
 
 `v1/` et `v2/` sont deux branches de CE dépôt, extraites côte à côte par
 `git worktree`. Elles n'apparaissent qu'une fois le container démarré.
+{%- if fleet_coordinator %}
+
+Ce produit est suivi par un coordinateur, {{ fleet_coordinator }}, qui réunit
+sa v2 avec celles d'autres produits pour un refactoring croisé : voir la section
+« Coordination » de [`CLAUDE.md`](CLAUDE.md).
+{%- endif %}
 
 ## Prérequis sur l'hôte
 

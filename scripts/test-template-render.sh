@@ -196,11 +196,28 @@ if render false "$WORK/dbt" --data project_type=dbt-project --data "upstream_rep
     && pass "DBT: .mcp.json.example — sap-adt-mcp seul" || bad "DBT: .mcp.json.example inattendu"
   grep -q '^sap-adt-mcp ' "$D/.devcontainer/mcp-servers.conf" && pass "DBT: sap-adt-mcp dans mcp-servers.conf" || bad "DBT: sap-adt-mcp non semé"
   grep -q "$DBT_URL" "$D/CLAUDE.md" && grep -q 'v1/dbt/' "$D/CLAUDE.md" && pass "DBT: CLAUDE.md interpolé (origine, dossier du projet)" || bad "DBT: CLAUDE.md non interpolé"
+  grep -q '^## Coordination' "$D/CLAUDE.md" && bad "DBT: section Coordination sans coordinateur" || pass "DBT: produit autonome — pas de section Coordination"
   if grep -rlE '\{\{|\{%' "$D" 2>/dev/null | grep -q .; then
     bad "DBT: marqueurs Jinja non résolus :"; grep -rlE '\{\{|\{%' "$D"
   else pass "DBT: aucun marqueur Jinja non résolu (tous fichiers)"; fi
 else
   bad "DBT: copier a échoué"
+fi
+COORD='https://github.com/acme/my-fleet'
+if render false "$WORK/dbt-coord" --data project_type=dbt-project --data "upstream_repo_url=$DBT_URL" \
+     --data "fleet_coordinator=$COORD" >/dev/null 2>&1; then
+  D="$WORK/dbt-coord"
+  grep -q '^## Coordination' "$D/CLAUDE.md" && grep -qF "$COORD" "$D/CLAUDE.md" \
+    && pass "DBT: produit d'une flotte — section Coordination, coordinateur nommé" || bad "DBT: section Coordination absente"
+  grep -q 'global/' "$D/CLAUDE.md" && grep -q 'products.lock' "$D/CLAUDE.md" \
+    && pass "DBT: …rôle (global/) et mécanique (verrou) expliqués" || bad "DBT: Coordination incomplète"
+  awk '/^## Coordination/{c=NR} /^## Règles absolues/{r=NR} END{exit !(c && r && c < r)}' "$D/CLAUDE.md" \
+    && pass "DBT: …avant les règles absolues" || bad "DBT: Coordination mal placée"
+  grep -qF "$COORD" "$D/README.md" && pass "DBT: README renvoie au coordinateur" || bad "DBT: README sans coordinateur"
+  grep -qF "fleet_coordinator: '$COORD'" "$D/.copier-answers.yml" && pass "DBT: fleet_coordinator mémorisé (copier update le garde)" || bad "DBT: fleet_coordinator non mémorisé"
+  if grep -rlE '\{\{|\{%' "$D" 2>/dev/null | grep -q .; then bad "DBT: marqueurs Jinja non résolus (coordination)"; else pass "DBT: aucun marqueur Jinja non résolu (coordination)"; fi
+else
+  bad "DBT: copier a échoué (fleet_coordinator)"
 fi
 if render false "$WORK/dbt-nourl" --data project_type=dbt-project >/dev/null 2>&1; then
   bad "DBT: rendu accepté sans upstream_repo_url"

@@ -36,9 +36,19 @@ Localement, elles s'appellent `<produit>/v1` et `<produit>/v2`. Un produit dont
 `HOME` vaut `-` garde ses branches dans ce dépôt (`<produit>/…` sur `origin`).
 
 Le dépôt d'un produit reste utilisable seul (gabarit `dbt-project`, son propre
-container). Les deux voient les mêmes branches : `just sync` (aussi lancé à
-chaque démarrage) récupère les dépôts des produits et avance les worktrees
-propres ; un worktree modifié, en avance ou divergent est signalé, jamais touché.
+container), et une autre session y travaille souvent. Les deux voient les mêmes
+branches : `just sync` (aussi lancé à chaque démarrage) récupère les dépôts des
+produits et avance les worktrees propres ; un worktree modifié, en avance ou
+divergent est signalé, jamais touché.
+
+**Le canal avec les produits, c'est git.** `just sync` affiche les sujets des
+commits reçus — lis-les, c'est par leurs messages que les sessions des produits
+parlent — et nomme les branches d'un dépôt de produit que ce coordinateur ne
+suit pas : une `v3` ouverte là-bas est un changement de structure à remonter à
+l'utilisateur, pas à absorber. Dans l'autre sens, le `CLAUDE.md` d'un produit a
+une section « Coordination » qui explique ce dépôt et ses règles (réponse copier
+`fleet_coordinator`, posée par `just product-new` ; pour un produit plus ancien,
+`copier update --data fleet_coordinator=<url de ce dépôt>` dans son dépôt).
 
 **Une seule version de dbt Core pour toutes les v1** (`DBT_V1_PINS`, dans
 `.devcontainer/dbt.conf`) : dbt Power User n'a qu'un interpréteur par fenêtre.

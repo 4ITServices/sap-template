@@ -35,6 +35,44 @@ Branches :
   (dépréciations).
 - `v2` — part de `v1` ; tout le travail de migration et de refactoring.
 
+{%- if fleet_coordinator %}
+## Coordination — ce produit fait partie d'une flotte
+
+Ce dépôt est **suivi par un coordinateur** : {{ fleet_coordinator }}
+(gabarit `dbt-fleet`). À lire avant de travailler ici.
+
+**Son rôle.** Le coordinateur réunit les v2 de plusieurs data products dans un
+projet dbt v2, `global/`, où chaque produit entre comme **package local**. C'est
+là que vit le **refactoring croisé** : les modèles partagés entre produits, et
+ce qui suppose de voir plusieurs produits ensemble (une clé commune, une table
+source lue par plusieurs produits, un modèle consommé par un autre produit).
+
+**Sa mécanique.**
+- Il travaille sur **les mêmes branches que toi** : ses dossiers `v1/<produit>/`
+  et `v2/<produit>/` suivent les branches `v1` et `v2` de CE dépôt. Un commit
+  qu'il pousse arrive ici ; un commit poussé ici, il le récupère par `just sync`.
+- Il garde dans `.devcontainer/products.lock` le commit exact de chaque produit
+  avec lequel `global/` a été validé. Ce fichier référence des commits d'ici.
+- Ses conventions s'appliquent ici : un seul `profiles/dbt.env` pour toute la
+  flotte, et `DATASET_PREFIX` dont la valeur ne porte pas le « _ » final — la
+  macro de nommage l'ajoute.
+
+**Ce que cela impose ici.**
+1. `git pull` avant de travailler, `git push` après : la branche est partagée.
+2. **Jamais de réécriture d'historique publié** sur `v1`/`v2` (force-push,
+   rebase de commits poussés) : le verrou du coordinateur pointe ces commits.
+3. Un travail qui concerne plusieurs produits se prépare ici mais **se fait dans
+   le `global/` du coordinateur** : le signaler à l'utilisateur plutôt que le
+   mener seul dans ce produit.
+4. **Les changements de structure se disent** (dans le message de commit, et à
+   l'utilisateur) : nouvelle branche de travail (le coordinateur ne suit que
+   `v1` et `v2`), modèle renommé ou supprimé alors qu'un autre produit le lit,
+   changement de convention partagée. Les messages de commit sont le canal :
+   `just sync`, côté coordinateur, affiche ceux qu'il reçoit et nomme les
+   branches d'ici qu'il ne suit pas.
+5. Les règles et la mécanique complètes : le `CLAUDE.md` du coordinateur.
+
+{% endif -%}
 ## Règles absolues
 
 1. **Aucun push vers le dépôt d'origine.** Deux verrous git (voir plus bas) le
