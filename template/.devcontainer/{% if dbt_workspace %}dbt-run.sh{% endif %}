@@ -489,8 +489,31 @@ export_env() {
   export DBT_SEND_ANONYMOUS_USAGE_STATS="${DBT_SEND_ANONYMOUS_USAGE_STATS:-false}"
 }
 
+# DBT_HOOKS_COMPILE_OK — products (`global` for global/, `project` outside a fleet) whose hooks a human has read and found
+# harmless on compile/show (dbt v2 runs on-run-start/end there). Only compile and show:
+# any other hook-running or writing word keeps the refusal. elementary's hooks are allowed
+# only while ELEMENTARY is not 1 (its uploads are then disabled by the products' vars).
+hooks_compile_name() {
+  if [ "$1" = global ]; then printf 'global'
+  elif dbt_is_fleet; then printf '%s' "${P_NAME:-}"
+  else printf 'project'; fi
+}
+hooks_compile_ok() {
+  local NAME
+  [ -n "$CMD_HOOKS" ] && [ -z "$CMD_WRITE$CMD_HOOKS_HARD$CMD_RUNOP" ] || return 1
+  NAME="$(hooks_compile_name "$1")"
+  [ -n "$NAME" ] && case " ${DBT_HOOKS_COMPILE_OK:-} " in *" $NAME "*) ;; *) return 1 ;; esac
+  [ -n "$NAME" ] || return 1
+  dbt_packages_unchecked "$PROJ" && return 1
+  if dbt_hook_sources "$PROJ" | grep -q '^dbt_packages/elementary/' && [ "${ELEMENTARY:-1}" = "1" ]; then
+    echo "· hooks: ELEMENTARY is not 0 — elementary would upload: compile/show refused" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_dbt() {
-  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" SELECTED="" COLLECT=0 OUT BAD HOOKS ALL DUPS JCMD
+  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD HOOKS ALL DUPS JCMD
   local -a SEL=()
   shift
   JCMD="$(dbt_just_cmd "$V")"
@@ -508,7 +531,8 @@ run_dbt() {
     esac
     # any word naming a hook-running command arms the hook check: a model that
     # happens to be called `test` costs a refusal, never a missed hook
-    case " $(dbt_hook_commands "$V") " in *" $A "*) [ -n "$CMD_HOOKS" ] || CMD_HOOKS="$A" ;; esac
+    case " $(dbt_hook_commands "$V") " in *" $A "*) [ -n "$CMD_HOOKS" ] || CMD_HOOKS="$A"
+      case "$A" in compile|show) ;; *) CMD_HOOKS_HARD="$A" ;; esac ;; esac
     # the arguments that decide WHICH nodes run and WHERE they resolve
     case "$A" in
       -s|--select|-m|--models|--model|--selector) SELECTED=1; SEL+=("$A"); COLLECT=1 ;;
@@ -527,7 +551,9 @@ run_dbt() {
            "Read the macro first; to allow it, set DBT_ALLOW_RUN_OPERATION=1 in .devcontainer/dbt.conf."
   fi
 
-  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
+  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
+    echo "· hooks: \`dbt $CMD_HOOKS\` allowed for $(hooks_compile_name "$V") (DBT_HOOKS_COMPILE_OK in dbt.conf)" >&2
+  elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
     if dbt_packages_unchecked "$PROJ"; then
       refuse "\`dbt ${CMD_HOOKS:-$CMD_WRITE}\` can run hooks, and this project's packages are not installed:" \
              "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"

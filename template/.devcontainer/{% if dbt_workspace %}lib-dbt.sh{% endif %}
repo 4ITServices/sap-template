@@ -88,6 +88,7 @@ dbt_load_conf() {
   DBT_TARGET_NAME="dev"
   DBT_ALLOW_RUN_OPERATION=0
   DBT_HOOKS_REVIEWED=0
+  DBT_HOOKS_COMPILE_OK=""
   # shellcheck disable=SC1090
   [ -f "$DBT_CONF" ] && . "$DBT_CONF"
   dbt_use_product "" >/dev/null 2>&1 || true

@@ -76,3 +76,8 @@ DBT_ALLOW_RUN_OPERATION=0
 # has read them and set this to 1: run, build, seed, snapshot, test, source
 # freshness — and under dbt v2 also compile and show. `just doctor` lists them.
 DBT_HOOKS_REVIEWED=0
+# Narrower: names whose hooks a human has read and found harmless on dbt v2
+# compile/show — the only two commands this opens (run, build, test… stay
+# refused). Fleet: product names, `global` for global/; single project:
+# `project`. elementary's hooks also need ELEMENTARY=0 (its uploads off).
+DBT_HOOKS_COMPILE_OK=""
