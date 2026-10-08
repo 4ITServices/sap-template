@@ -292,7 +292,13 @@ case "\$0" in *dbt-v1*) cat "$W/dest-v1-bare.jsonl" ;; *) cat "$W/dest-v2-pfx.js
 EOF
 cp "$W/stubs/dbt-split" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-split" "$DBT_BIN_DIR/dbt"
 O="$(RUN destinations)"
-has "$O" "0 node(s) written elsewhere (sandbox prefix JDOE_ ignored)" && pass "v1 sans le préfixe du bac à sable, v2 avec : pas un déplacement" || bad "préfixe du bac à sable compté comme un déplacement ($O)"
+has "$O" "0 node(s) written elsewhere (sandbox prefix JDOE_" && pass "v1 sans le préfixe du bac à sable, v2 avec : pas un déplacement" || bad "préfixe du bac à sable compté comme un déplacement ($O)"
+printf '{"database":"sandbox-prj","schema":"JDOE_FAKE__RUN","name":"a","resource_type":"model"}\n' > "$W/dest-v2-pfx.jsonl"
+O="$(RUN destinations)"
+has "$O" "0 node(s) written elsewhere" && has "$O" "namespace FAKE__ ignored" && pass "v2 dans l'espace de noms du produit (<PREFIXE>_<PACKAGE>__) : pas un déplacement" || bad "espace de noms compté comme un déplacement ($O)"
+printf '{"database":"sandbox-prj","schema":"JDOE_AUTRE__RUN","name":"a","resource_type":"model"}\n' > "$W/dest-v2-pfx.jsonl"
+O="$(RUN destinations)"
+has "$O" "1 node(s) written elsewhere" && pass "…l'espace de noms d'un autre package reste un déplacement" || bad "espace de noms étranger ignoré à tort ($O)"
 cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
 
 # =============================================================================
