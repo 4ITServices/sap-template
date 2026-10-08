@@ -232,6 +232,20 @@ O="$(RUN v2 compile -s a)";    has "$O" "hooks nobody has reviewed" && has "$O" 
 O="$(RUN v2 show -s a)";       has "$O" "hooks nobody has reviewed" && pass "v2 show : refusé" || bad "v2 show non gardé ($O)"
 O="$(RUN v2 parse)";           has "$O" "ARGS=parse" && pass "v2 parse : accepté (aucun hook)" || bad "v2 parse bloqué à tort ($O)"
 O="$(RUN v2 ls -s a)";         ! has "$O" "⛔" && has "$O" "log line" && pass "v2 ls : accepté (c'est lui qui résout les destinations)" || bad "v2 ls bloqué à tort ($O)"
+conf "$WS" 'DBT_HOOKS_COMPILE_OK="project"'
+O="$(RUN v2 compile -s a)";    has "$O" "ARGS=compile -s a" && has "$O" "DBT_HOOKS_COMPILE_OK" && pass "DBT_HOOKS_COMPILE_OK : v2 compile accepté, et dit pourquoi" || bad "compile refusé malgré DBT_HOOKS_COMPILE_OK ($O)"
+O="$(RUN v2 show -s a)";       has "$O" "ARGS=show -s a" && pass "…v2 show accepté" || bad "show refusé malgré DBT_HOOKS_COMPILE_OK ($O)"
+O="$(RUN v2 compile -s test)"; has "$O" "hooks nobody has reviewed" && pass "…compile + un mot qui exécute des hooks (test) : refusé" || bad "compile -s test accepté ($O)"
+O="$(RUN v2 run -s a)";        has "$O" "hooks nobody has reviewed" && pass "…v2 run : toujours refusé" || bad "run accepté par DBT_HOOKS_COMPILE_OK ($O)"
+mkdir -p "$WS/v2/dbt/dbt_packages/elementary"; printf 'name: elementary
+on-run-end:
+  - "{{ elementary.on_run_end() }}"
+' > "$WS/v2/dbt/dbt_packages/elementary/dbt_project.yml"
+O="$(ELEMENTARY=1 RUN v2 compile -s a)"; has "$O" "ELEMENTARY is not 0" && pass "…hooks d'elementary avec ELEMENTARY=1 : refusé" || bad "elementary actif accepté ($O)"
+O="$(ELEMENTARY=0 RUN v2 compile -s a)"; has "$O" "ARGS=compile -s a" && pass "…hooks d'elementary avec ELEMENTARY=0 : accepté" || bad "elementary coupé mais refusé ($O)"
+rm -rf "$WS/v2/dbt/dbt_packages/elementary"
+conf "$WS" 'DBT_HOOKS_COMPILE_OK="autre"'
+O="$(RUN v2 compile -s a)";    has "$O" "hooks nobody has reviewed" && pass "…projet absent de la liste : refusé" || bad "liste ignorée ($O)"
 conf "$WS" 'DBT_HOOKS_REVIEWED=1'
 O="$(RUN v2 compile -s a)";    has "$O" "ARGS=compile -s a" && pass "…v2 compile accepté après DBT_HOOKS_REVIEWED=1" || bad "v2 compile refusé après relecture ($O)"
 O="$(RUN v1 test)";            has "$O" "ARGS=test" && pass "…v1 test accepté après DBT_HOOKS_REVIEWED=1" || bad "v1 test refusé après relecture ($O)"
