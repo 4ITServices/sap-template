@@ -522,7 +522,7 @@ hooks_compile_ok() {
 }
 
 run_dbt() {
-  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD HOOKS ALL DUPS JCMD
+  local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
   local -a SEL=()
   shift
   JCMD="$(dbt_just_cmd "$V")"
@@ -605,6 +605,22 @@ run_dbt() {
       printf '%s\n' "$BAD" | head -n 15 >&2
       [ "$(printf '%s\n' "$BAD" | wc -l)" -gt 15 ] && echo "   … (full list: just destinations${P_NAME:+ $P_NAME})" >&2
       exit 1
+    fi
+    # DBT_SANDBOX_NEVER_BUILD (dbt.conf) — nodes never built in the sandbox, named <package>.<node> as in
+    # global/: tables whose production protects their rows (a row access policy for a production group).
+    # A sandbox copy would either expose those rows or, with the policy, hide them from us.
+    if [ -n "${DBT_SANDBOX_NEVER_BUILD:-}" ]; then
+      local PKG=""
+      [ "$V" = "global" ] || PKG="$(sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$PROJ/dbt_project.yml" | head -1)"
+      NEVER="$(printf '%s\n' "$OUT" | awk -F'\t' -v pkg="$PKG" -v l=" $DBT_SANDBOX_NEVER_BUILD " \
+        'NF>=4 { n = (pkg != "" ? pkg "." $4 : $4); if (index(l, " " n " ")) print n }')"
+      if [ -n "$NEVER" ]; then
+        echo "⛔ \`dbt $CMD_WRITE\` refused: $(printf '%s\n' "$NEVER" | wc -l) selected node(s) are never built in the sandbox" >&2
+        echo "   (DBT_SANDBOX_NEVER_BUILD in .devcontainer/dbt.conf — rows protected in production):" >&2
+        printf '%s\n' "$NEVER" | head -n 15 | sed 's/^/   /' >&2
+        echo "   Leave them out: --exclude $(printf '%s\n' "$NEVER" | sed 's/^[^.]*\.//' | head -n 15 | tr '\n' ' ')" >&2
+        exit 1
+      fi
     fi
     if [ "$V" = "global" ]; then
       # several products in one project: two nodes writing the same table

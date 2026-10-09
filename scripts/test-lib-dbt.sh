@@ -211,6 +211,15 @@ has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a --full-refresh" && 
 has "$(tail -1 "$STUB_LOG")" "--output json --output-keys database schema alias name resource_type package_name -s a" && pass "…la sélection de l'utilisateur est celle qui est contrôlée" || bad "contrôle fait sur une autre sélection"
 O="$(RUN v1 compile -s a)"
 has "$O" "ARGS=compile -s a" && pass "lecture (compile) : aucun contrôle de destination" || bad "compile bloqué ($O)"
+conf "$WS" 'DBT_SANDBOX_NEVER_BUILD="autre.x fake.a"'
+O="$(RUN v1 run -s a)"
+has "$O" "never built in the sandbox" && has "$O" "fake.a" && has "$O" "--exclude a" && pass "DBT_SANDBOX_NEVER_BUILD : écriture refusée, nœud nommé, exclusion proposée" || bad "nœud jamais construit accepté ($O)"
+refute "…et le moteur n'a pas été lancé" grep -qF "ARGS=run" <<<"$O"
+O="$(RUN v2 build --select a)";  has "$O" "never built in the sandbox" && pass "…v2 aussi" || bad "v2 : nœud jamais construit accepté ($O)"
+O="$(RUN v1 compile -s a)";      has "$O" "ARGS=compile -s a" && pass "…lecture (compile) : non concernée" || bad "compile bloqué par DBT_SANDBOX_NEVER_BUILD ($O)"
+conf "$WS" 'DBT_SANDBOX_NEVER_BUILD="fake.ab autre.a"'
+O="$(RUN v1 run -s a)";          has "$O" "all inside the sandbox" && pass "…nom exact, paquet compris : fake.ab et autre.a ne touchent pas fake.a" || bad "correspondance trop large ($O)"
+conf "$WS"
 
 printf "{{ config(post_hook='truncate table x') }}\nselect 1\n" > "$WS/v1/dbt/models/hooked.sql"
 O="$(RUN v1 run -s a)"; has "$O" "hooks nobody has reviewed" && has "$O" "models/hooked.sql" && pass "post_hook dans un modèle : écriture refusée, fichier nommé" || bad "hook de modèle non détecté ($O)"
