@@ -87,3 +87,9 @@ DBT_HOOKS_COMPILE_OK=""
 # rows (a row access policy for a production group): a sandbox copy would
 # expose those rows or, with the policy, hide them from you.
 DBT_SANDBOX_NEVER_BUILD=""
+# Scoped to the v2 worktree(s) and global/ — v1 keeps the origin's hooks. 1 = every
+# command may run hooks there, but only the approved ones: .devcontainer/hooks.approved,
+# written by `just hooks-approve` from a compiled manifest (each hook's text + where
+# every source() it names resolves). A new or edited hook, or one whose source now
+# resolves elsewhere, is refused until approved again.
+DBT_HOOKS_REVIEWED_V2=0

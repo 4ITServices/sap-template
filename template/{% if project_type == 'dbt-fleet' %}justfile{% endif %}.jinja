@@ -69,6 +69,10 @@ v2 product *args:
 global *args:
     @bash .devcontainer/dbt-run.sh global "$@"
 
+# Approuver les hooks relus de global/ (DBT_HOOKS_REVIEWED_V2 n'exécute que ceux-là)
+hooks-approve target='':
+    @bash .devcontainer/dbt-run.sh hooks-approve "$@"
+
 # Où v1 et v2 écrivent chaque modèle (hors ligne) — un produit, tous, ou « global » (collisions)
 destinations target='':
     @bash .devcontainer/dbt-run.sh destinations "$@"
