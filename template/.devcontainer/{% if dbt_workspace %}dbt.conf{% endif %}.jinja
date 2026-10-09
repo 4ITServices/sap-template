@@ -81,3 +81,9 @@ DBT_HOOKS_REVIEWED=0
 # refused). Fleet: product names, `global` for global/; single project:
 # `project`. elementary's hooks also need ELEMENTARY=0 (its uploads off).
 DBT_HOOKS_COMPILE_OK=""
+# Nodes never built in the sandbox, whatever the selection (space-separated,
+# <package>.<node> as dbt names them; in a fleet, as in global/): the guard
+# refuses a write that selects one. For tables whose production protects the
+# rows (a row access policy for a production group): a sandbox copy would
+# expose those rows or, with the policy, hide them from you.
+DBT_SANDBOX_NEVER_BUILD=""
