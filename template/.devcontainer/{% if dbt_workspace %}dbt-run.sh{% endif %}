@@ -521,8 +521,49 @@ hooks_compile_ok() {
   return 0
 }
 
+# DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks): every command may run
+# hooks there, but only the hooks a human approved (`just hooks-approve`, .devcontainer/hooks.approved — text and
+# where its sources resolve). A hook that is new, edited, or whose source now resolves elsewhere is refused.
+HOOKS_APPROVED_FILE="$WS/.devcontainer/hooks.approved"
+hooks_v2_ok() {
+  case "$1" in v2|global) ;; *) return 1 ;; esac
+  [ "${DBT_HOOKS_REVIEWED_V2:-0}" = "1" ] || return 1
+  [ -s "$HOOKS_APPROVED_FILE" ] || { echo "· hooks: DBT_HOOKS_REVIEWED_V2=1 but no approved hook (just hooks-approve)" >&2; return 1; }
+  dbt_packages_unchecked "$PROJ" && return 1
+  if dbt_hook_sources "$PROJ" | grep -q '^dbt_packages/elementary/' && [ "${ELEMENTARY:-1}" = "1" ]; then
+    echo "· hooks: ELEMENTARY is not 0 — elementary would upload: refused" >&2
+    return 1
+  fi
+  return 0
+}
+
+# hooks_approve [global|<product>] — record the hooks of a compiled manifest as approved (a human decision,
+# after reading them: in this fleet, docs/flotte/HOOKS_REVUE.md). Fleet: global/ by default.
+hooks_approve() {
+  local W="${1:-}" M N
+  if [ -z "$W" ] || [ "$W" = global ]; then
+    dbt_is_fleet && M="$WS/global/target/manifest.json" || M="$(dbt_project_dir v2)/target/manifest.json"
+  else
+    dbt_use_product "$W" >/dev/null || die "unknown product: $W"
+    M="$(dbt_project_dir v2)/target/manifest.json"
+  fi
+  [ -f "$M" ] || die "no manifest: ${M#"$WS"/} — compile first ($(dbt_is_fleet && echo 'just global compile' || echo 'just v2 compile'))"
+  N="$(dbt_hook_prints "$M" | grep -c .)"
+  {
+    grep -v '^#' "$HOOKS_APPROVED_FILE" 2>/dev/null
+    dbt_hook_prints "$M"
+  } | grep . | sort -u > "$HOOKS_APPROVED_FILE.tmp"
+  { echo "# Hooks approved for the v2 worktrees and global/ (DBT_HOOKS_REVIEWED_V2=1 runs these, and only these)."
+    echo "# <fingerprint of the text + where its sources resolve> <TAB> <node> <TAB> <kind> — written by: just hooks-approve"
+    echo "# last: $(date -u +%F) from ${M#"$WS"/} ($N hooks)"
+    cat "$HOOKS_APPROVED_FILE.tmp"; } > "$HOOKS_APPROVED_FILE"
+  rm -f "$HOOKS_APPROVED_FILE.tmp"
+  echo "$N hook(s) of ${M#"$WS"/} approved — $(grep -vc '^#' "$HOOKS_APPROVED_FILE") in ${HOOKS_APPROVED_FILE#"$WS"/}"
+}
+
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
+  local HOOKS_CHECK="" NEW
   local -a SEL=()
   shift
   JCMD="$(dbt_just_cmd "$V")"
@@ -562,6 +603,8 @@ run_dbt() {
 
   if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
     echo "· hooks: \`dbt $CMD_HOOKS\` allowed for $(hooks_compile_name "$V") (DBT_HOOKS_COMPILE_OK in dbt.conf)" >&2
+  elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_v2_ok "$V"; then
+    HOOKS_CHECK=1   # against the approved hooks, once the manifest is fresh (below)
   elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ]; then
     if dbt_packages_unchecked "$PROJ"; then
       refuse "\`dbt ${CMD_HOOKS:-$CMD_WRITE}\` can run hooks, and this project's packages are not installed:" \
@@ -575,7 +618,8 @@ run_dbt() {
         printf '%s\n' "$HOOKS" | head -n 12 | sed 's/^/     /'
         [ "$(printf '%s\n' "$HOOKS" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$HOOKS" | wc -l) files)"
         [ "$V" != v1 ] && echo "   (dbt v2 runs on-run-start hooks on compile and show too.)"
-        echo "   Read them, then set DBT_HOOKS_REVIEWED=1 in .devcontainer/dbt.conf."
+        echo "   Read them. v2 worktrees and global/ only: just hooks-approve, then DBT_HOOKS_REVIEWED_V2=1;"
+        echo "   everywhere (v1 included): DBT_HOOKS_REVIEWED=1 — both in .devcontainer/dbt.conf."
       } >&2
       exit 1
     fi
@@ -647,6 +691,24 @@ PY
     echo "[dbt:${P_NAME:+$P_NAME:}$V] $(printf '%s\n' "$OUT" | grep -c .) node(s), all inside the sandbox" >&2
   fi
 
+  if [ -n "$HOOKS_CHECK" ]; then
+    # dbt v2 `ls` rewrites target/manifest.json: a write has just run it; any other command runs it here
+    if [ -z "$CMD_WRITE" ]; then
+      dbt_destinations "$V" ${SEL[@]+"${SEL[@]}"} >/dev/null \
+        || refuse "cannot read this project's hooks (dbt ls failed): hooks that cannot be checked are refused."
+    fi
+    [ -f "$PROJ/target/manifest.json" ] || refuse "no manifest after dbt ls: hooks that cannot be checked are refused."
+    NEW="$(comm -13 <(grep -v '^#' "$HOOKS_APPROVED_FILE" | sort -u) <(dbt_hook_prints "$PROJ/target/manifest.json" | sort -u))"
+    if [ -n "$NEW" ]; then
+      echo "⛔ \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` refused: $(printf '%s\n' "$NEW" | wc -l) hook(s) not approved — new, edited, or a source" >&2
+      echo "   they name now resolves elsewhere (DBT_HOOKS_REVIEWED_V2 runs approved hooks only):" >&2
+      printf '%s\n' "$NEW" | cut -f2,3 | head -n 15 | sed 's/^/   /; s/\t/ /' >&2
+      echo "   Read them; then: $(dbt_is_fleet && echo 'just global compile && just hooks-approve' || echo 'just v2 compile && just hooks-approve')" >&2
+      exit 1
+    fi
+    echo "· hooks: every hook is an approved one (DBT_HOOKS_REVIEWED_V2, ${HOOKS_APPROVED_FILE#"$WS"/})" >&2
+  fi
+
   # Run from the project directory, unless the caller already stands in it
   # (the `dbt` function: paths given on the command line stay relative).
   case "$PWD/" in
@@ -703,15 +765,17 @@ case "$MODE" in
     lock_write "${1:-}" ;;
   lock-status)
     lock_status ;;
+  hooks-approve)
+    hooks_approve "${1:-}" ;;
   lock-checkout)
     lock_checkout "${1:-}" ;;
   lock-release)
     lock_release "${1:-}" ;;
   *)
     if dbt_is_fleet; then
-      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | lock [<product>] | lock-status | lock-checkout [<product>] | lock-release [<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
+      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | lock [<product>] | lock-status | lock-checkout [<product>] | lock-release [<product>] | hooks-approve [global|<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
     else
-      echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull" >&2
+      echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull | hooks-approve" >&2
     fi
     exit 2 ;;
 esac

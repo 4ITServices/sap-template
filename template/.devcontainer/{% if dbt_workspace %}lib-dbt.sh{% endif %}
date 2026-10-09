@@ -90,6 +90,7 @@ dbt_load_conf() {
   DBT_HOOKS_REVIEWED=0
   DBT_HOOKS_COMPILE_OK=""
   DBT_SANDBOX_NEVER_BUILD=""
+  DBT_HOOKS_REVIEWED_V2=0
   # shellcheck disable=SC1090
   [ -f "$DBT_CONF" ] && . "$DBT_CONF"
   dbt_use_product "" >/dev/null 2>&1 || true
@@ -1093,6 +1094,31 @@ dbt_hook_sources() {
   } | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|--)' | cut -d: -f1 | sort -u \
     | while IFS= read -r F; do printf '%s\n' "${F#"$PROJ"/}"; done
   return 0
+}
+
+# dbt_hook_prints MANIFEST — one line per hook dbt would run from this manifest:
+#   <fingerprint> <TAB> <unique_id> <TAB> <kind>   (kind: pre-hook, post-hook, operation)
+# The fingerprint covers the hook's text AND where each source() it names resolves: the same text writes
+# elsewhere once a source is redeclared. on-run-start/end are the `operation` nodes.
+dbt_hook_prints() {
+  python3 - "${1:?manifest}" <<'PY'
+import hashlib, json, re, sys
+m = json.load(open(sys.argv[1]))
+src = {(s.get("package_name"), s.get("source_name"), s.get("name")): f'{s.get("database")}.{s.get("schema")}.{s.get("identifier")}'
+       for s in (m.get("sources") or {}).values()}
+out = set()
+for k, n in (m.get("nodes") or {}).items():
+    pkg = n.get("package_name") or k.split(".")[1]
+    if n.get("resource_type") == "operation":
+        hooks = [("operation", n.get("raw_code") or "")]
+    else:
+        cfg = n.get("config") or {}
+        hooks = [(t, h.get("sql") if isinstance(h, dict) else str(h)) for t in ("pre-hook", "post-hook") for h in (cfg.get(t) or [])]
+    for t, sql in hooks:
+        rel = [src.get((pkg, a, b), "?") for a, b in re.findall(r"source\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]", sql)]
+        out.add(f'{hashlib.sha256((sql + chr(0) + chr(0).join(rel)).encode()).hexdigest()[:20]}\t{k}\t{t}')
+print("\n".join(sorted(out)))
+PY
 }
 
 # dbt_packages_unchecked PROJECT_DIR — true when the project declares packages

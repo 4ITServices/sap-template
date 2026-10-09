@@ -42,7 +42,9 @@ cat > "$STUB_DBT" <<'EOF'
 #!/bin/bash
 if [ "${1:-}" = "--version" ]; then echo "${STUB_VERSION:-dbt 2.0.0}"; exit 0; fi
 for a in "$@"; do
-  if [ "$a" = "ls" ]; then echo "ls $*" >> "$STUB_LOG"; cat "${STUB_LS_FILE:-/dev/null}"; exit "${STUB_LS_RC:-0}"; fi
+  if [ "$a" = "ls" ]; then echo "ls $*" >> "$STUB_LOG"
+    [ -n "${STUB_MANIFEST:-}" ] && mkdir -p target && cp "$STUB_MANIFEST" target/manifest.json  # dbt v2 ls rewrites it
+    cat "${STUB_LS_FILE:-/dev/null}"; exit "${STUB_LS_RC:-0}"; fi
 done
 echo "ENGINE=$0 CWD=$PWD PROFILES=${DBT_PROFILES_DIR:-} EXTRA=${EXTRA_VAR:-} ARGS=$*"
 EOF
@@ -259,6 +261,35 @@ conf "$WS" 'DBT_HOOKS_REVIEWED=1'
 O="$(RUN v2 compile -s a)";    has "$O" "ARGS=compile -s a" && pass "…v2 compile accepté après DBT_HOOKS_REVIEWED=1" || bad "v2 compile refusé après relecture ($O)"
 O="$(RUN v1 test)";            has "$O" "ARGS=test" && pass "…v1 test accepté après DBT_HOOKS_REVIEWED=1" || bad "v1 test refusé après relecture ($O)"
 conf "$WS"
+
+echo "== DBT_HOOKS_REVIEWED_V2 : les hooks approuvés, dans la v2 seulement =="
+man() {  # man FICHIER TEXTE_DU_HOOK PROJET_DE_LA_SOURCE — un manifeste : une opération + un post_hook sur une source
+  python3 - "$@" <<'PY'
+import json, sys
+f, sql, db = sys.argv[1:4]
+json.dump({"sources": {"source.fake.S.T": {"package_name": "fake", "source_name": "S", "name": "T", "database": db, "schema": "DS", "identifier": "T"}},
+           "nodes": {"operation.elem.elem-on-run-end-0": {"resource_type": "operation", "package_name": "elem", "raw_code": "{{ elem.on_run_end() }}"},
+                     "model.fake.a": {"resource_type": "model", "package_name": "fake", "config": {"post-hook": [{"sql": sql}]}}}}, open(f, "w"))
+PY
+}
+MAN_A="$W/man-a.json"; MAN_B="$W/man-b.json"; MAN_C="$W/man-c.json"
+man "$MAN_A" "insert into {{ source('S', 'T') }} select 1" sandbox-prj
+man "$MAN_B" "insert into {{ source('S', 'T') }} select 2" sandbox-prj
+man "$MAN_C" "insert into {{ source('S', 'T') }} select 1" real-prd
+conf "$WS" 'DBT_HOOKS_REVIEWED_V2=1'
+O="$(STUB_MANIFEST="$MAN_A" RUN v2 run -s a)"; has "$O" "no approved hook" && has "$O" "hooks nobody has reviewed" && pass "aucun hook approuvé : refusé" || bad "interrupteur sans approbation accepté ($O)"
+mkdir -p "$WS/v2/dbt/target"; cp "$MAN_A" "$WS/v2/dbt/target/manifest.json"
+O="$(RUN hooks-approve)";   has "$O" "2 hook(s)" && pass "just hooks-approve : les 2 hooks du manifeste approuvés" || bad "approbation ($O)"
+check "…consignés dans .devcontainer/hooks.approved" grep -q "model.fake.a.post-hook" "$WS/.devcontainer/hooks.approved"
+O="$(STUB_MANIFEST="$MAN_A" RUN v2 run -s a)"; has "$O" "every hook is an approved one" && has "$O" "ARGS=run -s a" && pass "v2 run, hooks approuvés : accepté" || bad "hooks approuvés mais refusé ($O)"
+O="$(STUB_MANIFEST="$MAN_A" RUN v2 test)";     has "$O" "ARGS=test" && pass "…v2 test (sans écriture) : dbt ls relit les hooks, accepté" || bad "v2 test refusé ($O)"
+O="$(STUB_MANIFEST="$MAN_B" RUN v2 run -s a)"; has "$O" "not approved" && has "$O" "model.fake.a post-hook" && pass "hook modifié : refusé, nommé" || bad "hook modifié accepté ($O)"
+refute "…et le moteur n'a pas été lancé" grep -qF "ARGS=run" <<<"$O"
+O="$(STUB_MANIFEST="$MAN_C" RUN v2 run -s a)"; has "$O" "not approved" && pass "même texte, source résolue ailleurs : refusé" || bad "source déplacée acceptée ($O)"
+O="$(STUB_MANIFEST="$MAN_A" RUN v1 run -s a)"; has "$O" "hooks nobody has reviewed" && pass "v1 : hors de l'interrupteur, toujours refusé" || bad "v1 ouverte par DBT_HOOKS_REVIEWED_V2 ($O)"
+conf "$WS"
+O="$(STUB_MANIFEST="$MAN_A" RUN v2 run -s a)"; has "$O" "hooks nobody has reviewed" && pass "interrupteur à 0 : refusé malgré l'approbation" || bad "approbation sans interrupteur acceptée ($O)"
+rm -f "$WS/.devcontainer/hooks.approved" "$WS/v2/dbt/target/manifest.json"
 rm -rf "$WS/v1/dbt/dbt_packages" "$WS/v2/dbt/dbt_packages"
 
 printf 'packages:\n  - package: acme/elem\n    version: 1.0.0\n' > "$WS/v2/dbt/packages.yml"
