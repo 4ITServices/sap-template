@@ -887,14 +887,16 @@ DBT_GLOBAL_END="  # <<< products <<<"
 # project exists. dbt v2 installs local packages as symlinks, so global/ sees
 # every edit made in v2/<product>/ at once.
 dbt_ensure_global() {
-  local F="$DBT_WS/global/packages.yml" N PROJ TMP LINES="" COUNT=0
+  # not LINES: bash rewrites $LINES with the terminal height on a window resize (SIGWINCH) — during post-start the
+  # managed block became "21  # <<< products <<<"
+  local F="$DBT_WS/global/packages.yml" N PROJ TMP BLOC="" COUNT=0
   dbt_is_fleet || return 0
   [ -f "$DBT_WS/global/dbt_project.yml" ] || { echo "  no global/ project — skipped"; return 0; }
   for N in $(dbt_products); do
     dbt_use_product "$N" || continue
     [ "$P_GLOBAL" = 1 ] || continue
     if PROJ="$(dbt_project_dir v2)"; then
-      LINES="$LINES  - local: ../${PROJ#"$DBT_WS"/}"$'\n'; COUNT=$((COUNT + 1))
+      BLOC="$BLOC  - local: ../${PROJ#"$DBT_WS"/}"$'\n'; COUNT=$((COUNT + 1))
     else
       echo "  [$N] flagged global, but v2/$N/ has no dbt project yet — left out"
     fi
@@ -904,7 +906,7 @@ dbt_ensure_global() {
     echo "  WARNING: global/packages.yml has no managed block (markers removed?) — products not synced"
   else
     TMP="$(mktemp)"
-    awk -v b="$DBT_GLOBAL_BEGIN" -v e="$DBT_GLOBAL_END" -v lines="$LINES" '
+    awk -v b="$DBT_GLOBAL_BEGIN" -v e="$DBT_GLOBAL_END" -v lines="$BLOC" '
       $0==b {print; printf "%s", lines; skip=1; next}
       $0==e {skip=0}
       !skip {print}' "$F" > "$TMP" && cat "$TMP" > "$F"
