@@ -126,7 +126,11 @@
 
   "onCreateCommand": {
     "git-config": "git config --global --add safe.directory ${containerWorkspaceFolder} && git config --global user.email '{{ author_email }}' && git config --global user.name '{{ author_name }}'",
-    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"
+    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"{% if dbt_workspace %},
+    // the engines live in the container filesystem: installed BEFORE the
+    // editor connects, so dbt Power User finds /opt/dbt-v1/bin/python on the
+    // first start after a rebuild (postCreateCommand runs once it is connected)
+    "dbt-engines": "bash -c 'source ${containerWorkspaceFolder}/.devcontainer/lib-dbt.sh && dbt_engines ${containerWorkspaceFolder}'"{% endif %}
   },
 
   "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/post-create.sh",

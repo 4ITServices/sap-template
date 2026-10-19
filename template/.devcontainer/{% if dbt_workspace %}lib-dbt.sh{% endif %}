@@ -1158,6 +1158,27 @@ _dbt_v1_deps() {
   fi
 }
 
+# dbt_engines WORKSPACE — only the two engines, from onCreateCommand: the
+# editor connects (and the dbt extensions start, dbt Power User spawning
+# /opt/dbt-v1/bin/python) once onCreateCommand is done, while
+# postCreateCommand still runs. Both engines live in the container
+# filesystem, gone at each rebuild: installed here they are in place before
+# the extensions look for them; dbt_process then finds them up to date.
+dbt_engines() {
+  dbt_load_conf "${1:-}"
+  [ -f "$DBT_CONF" ] || return 0
+  export PATH="${HOME:-/home/vscode}/.local/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 \
+      || echo "  WARNING: uv install failed — the dbt Core venv is left to post-create"
+  fi
+  echo "[dbt] engine v1 — dbt Core 1.x..."
+  dbt_ensure_v1_venv
+  echo "[dbt] engine v2 — dbt v2..."
+  dbt_ensure_v2
+  return 0
+}
+
 # dbt_process WORKSPACE MODE — MODE 'create' also installs the v1 packages.
 dbt_process() {
   local MODE="${2:-start}" N

@@ -6,6 +6,9 @@
 devcontainer.json
   ├── initializeCommand      mkdir ~/.claude or ~/.claude-profiles/<profile> (host-side, before build)
   ├── onCreateCommand        git config + claude dirs (once, at image creation)
+  │                            └── dbt engines (lib-dbt.sh dbt_engines) — dbt-project only:
+  │                                done before the editor connects, so the dbt extensions
+  │                                find /opt/dbt-v1/bin/python and ~/.local/bin/dbt at once
   ├── postCreateCommand  →   post-create.sh (once, after build)
   │                            ├── MCP servers install (lib-mcp.sh ← mcp-servers.conf)
   │                            ├── dbt workspace (lib-dbt.sh ← dbt.conf) — dbt-project only

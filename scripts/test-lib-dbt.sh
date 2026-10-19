@@ -500,7 +500,13 @@ printf 'name: fleet_global\nprofile: "prof_global"\n' > "$FW/global/dbt_project.
 cp "$REPO_ROOT/template/"*"global"*"/packages.yml" "$FW/global/packages.yml"
 git -C "$FW" add -A && git -C "$FW" commit -q -m "fleet scaffold" && git -C "$FW" push -q origin main
 rm -rf "$DBT_V1_VENV" "$DBT_BIN_DIR"; : > "$STUB_LOG"
+# onCreateCommand : les deux moteurs seuls, avant que l'éditeur se connecte
+O="$( (cd "$FW" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_engines "$PWD"') 2>&1)"
+check "onCreate (dbt_engines) : python du venv v1 posé avant post-create" test -x "$DBT_V1_VENV/bin/python"
+check "…dbt v2 posé aussi" test -x "$DBT_BIN_DIR/dbt"
+check "…sans aucun worktree (rien d'autre que les moteurs)" test ! -e "$FW/v1"
 OUT="$(life "$FW" create)"
+[ "$(grep -c '^installer ' "$STUB_LOG")" = 1 ] && pass "post-create retrouve les moteurs de onCreate : dbt v2 non réinstallé" || bad "dbt v2 réinstallé après onCreate"
 
 for x in "alpha v1" "alpha v2" "beta v1" "beta v2"; do set -- $x
   check "$1 : $2/$1/ est un worktree sur la branche $1/$2" test "$(git -C "$FW/$2/$1" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$1/$2"
