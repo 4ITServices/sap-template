@@ -682,6 +682,20 @@ git -C "$FW/v2/delta" checkout -q -- dbt/models/m_delta.sql
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null | sed -n '/^\[lock/,/^\[profile/p')"
 has "$O" "v2/delta/ 1 commit(s) since the lock" && has "$O" "products.lock is not committed yet" && pass "doctor : section [lock] (écarts, verrou à committer)" || bad "doctor [lock] ($O)"
 
+echo "== Paquets v1 incomplets : deps relancé au create =="
+DP="$WS/v1/dbt"; DEPS() { ( cd "$WS" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_v1_deps' ) 2>&1; }
+printf 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n  - git: "https://git.example.com/p.git"\n' > "$DP/packages.yml"
+mkdir -p "$DP/dbt_packages/dbt_utils"; : > "$DBT_LOG"
+O="$(DEPS)"; has "$O" "v1 packages (dbt deps)" && grep -q "ARGS=deps" "$DBT_LOG" && pass "2 paquets déclarés, 1 installé : deps relancé" || bad "paquets incomplets non réinstallés ($O)"
+mkdir -p "$DP/dbt_packages/p"; : > "$DBT_LOG"
+O="$(DEPS)"; [ -z "$O" ] && ! grep -q "ARGS=deps" "$DBT_LOG" && pass "…tous installés : deps sauté" || bad "deps relancé à tort ($O)"
+# un transitif installé (dbt_date) masque le paquet git manquant : le verrou en liste 3
+rm -rf "$DP/dbt_packages/p"; mkdir -p "$DP/dbt_packages/dbt_date"
+printf 'packages:\n  - package: dbt-labs/dbt_utils\n  - git: "https://git.example.com/p.git"\n  - package: godatadriven/dbt_date\n' > "$DP/package-lock.yml"; : > "$DBT_LOG"
+O="$(DEPS)"; grep -q "ARGS=deps" "$DBT_LOG" && pass "…transitif installé, paquet déclaré absent : vu par package-lock.yml" || bad "transitif masque le manquant ($O)"
+rm -f "$DP/package-lock.yml"
+rm -rf "$DP/dbt_packages" "$DP/packages.yml"
+
 echo "== Aucune fuite hors du bac à sable de test =="
 refute "le vrai ~/.gitconfig n'a pas reçu le verrou" grep -q "git.invalid" /home/"$(id -un)"/.gitconfig
 check "l'upstream n'a toujours qu'une branche" test "$(git -C "$W/upstream.git" for-each-ref refs/heads | wc -l)" = 1

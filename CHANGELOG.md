@@ -147,6 +147,13 @@ and commit messages; this changelog starts at v0.8.12.
   `onCreateCommand` entry, `dbt-engines` (`lib-dbt.sh` → `dbt_engines`),
   installs uv if needed, then the dbt Core venv and dbt v2; post-create finds
   them up to date and skips them.
+- **A v1 whose packages are incomplete gets `dbt deps` again on create.**
+  The install was skipped as soon as `dbt_packages/` existed, but a failed
+  deps (a private git host refusing the SSH key) leaves the hub packages
+  there: no rebuild ever completed it, and dbt Power User kept reporting
+  "found 3 package(s) specified in packages.yml, but only 2 package(s)
+  installed". It now runs when fewer packages are installed than declared —
+  the count dbt itself compares.
 - **The write guard now sees the hooks of installed packages.** It only
   scanned the project's own files, so the on-run-start/end hooks that a
   package such as elementary declares in its `dbt_project.yml` went

@@ -1142,11 +1142,31 @@ dbt_packages_unchecked() {
 # _dbt_v1_deps — v1 only: dbt Core installs what package-lock.yml says. dbt v2
 # would re-resolve and rewrite that tracked file — a migration step, not a
 # hook's.
+# _dbt_v1_packages_missing PROJ — fewer directories in dbt_packages/ than
+# packages declared (the count dbt Core itself compares: "found 3 package(s)
+# specified in packages.yml, but only 2 package(s) installed"), or than
+# package-lock.yml lists, transitive ones included (an installed transitive
+# package would otherwise hide a missing declared one). A failed deps (a
+# private git host refused) leaves the hub packages in place: the directory
+# alone does not mean the install is complete.
+_dbt_v1_packages_missing() {
+  local PROJ="$1" F N=0 L=0 I RE='^[[:space:]]*-[[:space:]]*(package|git|local|tarball|private):'
+  [ -d "$PROJ/dbt_packages" ] || return 0
+  for F in "$PROJ/packages.yml" "$PROJ/dependencies.yml"; do
+    [ -f "$F" ] || continue
+    N=$((N + $(grep -cE "$RE" "$F")))
+  done
+  [ -f "$PROJ/package-lock.yml" ] && L="$(grep -cE "$RE" "$PROJ/package-lock.yml")"
+  [ "$L" -gt "$N" ] && N="$L"
+  I="$(find "$PROJ/dbt_packages" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) 2>/dev/null | wc -l)"
+  [ "$I" -lt "$N" ]
+}
+
 _dbt_v1_deps() {
   local PROJ
   [ -x "$DBT_V1_VENV/bin/dbt" ] && PROJ="$(dbt_project_dir v1)" || return 0
-  [ ! -d "$PROJ/dbt_packages" ] || return 0
   [ -f "$PROJ/packages.yml" ] || [ -f "$PROJ/dependencies.yml" ] || return 0
+  _dbt_v1_packages_missing "$PROJ" || return 0
   echo "[dbt] ${P_TAG}v1 packages (dbt deps)..."
   # one retry: a git host may refuse a burst of SSH connections (several
   # products installing private packages in a row) — observed, transient
