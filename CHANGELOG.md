@@ -174,6 +174,17 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Fixed (on the unreleased dbt-project type)
 
+- **`dbt-run.sh` write guard: dbt can no longer be pointed at another project,
+  and an env file can no longer change the guard.** `--project-dir` (and
+  `--project-dir=…`) is refused like `--profiles-dir`, and an exported
+  `DBT_PROJECT_DIR` is refused: the guard checks the destinations of the
+  project it resolved, and dbt would have run a different one. Every env file
+  `export_env` sources (`profiles/dbt.env`, `profiles/v4.env`,
+  `profiles/env/<product>.env`) is compared before and after: one that adds or
+  changes a `DBT_*` variable (`DBT_SANDBOX_NEVER_BUILD`, `DBT_HOOKS_REVIEWED`,
+  `DBT_BQ_DATASET_PREFIX`, `DBT_PROFILES_DIR`…) is refused —
+  `DBT_SEND_ANONYMOUS_USAGE_STATS` aside. No generated env file sets one.
+
 - **The dbt engines are installed before the editor connects.** Both live in
   the container filesystem and were rebuilt by `postCreateCommand`, which runs
   once VS Code is already connected: after a rebuild, dbt Power User started

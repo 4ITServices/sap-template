@@ -600,8 +600,17 @@ product_new() {
 # product's own); nothing in them can move the lock. The v4 space (V = v4,
 # global-v4) starts from profiles/v4.env instead of profiles/dbt.env — chosen
 # by the MODE, never by a variable a shell could have exported.
+# _guard_vars — every DBT_* variable of this shell with its value (DBT_SEND_ANONYMOUS_USAGE_STATS aside): what
+# export_env compares around each env file it sources.
+_guard_vars() {
+  local G
+  for G in $(compgen -v DBT_); do
+    [ "$G" = DBT_SEND_ANONYMOUS_USAGE_STATS ] || printf '%s=%q\n' "$G" "${!G}"
+  done
+}
+
 export_env() {
-  local F V="${1:-}" BASE="$WS/profiles/dbt.env" OWN="${P_ENV:-}"
+  local F BEFORE V="${1:-}" BASE="$WS/profiles/dbt.env" OWN="${P_ENV:-}"
   if dbt_is_v4 "$V"; then
     _dbt_v4_prefix_ok || refuse "$V: DBT_BQ_DATASET_PREFIX_V4 ('${DBT_BQ_DATASET_PREFIX_V4:-}') is not ${DBT_BQ_DATASET_PREFIX:-<DBT_BQ_DATASET_PREFIX>}_<x> in .devcontainer/dbt.conf:" \
                                 "the v4 has no datasets of its own — every v4 command is refused."
@@ -611,10 +620,16 @@ export_env() {
   fi
   for F in "$BASE" "$OWN"; do
     [ -n "$F" ] && [ -f "$F" ] || continue
+    BEFORE="$(_guard_vars)"
     set -a
     # shellcheck disable=SC1090
     . "$F"
     set +a
+    # an env file feeds the dbt project (DATASET_PREFIX, SOURCE, ENV…), never the guard: a DBT_* setting it adds
+    # or changes (DBT_SANDBOX_NEVER_BUILD, DBT_HOOKS_REVIEWED, DBT_BQ_DATASET_PREFIX, DBT_PROJECT_DIR…) is refused
+    [ "$(_guard_vars)" = "$BEFORE" ] \
+      || refuse "${F#"$WS"/} sets a DBT_* variable: guard settings live in .devcontainer/dbt.conf only — refused." \
+                "Remove it from ${F#"$WS"/} (DBT_SEND_ANONYMOUS_USAGE_STATS is the one exception)."
   done
   export DBT_PROFILES_DIR="$WS/profiles"
   export DBT_SEND_ANONYMOUS_USAGE_STATS="${DBT_SEND_ANONYMOUS_USAGE_STATS:-false}"
@@ -741,6 +756,9 @@ run_dbt() {
       --profiles-dir|--profiles-dir=*)
         refuse "--profiles-dir is not allowed: the profile hub is imposed." \
                "Edit profiles/profiles.yml instead." ;;
+      --project-dir|--project-dir=*)
+        refuse "--project-dir is not allowed: the guard checks the destinations of $(_dbt_show "$V") only," \
+               "and dbt would run another project. Run it through its own recipe." ;;
       run|build|seed|snapshot|clone|retry) CMD_WRITE="$A" ;;
       run-operation) CMD_RUNOP=1 ;;
     esac
@@ -761,6 +779,9 @@ run_dbt() {
 
   export_env "$V"
   space_check "$V"
+  [ -z "${DBT_PROJECT_DIR:-}" ] \
+    || refuse "DBT_PROJECT_DIR is set ('$DBT_PROJECT_DIR'): dbt would run that project, not the one the guard checks — refused." \
+              "unset DBT_PROJECT_DIR"
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
     refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \
