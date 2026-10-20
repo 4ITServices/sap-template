@@ -94,6 +94,18 @@ DBT_HOOKS_REVIEWED=0
 # refused). Fleet: product names, `global` for global/; single project:
 # `project`. elementary's hooks also need ELEMENTARY=0 (its uploads off).
 DBT_HOOKS_COMPILE_OK=""
+{%- if project_type == 'dbt-fleet' %}
+# The v4 space has no approved-hooks list, and names of its own in the list
+# above: `global-v4`, `v4/<product>` (a product name never opens its v4). Listed,
+# `global-v4` holds only while the proof of its hooks named here holds: ONE
+# verdict line, exactly
+#   VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>
+# whose seal the guard recomputes at every compile/show (lib-dbt.sh,
+# dbt_hooks_v4_seal: what decides which hooks run there, and what they do).
+# Written by the fleet's own proof tool; a path inside the workspace. Empty:
+# global-v4 stays refused. A `v4/<product>` has no seal: listed, refused.
+DBT_HOOKS_V4_PROOF=""
+{%- endif %}
 # Nodes never built in the sandbox, whatever the selection (space-separated,
 # <package>.<node> as dbt names them; in a fleet, as in global/): the guard
 # refuses a write that selects one. For tables whose production protects the

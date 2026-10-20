@@ -168,9 +168,29 @@ and commit messages; this changelog starts at v0.8.12.
   has no approved-hooks list (`DBT_HOOKS_REVIEWED_V2` never opens it), and
   `DBT_HOOKS_COMPILE_OK` names it apart (`v4/<product>`, `global-v4`): listing
   a product's v2 never opens its v4.
+- **`global-v4` compiles under a proof of its hooks, sealed and checked by the
+  guard.** Listed in `DBT_HOOKS_COMPILE_OK`, `global-v4` gets compile/show only
+  while the proof named by a new fleet setting, `DBT_HOOKS_V4_PROOF` (a file
+  of the workspace, written by the fleet's own proof tool), holds for the
+  files on disk: its one anchored verdict line, `VERDICT HOOKS GLOBAL-V4 :
+  PREUVE OK ; TÉMOINS OK ; sceau <hex>`, carries a seal that `dbt-run.sh`
+  recomputes at every compile/show (`lib-dbt.sh`: `dbt_hooks_v4_seal`,
+  `dbt_hooks_v4_verdict`). The seal covers what decides which hooks run there
+  and what they do — `global-v4/`'s project, package and lock files, all of
+  `macros/` and `vendor/`, what deps really installed in `dbt_packages/`
+  (each downloaded package file by file outside its `.git`, each link by its
+  target), `hooks.approved`, `profiles/v4.env`, `profiles/profiles.yml`, the
+  members' project and package files, and the dbt v2 engine's version. A
+  changed seal, a state it cannot read (a `local` package in another form, a
+  link or special file in a sealed tree, `dbt_packages/` not exactly what
+  `package-lock.yml` locks), no proof, a second verdict, another seal quoted
+  or a verdict without both OKs: compile/show refused; parse still runs, to
+  prove again. A `v4/<product>` has no seal of its own: listed, it is now
+  refused. `just doctor` says whether the proof holds. `global/`, the v2
+  worktrees and single projects are unchanged.
 - **`dbt` typed in a dbt project of the workspace the guard does not know** (a
   copy, a probe) is refused instead of running plain dbt v2.
-- **Tests**: 90 more offline checks in `scripts/test-lib-dbt.sh` (349 in all).
+- **Tests**: 147 more offline checks in `scripts/test-lib-dbt.sh` (413 in all).
 
 ### Fixed (on the unreleased dbt-project type)
 

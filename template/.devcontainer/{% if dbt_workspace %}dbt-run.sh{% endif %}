@@ -65,7 +65,10 @@
 #   - refuses every command that would execute hooks — the project's own or
 #     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
 #     commands run hooks depends on the engine: see dbt_hook_commands in
-#     lib-dbt.sh (dbt v2 runs them on compile and show too)
+#     lib-dbt.sh (dbt v2 runs them on compile and show too). In the v4 space,
+#     DBT_HOOKS_COMPILE_OK opens global-v4's compile/show only while the proof
+#     of its hooks (DBT_HOOKS_V4_PROOF) holds for the files on disk — its seal
+#     is recomputed at every such command (dbt_hooks_v4_seal, lib-dbt.sh)
 # The raw engines (`dbt1`, `dbtf`) and the editor extensions' buttons bypass
 # these guards — they only get the hub.
 # =============================================================================
@@ -676,14 +679,9 @@ offenders() {
 # harmless on compile/show (dbt v2 runs on-run-start/end there). Only compile and show:
 # any other hook-running or writing word keeps the refusal. elementary's hooks are allowed
 # only while ELEMENTARY is not 1 (its uploads are then disabled by the products' vars).
-# The v4 space has names of its own — `global-v4`, `v4/<product>`: listing a product (its v2) never opens its v4.
-hooks_compile_name() {
-  case "$1" in
-    global|global-v4) printf '%s' "$1" ;;
-    v4) printf 'v4/%s' "${P_NAME:-}" ;;
-    *) if dbt_is_fleet; then printf '%s' "${P_NAME:-}"; else printf 'project'; fi ;;
-  esac
-}
+# The v4 space has names of its own — `global-v4`, `v4/<product>`: listing a product (its v2) never opens its v4,
+# and a name of the v4 space holds only with a proof of its hooks whose seal still matches (hooks_v4_proof_ok).
+hooks_compile_name() { dbt_hooks_compile_name "$@"; }
 hooks_compile_ok() {
   local NAME
   [ -n "$CMD_HOOKS" ] && [ -z "$CMD_WRITE$CMD_HOOKS_HARD$CMD_RUNOP" ] || return 1
@@ -695,7 +693,35 @@ hooks_compile_ok() {
     echo "· hooks: ELEMENTARY is not 0 — elementary would upload: compile/show refused" >&2
     return 1
   fi
+  if dbt_is_v4 "$1"; then hooks_v4_proof_ok "$NAME"; fi
   return 0
+}
+
+# hooks_v4_proof_ok NAME — a name of the v4 space listed in DBT_HOOKS_COMPILE_OK: the v4 has no approved-hooks list, so
+# its compile/show runs only while the proof of its hooks (DBT_HOOKS_V4_PROOF, a file of the workspace) holds for the
+# files on disk — its one verdict line carries the seal the guard recomputes here (dbt_hooks_v4_seal,
+# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), no proof named, a state that cannot be
+# sealed, a proof whose seal no longer matches.
+hooks_v4_proof_ok() {
+  local NAME="$1" S
+  [ "$NAME" = global-v4 ] \
+    || refuse "$NAME is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own (only global-v4 has one):" \
+              "\`dbt ${CMD_HOOKS:-compile}\` refused. Remove it from DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)."
+  case "${DBT_HOOKS_V4_PROOF:-}" in
+    ""|/*|../*|*/../*|*/..|..)
+      refuse "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF ('${DBT_HOOKS_V4_PROOF:-}') names no proof of its" \
+             "hooks inside the workspace: \`dbt ${CMD_HOOKS:-compile}\` refused (.devcontainer/dbt.conf)." ;;
+  esac
+  S="$(cd "$WS" && dbt_hooks_v4_seal)" \
+    || refuse "global-v4: its hooks cannot be sealed — a package declared in a form the seal does not read, a link or a special" \
+              "file in macros/, vendor/ or an installed package, or dbt_packages/ not exactly what package-lock.yml locks:" \
+              "\`dbt ${CMD_HOOKS:-compile}\` refused. Install its packages (no hook runs): $JCMD deps; then prove its hooks again."
+  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" \
+    || refuse "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) —" \
+              "something that decides which hooks run, or what they do, changed since it was written, or it has no single" \
+              "verdict line « VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <hex> »: \`dbt ${CMD_HOOKS:-compile}\` refused." \
+              "Prove its hooks again (the tool that writes $DBT_HOOKS_V4_PROOF), then compile."
+  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF)" >&2
 }
 
 # DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks; the v4 space has no

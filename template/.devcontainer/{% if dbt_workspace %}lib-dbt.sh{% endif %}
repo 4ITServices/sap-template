@@ -106,6 +106,8 @@ dbt_load_conf() {
   DBT_HOOKS_COMPILE_OK=""
   DBT_SANDBOX_NEVER_BUILD=""
   DBT_HOOKS_REVIEWED_V2=0
+  # fleet: the proof of global-v4's hooks (DBT_HOOKS_COMPILE_OK may name global-v4 only while it holds) — empty: none
+  DBT_HOOKS_V4_PROOF=""
   # v4 (fleet): the products that have one, and the dataset prefix of v4/ and global-v4/ — empty: none, refused
   DBT_V4_PRODUCTS=""
   DBT_BQ_DATASET_PREFIX_V4=""
@@ -1324,6 +1326,108 @@ dbt_packages_unchecked() {
     [ -f "$F" ] && grep -qE '^[[:space:]]*-[[:space:]]*(package|git|local|tarball|private):' "$F" && return 0
   done
   return 1
+}
+
+# dbt_hooks_compile_name V — the name DBT_HOOKS_COMPILE_OK gives V (after dbt_use_product): `global`, `global-v4`,
+# `v4/<product>`, a product's name (its v2 and v1 — never its v4), or `project` outside a fleet.
+dbt_hooks_compile_name() {
+  case "${1:-}" in
+    global|global-v4) printf '%s' "$1" ;;
+    v4) printf 'v4/%s' "${P_NAME:-}" ;;
+    *) if dbt_is_fleet; then printf '%s' "${P_NAME:-}"; else printf 'project'; fi ;;
+  esac
+}
+
+# -----------------------------------------------------------------------------
+# The v4 space's hooks: a proof, and its seal (fleet)
+# -----------------------------------------------------------------------------
+# The v4 space has no approved-hooks list. DBT_HOOKS_COMPILE_OK may name `global-v4` — compile and show only — while a
+# proof of its hooks, written by the fleet's own tool (outside this template) and named by DBT_HOOKS_V4_PROOF, still
+# holds for the files on disk: its ONE verdict line carries the seal it was written for, and the guard recomputes the
+# seal at every compile/show. Whatever decides which hooks run there, or what they do, changes the seal: the proof is
+# then to be made again. A v4/<product> has no seal of its own: listed, it is refused.
+#
+# dbt_hooks_v4_seal — from the workspace root: prints the seal of global-v4/ (20 hex), or returns 1 (no seal). One line
+# per entry, in this order, each ended by a newline — "<sha256 hex of the file, or ->  <path from the workspace root>":
+#   1. global-v4/{dbt_project,packages,dependencies,package-lock}.yml, .devcontainer/hooks.approved, profiles/v4.env,
+#      profiles/profiles.yml; then the dbt_project.yml, packages.yml and dependencies.yml of every member (each
+#      `- local: ../<v2|v4>/<product>/<dir>` of global-v4/packages.yml, in its order);
+#   2. every file of global-v4/macros/ and of global-v4/vendor/ (optional: copies of local packages), sorted by bytes;
+#   3. global-v4/dbt_packages/ — what deps really installed — by package (names sorted by bytes): a link (a member, a
+#      vendor/ package) as "l<sha256 hex of its target, newline included>  <path>", a directory as every file outside
+#      its own .git (a .git differs from one install to the next, and dbt never reads it);
+#   4. "<sha256 hex of `$DBT_BIN_DIR/dbt --version`>  dbt --version";
+# the seal is the first 20 hex of the sha256 of these lines. No seal: a package declared `local` in a form other than
+# `- local: ../<v2|v4>/<product>/<dir>` or `- local: vendor/<package>`, any `local` in global-v4/dependencies.yml,
+# macros/ or dbt_packages/ missing (or a link), vendor/ a link or not a directory, no package-lock.yml, no engine, a
+# link, a special file or a name with a newline or a backslash in macros/, vendor/ or an installed package, at the top
+# of dbt_packages/ anything but a directory or a link named like a package, a link that targets neither a member nor a
+# vendor/ package, names that are not exactly those of package-lock.yml. The proof tool checks what this cannot (the
+# install against package-lock.yml, the packages against a reference) before writing the seal.
+dbt_hooks_v4_seal() {
+  local G=global-v4 L M V X T B="${DBT_BIN_DIR:-${HOME:-/home/vscode}/.local/bin}/dbt"
+  local -a A=("$G/macros")
+  L='\blocal["'"'"']?[[:space:]]*:'
+  M='^[[:space:]]*-[[:space:]]*local:[[:space:]]*\.\./(v2|v4)/([^/[:space:]]+)/([^[:space:]#]+)[[:space:]]*(#.*)?$'
+  V='^[[:space:]]*-[[:space:]]*local:[[:space:]]*vendor/[A-Za-z0-9_]+/?[[:space:]]*(#.*)?$'
+  # captured, never `grep -q` at the end of a pipe: under pipefail an early exit would read as "no match" (fail-open)
+  X="$(grep -vE '^[[:space:]]*#' "$G/packages.yml" 2>/dev/null | grep -E "$L" | grep -vE "$M" | grep -vE "$V")"
+  [ -z "$X" ] || return 1
+  if [ -f "$G/dependencies.yml" ]; then
+    X="$(grep -vE '^[[:space:]]*#' "$G/dependencies.yml" | grep -E "$L")"
+    [ -z "$X" ] || return 1
+  fi
+  for X in macros dbt_packages; do { [ -d "$G/$X" ] && [ ! -L "$G/$X" ]; } || return 1; done
+  if [ -e "$G/vendor" ] || [ -L "$G/vendor" ]; then
+    { [ -d "$G/vendor" ] && [ ! -L "$G/vendor" ]; } || return 1
+    A+=("$G/vendor")
+  fi
+  [ -f "$G/package-lock.yml" ] && [ -x "$B" ] || return 1
+  X="$(find "${A[@]}" -mindepth 1 \( ! -type d ! -type f -o -name $'*\n*' -o -name '*\\*' \) 2>&1
+       find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -regextype posix-extended \( ! -type d ! -type l \
+         -o -name $'*\n*' -o ! -regex '.*/[A-Za-z0-9_]+' \) 2>&1
+       find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r T; do
+         find "$T" -mindepth 1 -path "$T/.git" -prune -o \( ! -type d ! -type f -o -name $'*\n*' -o -name '*\\*' \) -print 2>&1
+       done)"
+  [ -z "$X" ] || return 1
+  T="$( { sed -nE "s@$M@\1/\2/\3@p" "$G/packages.yml" 2>/dev/null | sed 's@/$@@'
+          if [ -d "$G/vendor" ]; then find "$G/vendor" -mindepth 1 -maxdepth 1 -type d; fi; } |
+         while IFS= read -r X; do realpath -e -- "$X" 2>/dev/null || echo '?'; done)"
+  X="$(find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -type l | while IFS= read -r X; do
+         realpath -e -- "$X" 2>/dev/null | grep -qxF -f <(printf '%s\n' "$T") || echo "$X"; done)"
+  [ -z "$X" ] || return 1
+  [ "$(find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = \
+    "$(sed -nE 's/^[[:space:]]+name:[[:space:]]*([A-Za-z0-9_]+)[[:space:]]*$/\1/p' "$G/package-lock.yml" | LC_ALL=C sort)" ] || return 1
+  { { printf '%s\n' "$G/dbt_project.yml" "$G/packages.yml" "$G/dependencies.yml" "$G/package-lock.yml" \
+        .devcontainer/hooks.approved profiles/v4.env profiles/profiles.yml
+      sed -nE "s@$M@\1/\2/\3@p" "$G/packages.yml" 2>/dev/null | sed 's@/$@@' |
+        while IFS= read -r X; do printf '%s\n' "$X/dbt_project.yml" "$X/packages.yml" "$X/dependencies.yml"; done
+    } | while IFS= read -r X; do
+          if [ -f "$X" ]; then printf '%s  %s\n' "$(sha256sum < "$X" | cut -d' ' -f1)" "$X"
+          else printf -- '-  %s\n' "$X"; fi
+        done
+    find "${A[@]}" -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum --
+    find "$G/dbt_packages" -mindepth 1 -maxdepth 1 | LC_ALL=C sort | while IFS= read -r X; do
+      if [ -L "$X" ]; then printf 'l%s  %s\n' "$(readlink -- "$X" | sha256sum | cut -d' ' -f1)" "$X"
+      else find "$X" -mindepth 1 -path "$X/.git" -prune -o -type f -print | LC_ALL=C sort | xargs -r -d '\n' sha256sum --
+      fi
+    done
+    printf '%s  dbt --version\n' "$("$B" --version 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  } | sha256sum | cut -c1-20
+}
+
+# dbt_hooks_v4_verdict PROOF SEAL — does the proof hold for SEAL (the seal now)? Required: exactly one line naming
+# « VERDICT HOOKS GLOBAL-V4 », and it is exactly — anchored, nothing before or after, LF —
+#   VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>
+# no « PREUVE HOOKS » line (an older banner), no other seal quoted anywhere (« sceau », then spaces, colons or
+# backquotes, then 20 hex — any case), and that seal is SEAL. Both conditions of the proof (PREUVE OK: every hook is an
+# approved one; TÉMOINS OK: the proof was seen refusing) stand on the seal's line. return 1: the proof does not hold.
+dbt_hooks_v4_verdict() {
+  local F="$1" S
+  [ -f "$F" ] && [ "$(grep -c 'VERDICT HOOKS GLOBAL-V4' "$F")" = 1 ] && [ "$(grep -c 'PREUVE HOOKS' "$F")" = 0 ] \
+    && [ "$(grep -oiE 'sceau[ :`]*[0-9a-f]{20}' "$F" | wc -l)" = 1 ] || return 1
+  S="$(sed -nE 's/^VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau ([0-9a-f]{20})$/\1/p' "$F")"
+  [ -n "$S" ] && [ "$S" = "${2:-}" ]
 }
 
 # -----------------------------------------------------------------------------

@@ -272,7 +272,7 @@ fi
 
 echo "[hooks — SQL the sandbox check cannot see]"
 check_hooks() {   # check_hooks V PROJECT_DIR
-  local V="$1" P="$2" HOOKS
+  local V="$1" P="$2" HOOKS N S
   if dbt_packages_unchecked "$P"; then
     info "$(label "$V"): packages not installed, their hooks are unknown — $(dbt_just_cmd "$V") deps"
     return
@@ -284,7 +284,22 @@ check_hooks() {   # check_hooks V PROJECT_DIR
     ok "$(label "$V"): hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
   elif dbt_is_v4 "$V"; then
     info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
-    info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name it for compile/show): $(dbt_hook_commands "$V")"
+    N="$(dbt_hooks_compile_name "$V")"
+    case " ${DBT_HOOKS_COMPILE_OK:-} " in
+      *" $N "*)
+        if [ "$N" != global-v4 ]; then
+          ko "$N is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own: compile/show refused" "remove it from DBT_HOOKS_COMPILE_OK"
+        elif [ -z "${DBT_HOOKS_V4_PROOF:-}" ]; then
+          ko "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF names no proof: compile/show refused" "DBT_HOOKS_V4_PROOF in .devcontainer/dbt.conf"
+        elif ! S="$(cd "$WS" && dbt_hooks_v4_seal)"; then
+          ko "global-v4: its hooks cannot be sealed — compile/show refused" "$(dbt_just_cmd "$V") deps, then prove its hooks again"
+        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S"; then
+          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
+        else
+          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) — compile/show refused" "prove its hooks again"
+        fi ;;
+      *) info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name $N for compile/show$([ "$N" = global-v4 ] && echo ', under a proof of its hooks — DBT_HOOKS_V4_PROOF')): $(dbt_hook_commands "$V")" ;;
+    esac
   else
     info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
     info "    -> refused until DBT_HOOKS_REVIEWED=1 in dbt.conf: $(dbt_hook_commands "$V")"

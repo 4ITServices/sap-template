@@ -782,7 +782,7 @@ O="$(FRUN v2 delta compile)"; has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE
 O="$(FRUN v4 delta compile)"; has "$O" "hooks nobody has reviewed" && has "$O" "may name v4/delta" && pass "…v4 compile refusé, le nom à relire (v4/delta) est donné" || bad "v4 ouverte par l'approbation v2 ($O)"
 O="$(FRUN v4 delta check)"; has "$O" "hooks nobody has reviewed" && pass "…dbt check (v2.0.8) compte comme commande à hooks en v4" || bad "v4 check ($O)"
 echo 'DBT_HOOKS_COMPILE_OK="v4/delta"' >> "$FW/.devcontainer/dbt.conf"
-O="$(FRUN v4 delta compile)"; has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=v4/delta : v4 compile accepté" || bad "v4 compile ($O)"
+O="$(FRUN v4 delta compile)"; has "$O" "has no seal of its own" && ! has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=v4/delta : v4 compile refusé (une v4/<produit> n'a pas de sceau)" || bad "v4 compile ($O)"
 O="$(FRUN v4 delta run -s a)"; has "$O" "hooks nobody has reviewed" && pass "…v4 run : toujours refusé" || bad "v4 run ($O)"
 printf 'x\ty\tz\n' > "$FW/.devcontainer/hooks.approved"; echo 'DBT_HOOKS_REVIEWED_V2=1' >> "$FW/.devcontainer/dbt.conf"
 O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "hooks nobody has reviewed" && pass "DBT_HOOKS_REVIEWED_V2=1 : la v4 reste fermée" || bad "v4 ouverte par REVIEWED_V2 ($O)"
@@ -810,6 +810,107 @@ echo 'DBT_SANDBOX_NEVER_BUILD="delta.a"' >> "$FW/.devcontainer/dbt.conf"
 O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN global-v4 run -s a)"; has "$O" "never built in the sandbox" && has "$O" "delta.a" && pass "global-v4 : DBT_SANDBOX_NEVER_BUILD (noms <paquet>.<nœud>) appliqué" || bad "NEVER_BUILD global-v4 ($O)"
 O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "never built in the sandbox" && pass "…et dans v4/delta (paquet du projet)" || bad "NEVER_BUILD v4 ($O)"
 sed -i '/^DBT_SANDBOX_NEVER_BUILD=/d' "$FW/.devcontainer/dbt.conf"
+
+echo "== v4 : hooks de global-v4 — sous preuve, son sceau recalculé par le garde-fou à chaque compile/show =="
+G="$FW/global-v4"; mkdir -p "$G/macros" "$G/dbt_packages" "$FW/docs"
+printf 'name: fleet_global_v4\nprofile: "prof_global"\non-run-start: ["select 1"]\n' > "$G/dbt_project.yml"
+printf 'packages:\n  - local: ../v4/delta/dbt\n' > "$G/packages.yml"
+printf 'packages:\n- local: ../v4/delta/dbt\n  name: delta\nsha1_hash: 0\n' > "$G/package-lock.yml"
+ln -sfn ../../v4/delta/dbt "$G/dbt_packages/delta"
+printf '{%% macro m() %%}{%% endmacro %%}\n' > "$G/macros/m.sql"
+SEAL() { ( cd "$FW" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_hooks_v4_seal' ) 2>/dev/null; }
+PROOF() { printf '# preuve\n\nVERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${1:-$(SEAL)}" > "$FW/docs/hooks-v4.md"; }
+S0="$(SEAL)"; [[ "$S0" =~ ^[0-9a-f]{20}$ ]] && pass "dbt_hooks_v4_seal : un sceau de 20 hex ($S0)" || bad "sceau ($S0)"
+[ "$(SEAL)" = "$S0" ] && pass "…stable d'un calcul à l'autre" || bad "sceau instable"
+O="$(FRUN global-v4 compile)"; has "$O" "hooks nobody has reviewed" && pass "global-v4 non listé : compile refusé (hooks)" || bad "global-v4 non listé ($O)"
+echo 'DBT_HOOKS_COMPILE_OK="global-v4"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN global-v4 compile)"; has "$O" "names no proof" && ! has "$O" "ARGS=compile" && pass "listé, DBT_HOOKS_V4_PROOF vide : refusé" || bad "sans preuve ($O)"
+for X in /etc/passwd ../x docs/../../x; do
+  echo "DBT_HOOKS_V4_PROOF=\"$X\"" >> "$FW/.devcontainer/dbt.conf"
+  O="$(FRUN global-v4 compile)"; has "$O" "inside the workspace" && ! has "$O" "ARGS=compile" && pass "DBT_HOOKS_V4_PROOF='$X' (hors de l'espace de travail) : refusé" || bad "preuve hors de l'espace de travail ($O)"
+done
+echo 'DBT_HOOKS_V4_PROOF="docs/hooks-v4.md"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "preuve absente : refusé" || bad "preuve absente ($O)"
+PROOF; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "proof of its hooks holds (seal $S0" && pass "preuve au sceau actuel : compile accepté, et dit pourquoi" || bad "compile sous preuve ($O)"
+O="$(FRUN global-v4 show -s a)"; has "$O" "ARGS=show -s a" && pass "…show accepté" || bad "show sous preuve ($O)"
+O="$(CWD="$G" FRUN auto compile)"; has "$O" "ARGS=compile" && has "$O" "proof of its hooks holds" && pass "…\`dbt compile\` dans global-v4/ : le même contrôle" || bad "auto global-v4 ($O)"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN global-v4 run -s a)"; has "$O" "hooks nobody has reviewed" && ! has "$O" "ARGS=run" && pass "…run : toujours refusé" || bad "run sous preuve ($O)"
+O="$(FRUN global-v4 test)"; has "$O" "hooks nobody has reviewed" && pass "…test : toujours refusé" || bad "test sous preuve ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (seal $S0" && pass "doctor : preuve valable, dite" || bad "doctor preuve ($(grep global-v4 <<<"$O"))"
+# sealcase NOM COMMANDE… — une altération : le sceau change, compile refusé (et show), puis tout est remis
+sealcase() {
+  local nom="$1"; shift; cp -a "$FW" "$W/fleet-avant-sceau"
+  eval "$*"
+  local S; S="$(SEAL)"
+  O="$(FRUN global-v4 compile)"
+  if [ "$S" != "$S0" ] && has "$O" "does not hold for the files on disk (seal now ${S:-}" && ! has "$O" "ARGS=compile"; then pass "sceau : $nom → compile refusé"; else bad "sceau : $nom ($S, $O)"; fi
+  rm -rf "$FW"; mv "$W/fleet-avant-sceau" "$FW"
+}
+sealcase "macro de global-v4 modifiée" 'echo "{# x #}" >> "$G/macros/m.sql"'
+sealcase "macro ajoutée dans un sous-dossier" 'mkdir -p "$G/macros/a" && echo x > "$G/macros/a/b.sql"'
+sealcase "on-run-end ajouté à global-v4/dbt_project.yml" 'echo "on-run-end: [\"select 2\"]" >> "$G/dbt_project.yml"'
+sealcase "packages.yml de global-v4 modifié" 'echo "# x" >> "$G/packages.yml"'
+sealcase "package-lock.yml modifié" 'sed -i "s/^sha1_hash: .*/sha1_hash: 1/" "$G/package-lock.yml"'
+sealcase "dependencies.yml ajouté (sans local)" 'printf "packages:\n  - package: x/y\n" > "$G/dependencies.yml"'
+sealcase "on-run-start ajouté au dbt_project.yml d un membre" 'echo "on-run-start: [\"drop table x\"]" >> "$FW/v4/delta/dbt/dbt_project.yml"'
+sealcase "packages.yml d un membre ajouté" 'printf "packages:\n  - package: x/y\n" > "$FW/v4/delta/dbt/packages.yml"'
+sealcase "profiles/v4.env modifié" 'echo "ELEMENTARY=1" >> "$FW/profiles/v4.env"'
+sealcase "profiles/profiles.yml modifié" 'echo "# x" >> "$FW/profiles/profiles.yml"'
+sealcase "hooks.approved modifié" 'printf "x\ty\toperation\n" >> "$FW/.devcontainer/hooks.approved"'
+sealcase "vendor/ ajouté (un paquet recopié)" 'mkdir -p "$G/vendor/vend" && echo "name: vend" > "$G/vendor/vend/dbt_project.yml"'
+sealcase "copie d un membre sans lien à la place du lien" 'rm "$G/dbt_packages/delta" && mkdir "$G/dbt_packages/delta" && cp "$FW/v4/delta/dbt/dbt_project.yml" "$G/dbt_packages/delta/"'
+sealcase "moteur dbt v2 d une autre version" 'export STUB_VERSION="dbt 2.0.9"'
+unset STUB_VERSION
+# unsealable NOM COMMANDE… — pas de sceau : compile refusé, « cannot be sealed »
+unsealable() {
+  local nom="$1"; shift; cp -a "$FW" "$W/fleet-avant-sceau"
+  eval "$*"
+  O="$(FRUN global-v4 compile)"
+  if [ -z "$(SEAL)" ] && has "$O" "cannot be sealed" && ! has "$O" "ARGS=compile"; then pass "pas de sceau : $nom → compile refusé"; else bad "pas de sceau : $nom ($O)"; fi
+  rm -rf "$FW"; mv "$W/fleet-avant-sceau" "$FW"
+}
+unsealable "lien dans macros/" 'ln -s /etc/hostname "$G/macros/lien.sql"'
+unsealable "fichier spécial dans macros/" 'mkfifo "$G/macros/f"'
+unsealable "macros/ absent" 'rm -rf "$G/macros"'
+unsealable "vendor/ est un lien" 'ln -s macros "$G/vendor"'
+unsealable "membre déclaré entre guillemets" 'echo "  - local: \"../v4/delta/dbt\"" >> "$G/packages.yml"'
+unsealable "membre en flux ({local: …})" 'echo "  - {local: ../v2/delta/dbt}" >> "$G/packages.yml"'
+unsealable "local dans dependencies.yml" 'printf "packages:\n  - local: ../v2/delta/dbt\n" > "$G/dependencies.yml"'
+unsealable "paquet installé en plus du verrou" 'mkdir "$G/dbt_packages/autre"'
+unsealable "paquet du verrou absent" 'printf -- "- package: x/autre\n  name: autre\n  version: 1.0.0\n" >> "$G/package-lock.yml"'
+unsealable "lien d un membre remplacé par une copie (son .env est un lien)" 'rm "$G/dbt_packages/delta" && cp -a "$FW/v4/delta/dbt" "$G/dbt_packages/delta"'
+unsealable "lien d un membre vers la v2" 'ln -sfn ../../v2/delta/dbt "$G/dbt_packages/delta"'
+unsealable "nom de paquet invalide" 'mkdir "$G/dbt_packages/a.b"'
+[ -z "$(DBT_BIN_DIR="$W/vide" SEAL)" ] && pass "pas de sceau : moteur dbt v2 absent" || bad "sceau sans moteur"
+# la porte : une seule ligne de verdict ancrée, PREUVE OK et TÉMOINS OK sur la ligne du sceau
+porte() { local nom="$1" texte="$2"; printf '%b' "$texte" > "$FW/docs/hooks-v4.md"
+  O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "porte : $nom → refusé" || bad "porte : $nom ($O)"; }
+BON="VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau $S0"
+porte "verdict PREUVE REFUS" "VERDICT HOOKS GLOBAL-V4 : PREUVE REFUS ; TÉMOINS OK ; sceau $S0\n"
+porte "verdict TÉMOINS ÉCHEC" "VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS ÉCHEC ; sceau $S0\n"
+porte "verdict sans les témoins" "VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; sceau $S0\n"
+porte "sceau périmé" "VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau 0123456789abcdef0123\n"
+porte "deux verdicts" "VERDICT HOOKS GLOBAL-V4 : PREUVE REFUS ; TÉMOINS OK ; sceau $S0\n$BON\n"
+porte "un autre sceau cité" "Sceau : \`0123456789abcdef0123\`\n$BON\n"
+porte "ancienne bannière PREUVE HOOKS" "**PREUVE HOOKS GLOBAL-V4 : OK**\n$BON\n"
+porte "verdict non ancré (gras)" "**$BON**\n"
+porte "verdict suivi d un texte" "$BON (à revoir)\n"
+porte "verdict en CRLF" "$BON\r\n"
+PROOF; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "preuve rétablie : compile de nouveau accepté" || bad "preuve rétablie ($O)"
+echo "{# x #}" >> "$G/macros/m.sql"
+O="$(FRUN global-v4 parse)"; has "$O" "ARGS=parse" && pass "sceau périmé : parse (aucun hook) reste accepté, pour refaire la preuve" || bad "parse sous sceau périmé ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ global-v4: the proof of its hooks (docs/hooks-v4.md) does not hold" && pass "doctor : preuve périmée, signalée" || bad "doctor preuve périmée ($(grep global-v4 <<<"$O"))"
+cp "$FW/global/dbt_project.yml" "$W/global-pj"; echo 'on-run-start: ["select 1"]' >> "$FW/global/dbt_project.yml"
+echo 'DBT_HOOKS_COMPILE_OK="global-v4 global"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && has "$O" "allowed for global " && ! has "$O" "proof of its hooks" && pass "global/ (listé, avec hook) : compile accepté comme avant, sans sceau — la v4 seule en a un" || bad "global sous preuve v4 périmée ($O)"
+cp "$W/global-pj" "$FW/global/dbt_project.yml"
+sed -i '$ d' "$G/macros/m.sql"; [ "$(SEAL)" = "$S0" ] && pass "macro remise : le même sceau" || bad "sceau après remise"
+echo 'DBT_HOOKS_COMPILE_OK="global-v4 v4/delta"' >> "$FW/.devcontainer/dbt.conf"
+printf "{{ config(post_hook='select 1') }}\nselect 1\n" > "$FW/v4/delta/dbt/models/hooked.sql"
+O="$(FRUN v4 delta compile)"; has "$O" "has no seal of its own" && ! has "$O" "ARGS=compile" && pass "v4/delta listé : refusé (une v4/<produit> n'a pas de sceau)" || bad "v4/delta listé ($O)"
+rm -f "$FW/v4/delta/dbt/models/hooked.sql"
+sed -i -e '/^DBT_HOOKS_COMPILE_OK=/d' -e '/^DBT_HOOKS_V4_PROOF=/d' "$FW/.devcontainer/dbt.conf"
+rm -rf "$FW/docs"
 rm -rf "$FW/global-v4"
 
 echo "== v4 : destinations v1 / v2 / v4 =="
