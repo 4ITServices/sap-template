@@ -46,7 +46,7 @@ for a in "$@"; do
     [ -n "${STUB_MANIFEST:-}" ] && mkdir -p target && cp "$STUB_MANIFEST" target/manifest.json  # dbt v2 ls rewrites it
     cat "${STUB_LS_FILE:-/dev/null}"; exit "${STUB_LS_RC:-0}"; fi
 done
-echo "ENGINE=$0 CWD=$PWD PROFILES=${DBT_PROFILES_DIR:-} EXTRA=${EXTRA_VAR:-} ARGS=$*"
+echo "ENGINE=$0 CWD=$PWD PROFILES=${DBT_PROFILES_DIR:-} EXTRA=${EXTRA_VAR:-} ARGS=$* PFX=${DATASET_PREFIX:-}"
 EOF
 # uv bouchon : `venv` pose un interpréteur, `pip install` pose dbt + ses métadonnées
 cat > "$W/stubs/uv" <<'EOF'
@@ -681,6 +681,166 @@ O="$(LK lock-checkout delta)"; has "$O" "uncommitted changes" && pass "lock-chec
 git -C "$FW/v2/delta" checkout -q -- dbt/models/m_delta.sql
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null | sed -n '/^\[lock/,/^\[profile/p')"
 has "$O" "v2/delta/ 1 commit(s) since the lock" && has "$O" "products.lock is not committed yet" && pass "doctor : section [lock] (écarts, verrou à committer)" || bad "doctor [lock] ($O)"
+
+# =============================================================================
+echo "== v4 : DBT_V4_PRODUCTS, référents nés ici (referents.conf), espace de datasets de la v4 =="
+O="$(RUN v4 parse)"; has "$O" "has no v4" && pass "projet seul : pas de v4 (just v4 refusé)" || bad "v4 hors flotte ($O)"
+git config --global url."file://$W/gh/".insteadOf "https://github.com/"   # epsilon : son dépôt reste joignable
+LK lock-release delta >/dev/null   # le lock-checkout refusé plus haut a déjà détaché v1/delta (il ne vérifie pas tout avant d'agir)
+LOCKS_BEFORE="$(git config --global --get-all url.DISABLED://.pushInsteadOf | sort)"
+printf 'DATASET_PREFIX=JDOE\n' >> "$FW/profiles/dbt.env"
+printf '/v4/\n' >> "$FW/.gitignore"
+# delta : sa v4 est ouverte LÀ OÙ VIVENT ses branches, depuis sa v2 publiée ; le coordinateur la suit
+git -C "$W/homes/delta.git" branch v4 v2
+# rho : un référent né ici — son propre dépôt, une branche v4, aucun dépôt d'origine
+git init -q --bare -b main "$W/homes/rho.git"
+RS="$W/rho-src"; git init -q -b v4 "$RS"; mkdir -p "$RS/dbt/models"
+printf 'name: rho\nprofile: "prof_rho"\n' > "$RS/dbt/dbt_project.yml"; printf 'select 1\n' > "$RS/dbt/models/m_rho.sql"
+git -C "$RS" add -A && git -C "$RS" commit -q -m "rho, né ici" && git -C "$RS" push -q "$W/homes/rho.git" v4
+cat >> "$FW/.devcontainer/dbt.conf" <<'EOF'
+DBT_V4_PRODUCTS="delta alpha"
+DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"
+EOF
+O="$(FRUN referent-add sigma nowhere)"; has "$O" "is not a git URL" && pass "referent-add : URL invalide refusée" || bad "referent-add URL ($O)"
+O="$(FRUN referent-add delta "$W/homes/rho.git")"; has "$O" "already declared in .devcontainer/products.conf" && pass "referent-add : nom d'un produit refusé" || bad "referent-add doublon produit ($O)"
+O="$(FRUN referent-add rho "$W/homes/rho.git" dbt)"
+has "$O" "→ rho declared in .devcontainer/referents.conf" && pass "referent-add rho : référent déclaré" || bad "referent-add ($(tail -5 <<<"$O"))"
+grep -qE "^rho +dbt +$W/homes/rho.git$" "$FW/.devcontainer/referents.conf" && pass "…ligne NAME SUBDIR HOME dans referents.conf" || bad "referents.conf inattendu"
+check "rho : v4/rho/ sur rho/v4, qui suit home-rho/v4" test "$(git -C "$FW" rev-parse --abbrev-ref 'rho/v4@{upstream}' 2>/dev/null)" = home-rho/v4
+check "…le projet dbt de v4/rho est trouvé" test -f "$FW/v4/rho/dbt/dbt_project.yml"
+refute "…aucun remote up-rho (pas d'origine)" git -C "$FW" remote get-url up-rho
+refute "…ni v1/rho ni v2/rho" test -e "$FW/v1/rho" -o -e "$FW/v2/rho"
+check "…profil prof_rho ajouté au hub" grep -q '^prof_rho:' "$FW/profiles/profiles.yml"
+check "verrous de push inchangés (aucun hôte ajouté ni retiré)" test "$(git config --global --get-all url.DISABLED://.pushInsteadOf | sort)" = "$LOCKS_BEFORE"
+check "delta : v4/delta/ sur delta/v4, qui suit home-delta/v4" test "$(git -C "$FW" rev-parse --abbrev-ref 'delta/v4@{upstream}' 2>/dev/null)" = home-delta/v4
+check "…au commit de sa v2 publiée" test "$(git -C "$FW/v4/delta" rev-parse HEAD)" = "$(git -C "$W/homes/delta.git" rev-parse v2)"
+git -C "$FW" worktree list --porcelain | awk -v p="$FW/v4/delta" '$1=="worktree"{f=(substr($0,10)==p)} f&&$1=="locked"{x=1} END{exit !x}' && pass "…verrouillée contre le prune" || bad "v4/delta non verrouillée"
+has "$O" "v4/alpha/: not opened yet" && pass "alpha (déclaré, v4 non publiée) : dit, jamais créé depuis v1 ni l'origine" || bad "v4 non ouverte non signalée"
+refute "…ni v4/alpha ni branche alpha/v4" test -e "$FW/v4/alpha" -o -n "$(git -C "$FW" branch --list alpha/v4)"
+refute "beta (hors DBT_V4_PRODUCTS) : pas de v4" test -e "$FW/v4/beta"
+check "profiles/v4.env : DATASET_PREFIX de la v4" grep -qx 'DATASET_PREFIX=JDOE_V4' "$FW/profiles/v4.env"
+check "…et sinon profiles/dbt.env à l'identique (généré)" diff <(tail -n +3 "$FW/profiles/v4.env") <(sed 's/^DATASET_PREFIX=.*/DATASET_PREFIX=JDOE_V4/' "$FW/profiles/dbt.env")
+check ".env de v4/delta -> profiles/v4.env" test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+check ".env de v4/rho -> profiles/v4.env" test "$(readlink -f "$FW/v4/rho/dbt/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+check ".env de v2/delta inchangé -> profiles/dbt.env" test "$(readlink -f "$FW/v2/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/dbt.env")"
+check "réglages de la fenêtre v4 : dbt v2, envFile de la v4" python3 -c "import json; d=json.load(open('$FW/v4/delta/.vscode/settings.json')); assert d['dbt.dbtMajorVersion']=='v2' and d['python.envFile'].endswith('profiles/v4.env')"
+check "racine propre (v4/ ignoré)" test -z "$(git -C "$FW" status --porcelain -- v4)"
+
+echo "== v4 : le garde-fou, dans les deux sens =="
+FJ() { printf '{"database":"sandbox-prj","schema":"%s","alias":"%s","name":"%s","resource_type":"model","package_name":"%s"}\n' "$1" "$2" "$2" "${3:-delta}"; }
+FJ JDOE_V4_DELTA__X a > "$W/ls-v4ok.jsonl"; FJ JDOE_DELTA__X a > "$W/ls-v2ok.jsonl"; FJ JDOE_V4X a > "$W/ls-v4x.jsonl"
+O="$(FRUN v4 delta parse)"; has "$O" "ENGINE=$DBT_BIN_DIR/dbt CWD=$FW/v4/delta/dbt " && grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "just v4 delta → dbt v2 dans v4/delta, DATASET_PREFIX de la v4" || bad "v4 delta ($O)"
+O="$(FRUN v2 delta parse)"; grep -q 'PFX=JDOE$' <<<"$O" && pass "just v2 delta → garde DATASET_PREFIX=JDOE" || bad "v2 delta ($O)"
+O="$(DATASET_PREFIX=JDOE_V4 FRUN v2 delta parse)"; grep -q 'PFX=JDOE$' <<<"$O" && pass "…même avec DATASET_PREFIX=JDOE_V4 exporté par le shell (le mode choisit le fichier)" || bad "variable héritée ($O)"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "v4 : écriture sous JDOE_V4_* acceptée" || bad "écriture v4 légitime ($O)"
+O="$(STUB_LS_FILE="$W/ls-v2ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "outside the sandbox" && has "$O" "dataset JDOE_V4 or JDOE_V4_*" && pass "v4 : écriture sous JDOE_ (l'espace de la v2) refusée" || bad "v4 hors de son espace ($O)"
+refute "…et le moteur n'a pas été lancé" grep -qF "ARGS=run" <<<"$O"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v2 delta run -s a)"; has "$O" "outside the sandbox" && has "$O" "never JDOE_V4" && pass "v2 : écriture sous JDOE_V4_* refusée" || bad "v2 dans l'espace v4 ($O)"
+O="$(STUB_LS_FILE="$W/ls-v4x.jsonl" FRUN v4 delta run -s a)"; has "$O" "outside the sandbox" && pass "v4 : JDOE_V4X n'est pas l'espace JDOE_V4 (borne « _ »)" || bad "borne du préfixe ($O)"
+O="$(FRUN v4 alpha parse)"; has "$O" "no dbt project in v4/alpha/" && pass "v4 déclarée non ouverte : refusée" || bad "v4 non ouverte ($O)"
+O="$(FRUN v4 beta parse)"; has "$O" "beta has no v4" && pass "v4 d'un produit hors DBT_V4_PRODUCTS : refusée" || bad "v4 beta ($O)"
+O="$(FRUN v1 rho parse)"; has "$O" "is a referent, born here" && pass "v1 d'un référent : refusée" || bad "v1 rho ($O)"
+O="$(FRUN v2 rho build -s a)"; has "$O" "is a referent, born here" && pass "v2 d'un référent : refusée" || bad "v2 rho ($O)"
+O="$(FRUN v4 rho parse)"; has "$O" "CWD=$FW/v4/rho/dbt " && grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "just v4 rho → v4/rho, espace de la v4" || bad "v4 rho ($O)"
+O="$(cd "$FW" && bash .devcontainer/dbt-run.sh upstream-pull rho 2>&1)"; has "$O" "born here" && pass "upstream-pull d'un référent : rien à reprendre" || bad "upstream-pull rho ($O)"
+O="$(FRUN product-add rho "$W/fleet-up/alpha.git")"; has "$O" "already declared in .devcontainer/referents.conf" && pass "product-add : nom d'un référent refusé" || bad "product-add rho ($O)"
+printf 'DATASET_PREFIX=JDOE_V4\n' >> "$FW/profiles/env/beta.env"
+O="$(FRUN v2 beta parse)"; has "$O" "that is the v4 space" && pass "v2 sous le préfixe de la v4 (fichier d'env du produit) : refusé, parse compris" || bad "v2 sous JDOE_V4 ($O)"
+sed -i '/^DATASET_PREFIX=/d' "$FW/profiles/env/beta.env"
+printf 'DATASET_PREFIX=JDOE\n' > "$FW/profiles/env/delta.env"
+O="$(FRUN v4 delta parse)"; has "$O" "the v4 space is JDOE_V4" && pass "v4 dont le fichier d'env du produit repose un autre préfixe : refusé" || bad "v4 sous JDOE ($O)"
+rm -f "$FW/profiles/env/delta.env"
+ln -sfn ../../../profiles/dbt.env "$FW/v4/delta/dbt/.env"
+O="$(FRUN v4 delta parse)"; has "$O" "does not point to profiles/v4.env" && pass ".env de v4/delta vers dbt.env : refusé (l'extension écrirait la v4 sous JDOE_)" || bad ".env v4 ($O)"
+O="$(life "$FW" start)"; check "…redémarrage : lien reposé sur profiles/v4.env" test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+has "$O" "(re-pointed)" && pass "…et dit" || bad "lien reposé en silence"
+ln -sfn ../../../profiles/v4.env "$FW/v2/delta/dbt/.env"
+O="$(FRUN v2 delta parse)"; has "$O" "points to profiles/v4.env" && pass ".env de v2/delta vers v4.env : refusé" || bad ".env v2 ($O)"
+ln -sfn ../../../profiles/dbt.env "$FW/v2/delta/dbt/.env"
+for X in OTHER_V4 JDOEV4 "JDOE_V4;x" ""; do
+  sed -i "s/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4=\"$X\"/" "$FW/.devcontainer/dbt.conf"
+  O="$(FRUN v4 delta parse)"; has "$O" "every v4 command is refused" && pass "DBT_BQ_DATASET_PREFIX_V4='$X' (pas JDOE_<x>) : v4 refusée" || bad "préfixe v4 '$X' accepté ($O)"
+done
+sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"/' "$FW/.devcontainer/dbt.conf"
+
+echo "== v4 : hooks — une approbation de la v2 n'ouvre jamais la v4 =="
+for V in v2 v4; do printf "{{ config(post_hook='select 1') }}\nselect 1\n" > "$FW/$V/delta/dbt/models/hooked.sql"; done
+echo 'DBT_HOOKS_COMPILE_OK="delta"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN v2 delta compile)"; has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=delta : v2 compile accepté" || bad "v2 compile ($O)"
+O="$(FRUN v4 delta compile)"; has "$O" "hooks nobody has reviewed" && has "$O" "may name v4/delta" && pass "…v4 compile refusé, le nom à relire (v4/delta) est donné" || bad "v4 ouverte par l'approbation v2 ($O)"
+O="$(FRUN v4 delta check)"; has "$O" "hooks nobody has reviewed" && pass "…dbt check (v2.0.8) compte comme commande à hooks en v4" || bad "v4 check ($O)"
+echo 'DBT_HOOKS_COMPILE_OK="v4/delta"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN v4 delta compile)"; has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=v4/delta : v4 compile accepté" || bad "v4 compile ($O)"
+O="$(FRUN v4 delta run -s a)"; has "$O" "hooks nobody has reviewed" && pass "…v4 run : toujours refusé" || bad "v4 run ($O)"
+printf 'x\ty\tz\n' > "$FW/.devcontainer/hooks.approved"; echo 'DBT_HOOKS_REVIEWED_V2=1' >> "$FW/.devcontainer/dbt.conf"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "hooks nobody has reviewed" && pass "DBT_HOOKS_REVIEWED_V2=1 : la v4 reste fermée" || bad "v4 ouverte par REVIEWED_V2 ($O)"
+O="$(FRUN hooks-approve v4/delta)"; has "$O" "no approved-hooks list" && pass "hooks-approve v4/… : refusé (pas de liste pour la v4)" || bad "hooks-approve v4 ($O)"
+sed -i -e '/^DBT_HOOKS_COMPILE_OK=/d' -e '/^DBT_HOOKS_REVIEWED_V2=/d' "$FW/.devcontainer/dbt.conf"
+rm -f "$FW/.devcontainer/hooks.approved" "$FW/v2/delta/dbt/models/hooked.sql" "$FW/v4/delta/dbt/models/hooked.sql"
+
+echo "== v4 : \`dbt\` dans v4/, global-v4/ et ailleurs =="
+O="$(CWD="$FW/v4/delta/dbt/models" FRUN auto parse)"; has "$O" "CWD=$FW/v4/delta/dbt/models" && grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "\`dbt\` dans v4/delta/ → garde-fou de la v4, dossier courant gardé" || bad "auto v4 ($O)"
+O="$(CWD="$FW/v4/delta/dbt" FRUN auto run)"; has "$O" "without a selection" && pass "…\`dbt run\` y passe par le garde-fou" || bad "auto v4 non gardé ($O)"
+mkdir -p "$FW/v4/beta"; O="$(CWD="$FW/v4/beta" FRUN auto parse)"; has "$O" "beta has no v4" && pass "\`dbt\` dans v4/<produit sans v4>/ : refusé" || bad "auto v4 beta ($O)"; rmdir "$FW/v4/beta"
+mkdir -p "$FW/probe/sub"; printf 'name: probe\n' > "$FW/probe/dbt_project.yml"
+O="$(CWD="$FW/probe/sub" FRUN auto parse)"; has "$O" "a dbt project outside" && ! has "$O" "ARGS=parse" && pass "\`dbt\` dans un projet dbt inconnu de l'espace de travail : refusé, jamais dbt v2 brut" || bad "projet inconnu lancé ($O)"
+rm -rf "$FW/probe"
+O="$(CWD="$FW" FRUN auto --version)"; has "$O" "dbt 2.0.0" && pass "…hors de tout projet : dbt v2 nu, comme avant" || bad "auto hors projet ($O)"
+mkdir -p "$FW/global-v4"; printf 'name: fleet_global_v4\nprofile: "prof_global"\n' > "$FW/global-v4/dbt_project.yml"
+life "$FW" start >/dev/null
+check "global-v4/ : .env -> profiles/v4.env (cycle de vie)" test "$(readlink -f "$FW/global-v4/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+O="$(FRUN global-v4 parse)"; has "$O" "ENGINE=$DBT_BIN_DIR/dbt CWD=$FW/global-v4 " && grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "just global-v4 → dbt v2, espace de la v4" || bad "global-v4 ($O)"
+O="$(CWD="$FW/global-v4" FRUN auto parse)"; grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "\`dbt\` dans global-v4/ → garde-fou de la v4" || bad "auto global-v4 ($O)"
+{ FJ JDOE_V4_X T alpha | sed 's/"name":"T"/"name":"a"/'; FJ JDOE_V4_X T gamma | sed 's/"name":"T"/"name":"b"/'; } > "$W/ls-dup4.jsonl"
+O="$(STUB_LS_FILE="$W/ls-dup4.jsonl" FRUN global-v4 run -s a)"; has "$O" "written by several nodes of global-v4/" && has "$O" "alpha.a, gamma.b" && pass "global-v4 : deux nœuds, une table → écriture refusée" || bad "collision global-v4 ($O)"
+O="$(STUB_LS_FILE="$W/ls-dup4.jsonl" FRUN destinations global-v4)"; has "$O" "global-v4: 1 relation(s) written by several nodes" && has "$O" "every node in the v4 space" && pass "just destinations global-v4 : collisions et espace" || bad "destinations global-v4 ($O)"
+echo 'DBT_SANDBOX_NEVER_BUILD="delta.a"' >> "$FW/.devcontainer/dbt.conf"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN global-v4 run -s a)"; has "$O" "never built in the sandbox" && has "$O" "delta.a" && pass "global-v4 : DBT_SANDBOX_NEVER_BUILD (noms <paquet>.<nœud>) appliqué" || bad "NEVER_BUILD global-v4 ($O)"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "never built in the sandbox" && pass "…et dans v4/delta (paquet du projet)" || bad "NEVER_BUILD v4 ($O)"
+sed -i '/^DBT_SANDBOX_NEVER_BUILD=/d' "$FW/.devcontainer/dbt.conf"
+rm -rf "$FW/global-v4"
+
+echo "== v4 : destinations v1 / v2 / v4 =="
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_run","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"STG","name":"s","resource_type":"model"}' > "$W/d-v1.jsonl"
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_DELTA__RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v2.jsonl"
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_DELTA__JDOE_RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_V4_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
+cat > "$W/stubs/dbt-cwd" <<EOF
+#!/bin/bash
+case "\$PWD" in */v1/*) cat "$W/d-v1.jsonl" ;; */v2/*) cat "$W/d-v2.jsonl" ;; */v4/*) cat "$W/d-v4.jsonl" ;; esac
+EOF
+chmod +x "$W/stubs/dbt-cwd"; cp "$W/stubs/dbt-cwd" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-cwd" "$DBT_BIN_DIR/dbt"
+O="$(FRUN destinations delta)"
+has "$O" "[delta] v1 vs v2: 0 node(s) written elsewhere" && pass "destinations delta : v1 vs v2 inchangé" || bad "v1 vs v2 ($O)"
+has "$O" "[delta] v2 vs v4: 0 node(s) written elsewhere" && pass "…v2 vs v4 : préfixe de la v4 et double préfixe (…__JDOE_RUN) ignorés" || bad "v2 vs v4 ($O)"
+has "$O" "[delta] v4: every node in the v4 space" && pass "…tout nœud de la v4 dans son espace" || bad "espace v4 ($O)"
+printf '%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_DELTA__AUTRE","name":"s","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_DELTA__RUN","name":"m","resource_type":"model"}' > "$W/d-v4.jsonl"
+O="$(FRUN destinations delta)"
+has "$O" "v2 vs v4: 1 node(s) written elsewhere" && pass "…un nœud déplacé par la v4 est signalé" || bad "déplacement v4 ($O)"
+has "$O" "1 node(s) OUTSIDE the v4 space" && pass "…un nœud de la v4 hors de son espace aussi" || bad "hors espace v4 ($O)"
+O="$(FRUN destinations rho)"; has "$O" "[rho] v4: 2 node(s)" && ! has "$O" " vs " && pass "destinations rho : la v4 seule, sans comparaison" || bad "destinations rho ($O)"
+cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
+
+echo "== v4 : sync, verrou, liste, doctor =="
+O="$(SYNC delta)"; has "$O" "delta/v4: up to date with home-delta/v4" && pass "sync delta : la v4 suivie comme v1/v2" || bad "sync v4 ($O)"
+grep -q "not followed here: v3\$" <<<"$O" && pass "…v4 n'est plus « non suivie », v3 l'est toujours" || bad "NOTE branches ($O)"
+O="$(SYNC rho)"; has "$O" "rho/v4: up to date with home-rho/v4" && pass "sync rho : à jour de son dépôt" || bad "sync rho ($O)"
+O="$(LK lock)"; has "$O" "products.lock written" && has "$O" "alpha v4: not opened yet" && pass "just lock : écrit, la v4 non ouverte dite (rien à verrouiller)" || bad "lock v4 ($O)"
+grep -qE "^delta +v4 +$(git -C "$FW" rev-parse delta/v4)  $W/homes/delta.git#v4$" "$LOCKF" && pass "…ligne delta v4 (commit exact, dépôt#v4)" || bad "lock delta v4"
+grep -qE "^rho +v4 +$(git -C "$FW" rev-parse rho/v4)  $W/homes/rho.git#v4$" "$LOCKF" && pass "…ligne rho v4" || bad "lock rho v4"
+refute "…aucune ligne v4 pour alpha" grep -qE '^alpha +v4 ' "$LOCKF"
+O="$(LK lock-status)"; has "$O" "v4/delta/" && has "$O" "v4/rho/" && pass "lock-status : v4/delta/ et v4/rho/ suivies" || bad "lock-status v4 ($O)"
+grep -qE "v4/alpha/ +not opened yet" <<<"$O" && pass "…v4/alpha/ : « not opened yet »" || bad "lock-status v4 non ouverte ($O)"
+O="$(FRUN destinations alpha; echo "rc=$?")"; has "$O" "[alpha] v4: not opened yet" && has "$O" "[alpha] v1 vs v2" && pass "destinations alpha : v4 non ouverte dite, v1 vs v2 comme avant" || bad "destinations v4 non ouverte ($O)"
+O="$(LK products)"; grep -qE '^rho +no +born here +v4=' <<<"$O" && grep -qE '^delta .* v4=' <<<"$O" && pass "just products : rho « born here », delta avec sa v4" || bad "products ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "[v4 space" && has "$O" "✅ write guard v4" && has "$O" "✅ profiles/v4.env = profiles/dbt.env" && pass "doctor : section de l'espace v4 au vert" || bad "doctor v4 ($(grep -A8 'v4 space' <<<"$O"))"
+has "$O" "✅ v4/delta/: .env -> profiles/v4.env" && has "$O" "rho: a referent, born here" && pass "doctor : .env de la v4, référent né ici" || bad "doctor v4 détails"
+has "$O" "v4/alpha/: v4 not opened yet" && ! grep -q "❌ v4/alpha" <<<"$O" && pass "doctor : v4 non ouverte = information, pas une panne" || bad "doctor v4 non ouverte ($(grep alpha <<<"$O"))"
+git -C "$FW" push -q origin "origin/alpha/v2:refs/heads/alpha/v4" 2>/dev/null
+O="$(life "$FW" start)"
+check "alpha publiée (dépôt origin) : v4/alpha/ suit origin/alpha/v4" test "$(git -C "$FW" rev-parse --abbrev-ref 'alpha/v4@{upstream}' 2>/dev/null)" = origin/alpha/v4
+check "…verrous de push toujours inchangés" test "$(git config --global --get-all url.DISABLED://.pushInsteadOf | sort)" = "$LOCKS_BEFORE"
+git config --global --unset-all url."file://$W/gh/".insteadOf
 
 echo "== Paquets v1 incomplets : deps relancé au create =="
 DP="$WS/v1/dbt"; DEPS() { ( cd "$WS" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_v1_deps' ) 2>&1; }

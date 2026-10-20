@@ -65,6 +65,19 @@ DBT_BQ_DATASET="{{ bq_sandbox_dataset }}"
 DBT_BQ_DATASET_PREFIX="{{ bq_dataset_prefix }}"
 DBT_BQ_LOCATION="{{ bq_location }}"
 DBT_TARGET_NAME="{{ dbt_target_name }}"
+{%- if project_type == 'dbt-fleet' %}
+
+# --- v4: a refactoring generation on dbt v2, per product (opt-in) ----------
+# Products that also follow v4/<product>/ (branch <product>/v4, opened where
+# their branches live from the published v2 — only tracked here). Products
+# born here (no upstream, v4 only) are declared in .devcontainer/referents.conf
+# (just referent-add). The v2 and the v4 of a product share package names:
+# v4/ and global-v4/ write under their own prefix, <DBT_BQ_DATASET_PREFIX>_<x>
+# (profiles/v4.env is generated from profiles/dbt.env with it); the guard
+# requires it there and refuses it everywhere else. Empty = no v4 space.
+DBT_V4_PRODUCTS=""
+DBT_BQ_DATASET_PREFIX_V4=""
+{%- endif %}
 
 # --- Write guard opt-outs (leave at 0 until reviewed) ------------------------
 # run-operation executes arbitrary macros: refused unless 1

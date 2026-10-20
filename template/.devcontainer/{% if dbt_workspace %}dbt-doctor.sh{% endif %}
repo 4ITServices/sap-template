@@ -6,7 +6,8 @@
 # Checks, repairs nothing. Everything that lives in the container filesystem
 # (both engines, ~/.gitconfig, ~/.bashrc) is gone after a rebuild and must be
 # put back by the hooks: this script tells whether it is all there. In a
-# fleet, every product of .devcontainer/products.conf is checked.
+# fleet, every product of .devcontainer/products.conf is checked, and every
+# referent of .devcontainer/referents.conf (born here: v4 only).
 #
 #   just doctor           fast and offline
 #   just doctor --deep    also parses every project and asks Google for a token
@@ -113,11 +114,17 @@ for N in $(dbt_products); do
 done
 
 echo "[worktrees]"
-for N in $(dbt_products); do
+for N in $(dbt_members); do
   dbt_use_product "$N" || continue
   [ "$P_HOME" != "origin" ] && info "$N: branches live in $P_HOME_URL (remote $P_HOME)"
-  for V in $DBT_WORKTREES; do
+  for V in $(dbt_versions); do
     W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
+    if [ "$V" = v4 ] && ! _dbt_is_worktree "$W" && ! git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/$(_dbt_hbr v4)"; then
+      # declared, not opened yet where its branches live: nothing to repair here
+      if [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
+      else info "$SHOW: v4 not opened yet — it starts from the published v2: git push $P_HOME $P_HOME/$P_HB2:refs/heads/$(_dbt_hbr v4), then just setup"; fi
+      continue
+    fi
     if _dbt_is_worktree "$W"; then
       B="$(git -C "$W" rev-parse --abbrev-ref HEAD 2>/dev/null)"
       ok "$SHOW on branch $B ($(git -C "$W" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$W" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
@@ -135,6 +142,11 @@ for N in $(dbt_products); do
         && ok "$SHOW locked against prune" || ko "$SHOW not locked" "just setup"
       if P="$(dbt_project_dir "$V")"; then
         ok "$(label "$V") dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
+        if [ "$V" = v4 ]; then
+          [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$WS/profiles/v4.env")" ] \
+            && ok "$SHOW: .env -> profiles/v4.env (the dbt extension stays in the v4 space)" \
+            || ko "$SHOW: .env does not point to profiles/v4.env" "just setup — until then the dbt extension would read another space there"
+        fi
       else
         ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
       fi
@@ -143,7 +155,17 @@ for N in $(dbt_products); do
     fi
   done
   BR="$P_BRANCH"
-  if git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_REMOTE/$BR"; then
+  if dbt_v4_enabled && [ "${P_REFERENT:-0}" != 1 ] && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
+    if git -C "$WS" merge-base --is-ancestor "$P_B2" "$P_B4" 2>/dev/null; then
+      info "$P_B4 contains $P_B2 (+$(git -C "$WS" rev-list --count "$P_B2..$P_B4" 2>/dev/null) commit(s) of its own)"
+    else
+      info "$P_B4 lacks $(git -C "$WS" rev-list --count "$P_B4..$P_B2" 2>/dev/null) commit(s) of $P_B2: merge $P_B2 into it"
+    fi
+  fi
+  if [ "${P_REFERENT:-0}" = 1 ]; then
+    info "$N: a referent, born here (referents.conf) — no upstream, no mirror, no v1/v2"
+    if _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}'; then ko "$N is declared in products.conf AND referents.conf" "remove one of the two lines"; fi
+  elif git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_REMOTE/$BR"; then
     info "$P_B1 is $(git -C "$WS" rev-list --count "$P_B1..$P_REMOTE/$BR" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$P_B1" 2>/dev/null) ahead of $P_REMOTE/$BR (as last fetched: just upstream-pull${P_NAME:+ $P_NAME})"
     info "$P_B2 is $(git -C "$WS" rev-list --count "$P_B2..$P_B1" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_B1..$P_B2" 2>/dev/null) ahead of $P_B1"
   else
@@ -156,6 +178,9 @@ if dbt_is_fleet; then
   else
     info "no global/ dbt project"
   fi
+  if P="$(dbt_project_dir global-v4)"; then
+    ok "global-v4/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) project(s) as local packages"
+  fi
 fi
 
 if dbt_is_fleet; then
@@ -165,9 +190,12 @@ if dbt_is_fleet; then
   else
     git -C "$WS" ls-files --error-unmatch .devcontainer/products.lock >/dev/null 2>&1 \
       || info "products.lock is not committed yet — commit it with the global/ change it goes with"
-    for N in $(dbt_products); do
+    for N in $(dbt_members); do
       dbt_use_product "$N" || continue
-      for V in $DBT_WORKTREES; do info "$(_dbt_show "$V") $(dbt_lock_describe "$V")"; done
+      for V in $(dbt_versions); do
+        [ "$V" = v4 ] && ! _dbt_is_worktree "$(_dbt_wt v4)" && continue   # not opened yet: said above
+        info "$(_dbt_show "$V") $(dbt_lock_describe "$V")"
+      done
     done
   fi
 fi
@@ -178,13 +206,17 @@ echo "[profile hub]"
   || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only the just recipes"
 if [ -f "$WS/profiles/profiles.yml" ]; then
   NAMES=""
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    P="$(dbt_project_dir v1)" || P="$(dbt_project_dir v2)" || continue
+    P=""
+    for V in $(dbt_versions); do P="$(dbt_project_dir "$V")" && break; P=""; done
+    [ -n "$P" ] || continue
     NAME="$(_dbt_profile_name "$P")"; [ -n "$NAME" ] && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
   done
-  dbt_is_fleet && P="$(dbt_project_dir global)" && NAME="$(_dbt_profile_name "$P")" && [ -n "$NAME" ] \
-    && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  for V in global global-v4; do
+    dbt_is_fleet && P="$(dbt_project_dir "$V")" && NAME="$(_dbt_profile_name "$P")" && [ -n "$NAME" ] \
+      && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  done
   for NAME in $NAMES; do
     _dbt_hub_has "$WS/profiles/profiles.yml" "$NAME" && ok "profiles/profiles.yml declares '$NAME'" \
       || ko "profiles/profiles.yml does not declare '$NAME'" "add it — dbt refuses to run without it"
@@ -200,6 +232,44 @@ else
 fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
+# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf) or a v4 prefix is set
+if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)" ]; then
+  echo "[v4 space — datasets of its own]"
+  if _dbt_v4_prefix_ok; then
+    ok "write guard v4: v4/ and global-v4/ write under $DBT_BQ_DATASET_PREFIX_V4 / ${DBT_BQ_DATASET_PREFIX_V4}_* only — and nothing else writes there"
+    if [ -f "$WS/profiles/dbt.env" ] && cmp -s <(_dbt_v4_env_render) "$WS/profiles/v4.env"; then
+      ok "profiles/v4.env = profiles/dbt.env with DATASET_PREFIX=$DBT_BQ_DATASET_PREFIX_V4 (generated)"
+    else
+      ko "profiles/v4.env missing or stale" "just setup, then commit it"
+    fi
+  else
+    ko "DBT_BQ_DATASET_PREFIX_V4 '${DBT_BQ_DATASET_PREFIX_V4:-}' is not ${DBT_BQ_DATASET_PREFIX:-<DBT_BQ_DATASET_PREFIX>}_<x>: every v4 command is refused" "set it in .devcontainer/dbt.conf, then: just setup"
+  fi
+  [ -z "${DATASET_PREFIX:-}" ] && ok "DATASET_PREFIX is not exported in this environment (the env files decide)" \
+    || ko "DATASET_PREFIX='$DATASET_PREFIX' is exported in the environment" "remove it (containerEnv, remoteEnv, ~/.bashrc): exported, it could win over a project's .env for the dbt extension"
+  for N in ${DBT_V4_PRODUCTS:-}; do
+    _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}' \
+      || ko "DBT_V4_PRODUCTS names '$N', which is not in products.conf" "fix DBT_V4_PRODUCTS in .devcontainer/dbt.conf"
+  done
+  # the reverse: no project outside the v4 space reads the v4's env
+  E4="$(readlink -f "$WS/profiles/v4.env")"; LEAK=""
+  for N in $(dbt_members); do
+    dbt_use_product "$N" || continue
+    for V in $(dbt_versions); do
+      [ "$V" = v4 ] && continue
+      P="$(dbt_project_dir "$V")" || continue
+      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK ${P#"$WS"/}"
+    done
+  done
+  P="$(dbt_project_dir global)" && [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK global"
+  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env" \
+    || ko "these .env point to profiles/v4.env:$LEAK" "point them back to their env file (or remove them), then: just setup"
+  if P="$(dbt_project_dir global-v4)"; then
+    [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> profiles/v4.env" \
+      || ko "global-v4/.env does not point to profiles/v4.env" "just setup"
+  fi
+fi
+
 echo "[hooks — SQL the sandbox check cannot see]"
 check_hooks() {   # check_hooks V PROJECT_DIR
   local V="$1" P="$2" HOOKS
@@ -212,21 +282,24 @@ check_hooks() {   # check_hooks V PROJECT_DIR
     ok "$(label "$V"): no hook, neither in the project nor in its installed packages"
   elif [ "${DBT_HOOKS_REVIEWED:-0}" = "1" ]; then
     ok "$(label "$V"): hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+  elif dbt_is_v4 "$V"; then
+    info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+    info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name it for compile/show): $(dbt_hook_commands "$V")"
   else
     info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
     info "    -> refused until DBT_HOOKS_REVIEWED=1 in dbt.conf: $(dbt_hook_commands "$V")"
   fi
 }
-for N in $(dbt_products); do
+for N in $(dbt_members); do
   dbt_use_product "$N" || continue
-  for V in $DBT_WORKTREES; do
+  for V in $(dbt_versions); do
     P="$(dbt_project_dir "$V")" || continue
     check_hooks "$V" "$P"
   done
 done
-if dbt_is_fleet && P="$(dbt_project_dir global)"; then
+if dbt_is_fleet; then
   dbt_use_product "" >/dev/null 2>&1 || true
-  check_hooks global "$P"
+  for V in global global-v4; do P="$(dbt_project_dir "$V")" && check_hooks "$V" "$P"; done
 fi
 
 echo "[BigQuery auth]"
@@ -325,14 +398,15 @@ fi
 
 if [ "$DEEP" = 1 ]; then
   echo "[parse — offline]"
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
+      [ "$V" = v4 ] && ! _dbt_is_worktree "$(_dbt_wt v4)" && continue
       if dbt_is_fleet; then OUT="$(bash "$HERE/dbt-run.sh" "$V" "$N" parse 2>&1)"; else OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"; fi
       if [ $? -eq 0 ]; then
         ok "$(label "$V") parses"
-      elif [ "$V" = "v2" ]; then
-        info "$(label v2) does not parse yet — expected until the migration is done:"
+      elif [ "$V" != "v1" ]; then
+        info "$(label "$V") does not parse yet — expected until the migration is done:"
         printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'
       else
         ko "$(label v1) does not parse" "$(dbt_just_cmd v1) parse"
@@ -340,12 +414,13 @@ if [ "$DEEP" = 1 ]; then
       fi
     done
   done
-  if dbt_is_fleet && dbt_project_dir global >/dev/null; then
+  for V in global global-v4; do
+    dbt_is_fleet && dbt_project_dir "$V" >/dev/null || continue
     dbt_use_product "" >/dev/null 2>&1 || true
-    OUT="$(bash "$HERE/dbt-run.sh" global parse 2>&1)"
-    if [ $? -eq 0 ]; then ok "global parses"; else
-      info "global does not parse yet:"; printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'; fi
-  fi
+    OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"
+    if [ $? -eq 0 ]; then ok "$V parses"; else
+      info "$V does not parse yet:"; printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'; fi
+  done
 fi
 
 echo

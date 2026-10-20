@@ -136,6 +136,41 @@ and commit messages; this changelog starts at v0.8.12.
 - **Tests**: 101 offline fleet checks in `scripts/test-lib-dbt.sh` (227 in
   all), and `dbt-fleet` and coordinated-product renders in
   `scripts/test-template-render.sh`.
+- **A v4 generation and products born here (fleet).** v4 is dbt v2 again: a
+  refactoring branch on top of a product's v2, opt-in per product and never
+  part of `DBT_WORKTREES` (`dbt_versions` gives the worktrees of the current
+  product). A product listed in `DBT_V4_PRODUCTS` (dbt.conf) also gets
+  `v4/<product>/`, branch `<product>/v4` — opened where its branches live,
+  from the published v2, and only ever **tracked** (never created from v1 or
+  upstream; an unopened v4 is reported, not built). A **referent** — a product
+  born here, declared in `.devcontainer/referents.conf` (`NAME SUBDIR HOME`,
+  `just referent-add`) — has no upstream remote, no mirror, no v1/v2: one
+  `v4/<name>/` worktree that tracks its own repository. `just v4 <product> …`
+  and `just global-v4 …` (the v4 assembly) run dbt v2 behind the same guard;
+  sync, lock (`<product> v4` lines), destinations, products, doctor, profile
+  hub and editor files follow the v4 worktrees.
+- **The v4 space, kept apart both ways.** The v2 and the v4 of a product share
+  package names: under one prefix they would write the same tables.
+  `DBT_BQ_DATASET_PREFIX_V4` (`<DBT_BQ_DATASET_PREFIX>_<x>`, checked) is the
+  v4's own prefix; `profiles/v4.env` is generated from `profiles/dbt.env` with
+  it. The guard loads it for `v4`/`global-v4` — chosen by the mode, never by
+  an inherited variable — and checks, on every command (parse included), that
+  `DATASET_PREFIX` is the v4's there and never the v4's elsewhere, and that the
+  `.env` the dbt extension reads points to the right file (re-pointed by the
+  lifecycle). A write of `v4/` or `global-v4/` must resolve under the v4
+  prefix (`=` or `_*`), a write of `v1/`, `v2/` or `global/` never there.
+  `global-v4/` gets `global/`'s refusals: `DBT_SANDBOX_NEVER_BUILD` names
+  qualified by package, no relation written by two nodes. `just destinations`
+  compares v2 with v4 (the v4 prefix, and the v2 prefix left on
+  `target.schema`, ignored) and checks every v4 node stays in its space.
+- **Fail-closed hooks in the v4 space**: `dbt_hook_commands` gives an unknown
+  generation the widest list (`check`, dbt 2.0.8, counted in for v4); the v4
+  has no approved-hooks list (`DBT_HOOKS_REVIEWED_V2` never opens it), and
+  `DBT_HOOKS_COMPILE_OK` names it apart (`v4/<product>`, `global-v4`): listing
+  a product's v2 never opens its v4.
+- **`dbt` typed in a dbt project of the workspace the guard does not know** (a
+  copy, a probe) is refused instead of running plain dbt v2.
+- **Tests**: 90 more offline checks in `scripts/test-lib-dbt.sh` (349 in all).
 
 ### Fixed (on the unreleased dbt-project type)
 
