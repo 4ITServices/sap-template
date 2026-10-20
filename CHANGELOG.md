@@ -194,6 +194,16 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Fixed (on the unreleased dbt-project type)
 
+- **`dbt-run.sh`: what the seal of global-v4's hook proof cannot see is
+  refused there, and dbt can no longer load packages from elsewhere.** On
+  global-v4's compile/show under a proof of its hooks, `--vars` (it overrides
+  the vars of the sealed `dbt_project.yml`, elementary's `disable_*` among
+  them), `--profile` and an exported `DBT_PROFILE` (another profile than the
+  sealed one) are refused; parse, global/, the v2 worktrees and a v4/<product>
+  without hooks still take `--vars`. Everywhere, `--packages-install-path`
+  (and `=…`) and an exported `DBT_PACKAGES_INSTALL_PATH` are refused like
+  `--project-dir`: the guard reads the hooks of `dbt_packages/` (and global-v4
+  seals it), and dbt would have loaded other packages.
 - **`dbt-run.sh` write guard: dbt can no longer be pointed at another project,
   and an env file can no longer change the guard.** `--project-dir` (and
   `--project-dir=…`) is refused like `--profiles-dir`, and an exported

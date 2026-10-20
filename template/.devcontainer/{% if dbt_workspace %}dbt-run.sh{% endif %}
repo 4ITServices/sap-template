@@ -48,6 +48,9 @@
 # Every process of the container already gets the profile hub
 # (DBT_PROFILES_DIR). On top of it, this wrapper:
 #   - imposes the hub: --profiles-dir is refused
+#   - runs the project it checks, with the packages it reads: --project-dir,
+#     --packages-install-path, DBT_PROJECT_DIR and DBT_PACKAGES_INSTALL_PATH
+#     are refused
 #   - loads profiles/dbt.env (+ profiles/env/<product>.env in a fleet), the
 #     env vars the projects' Jinja needs
 #   - refuses run-operation (arbitrary macros) unless DBT_ALLOW_RUN_OPERATION=1
@@ -68,7 +71,8 @@
 #     lib-dbt.sh (dbt v2 runs them on compile and show too). In the v4 space,
 #     DBT_HOOKS_COMPILE_OK opens global-v4's compile/show only while the proof
 #     of its hooks (DBT_HOOKS_V4_PROOF) holds for the files on disk — its seal
-#     is recomputed at every such command (dbt_hooks_v4_seal, lib-dbt.sh)
+#     is recomputed at every such command (dbt_hooks_v4_seal, lib-dbt.sh), and
+#     what the seal cannot see is refused there: --vars, --profile, DBT_PROFILE
 # The raw engines (`dbt1`, `dbtf`) and the editor extensions' buttons bypass
 # these guards — they only get the hub.
 # =============================================================================
@@ -700,13 +704,19 @@ hooks_compile_ok() {
 # hooks_v4_proof_ok NAME — a name of the v4 space listed in DBT_HOOKS_COMPILE_OK: the v4 has no approved-hooks list, so
 # its compile/show runs only while the proof of its hooks (DBT_HOOKS_V4_PROOF, a file of the workspace) holds for the
 # files on disk — its one verdict line carries the seal the guard recomputes here (dbt_hooks_v4_seal,
-# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), no proof named, a state that cannot be
-# sealed, a proof whose seal no longer matches.
+# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
+# collected by run_dbt: --vars overrides the vars of the sealed dbt_project.yml — elementary's disable_* among them —,
+# --profile or DBT_PROFILE another profile than the sealed one), no proof named, a state that cannot be sealed, a proof
+# whose seal no longer matches.
 hooks_v4_proof_ok() {
   local NAME="$1" S
   [ "$NAME" = global-v4 ] \
     || refuse "$NAME is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own (only global-v4 has one):" \
               "\`dbt ${CMD_HOOKS:-compile}\` refused. Remove it from DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)."
+  [ -z "${UNSEALED[*]-}" ] && [ -z "${DBT_PROFILE:-}" ] \
+    || refuse "global-v4: \`dbt ${CMD_HOOKS:-compile}\` with ${UNSEALED[*]-}${DBT_PROFILE:+ DBT_PROFILE=$DBT_PROFILE} — the proof of its hooks holds for" \
+              "the vars of its dbt_project.yml and its own profile, both under its seal; --vars (it overrides elementary's" \
+              "disable_* vars) and another profile are not: refused. Compile global-v4 without them (parse may take them)."
   case "${DBT_HOOKS_V4_PROOF:-}" in
     ""|/*|../*|*/../*|*/..|..)
       refuse "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF ('${DBT_HOOKS_V4_PROOF:-}') names no proof of its" \
@@ -770,7 +780,7 @@ hooks_approve() {
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
   local HOOKS_CHECK="" NEW
-  local -a SEL=()
+  local -a SEL=() UNSEALED=()
   shift
   JCMD="$(dbt_just_cmd "$V")"
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
@@ -785,6 +795,9 @@ run_dbt() {
       --project-dir|--project-dir=*)
         refuse "--project-dir is not allowed: the guard checks the destinations of $(_dbt_show "$V") only," \
                "and dbt would run another project. Run it through its own recipe." ;;
+      --packages-install-path|--packages-install-path=*)
+        refuse "--packages-install-path is not allowed: the guard reads the hooks of the packages installed in" \
+               "$(_dbt_show "$V")'s dbt_packages/ only (global-v4 seals them), and dbt would load others." ;;
       run|build|seed|snapshot|clone|retry) CMD_WRITE="$A" ;;
       run-operation) CMD_RUNOP=1 ;;
     esac
@@ -801,6 +814,8 @@ run_dbt() {
       -*) COLLECT=0 ;;
       *) [ "$COLLECT" = 1 ] && SEL+=("$A") ;;
     esac
+    # the arguments the seal of global-v4's hook proof cannot see (refused there: hooks_v4_proof_ok)
+    case "$A" in --vars|--vars=*|--profile|--profile=*) UNSEALED+=("${A%%=*}") ;; esac
   done
 
   export_env "$V"
@@ -808,6 +823,9 @@ run_dbt() {
   [ -z "${DBT_PROJECT_DIR:-}" ] \
     || refuse "DBT_PROJECT_DIR is set ('$DBT_PROJECT_DIR'): dbt would run that project, not the one the guard checks — refused." \
               "unset DBT_PROJECT_DIR"
+  [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
+    || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
+              "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
     refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \
