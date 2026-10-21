@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# =============================================================================
+# git-ssh-garde.sh — the ssh layer of the upstream push lock (TEMPLATE-OWNED)
+# Updated by `copier update` — do not edit in projects.
+#
+# dbt_git_setup (lib-dbt.sh) makes it git's core.sshCommand, replayed on every start:
+#   bash <this file> --hosts=<host1,host2> [-o "UserKnownHostsFile=<pinned> ~/.ssh/known_hosts"]
+# git appends its own arguments: [ssh options] <[user@]host> "<remote command>".
+#
+# To an upstream host only the READS go through: git-upload-pack (fetch, clone, ls-remote) and
+# git-upload-archive (git archive --remote), each with the one quoted path git writes. Anything else
+# — git-receive-pack (a push), git-lfs-authenticate, a shell, a command with more in it — is refused
+# BEFORE ssh runs, whatever the URL looked like: git+ssh://, ssh+git://, ssh://…:22/, no user,
+# another user, upper case, a trailing dot, an ~/.ssh/config alias (the real host is read with
+# `ssh -G`), an IP address of the host, an explicit pushurl https://<host>/… that the https -> ssh
+# rewrite turned into git@<host>: (pushInsteadOf never sees a pushurl). Every other host, and git's
+# own probe (`ssh -G`, which runs nothing remotely), go to ssh unchanged.
+# An IP address that cannot be told apart from an upstream host (a host name that does not resolve)
+# is treated as one: fail closed, for writes only.
+# Not covered: an exported GIT_SSH_COMMAND or GIT_SSH replaces core.sshCommand — the pushInsteadOf and
+# the https quitter still hold, and `just doctor` reports the variable.
+# =============================================================================
+set -u
+HOSTS=""
+case "${1:-}" in --hosts=*) HOSTS="${1#--hosts=}"; shift ;; esac
+
+# ssh options, as ssh's getopt reads them: a cluster of flags, the last of which may take a value
+# (attached, or the next argument). -G anywhere among them = print the configuration and exit.
+TAKES_VALUE="BbcDEeFIiJLlmOoPpQRSWw"
+ARGS=("$@"); N=${#ARGS[@]}; I=0; OPTS=()
+while [ "$I" -lt "$N" ]; do
+  A="${ARGS[$I]}"
+  case "$A" in
+    --) I=$((I + 1)); break ;;
+    -?*)
+      OPTS+=("$A"); I=$((I + 1)); REST="${A#-}"
+      while [ -n "$REST" ]; do
+        C="${REST:0:1}"; REST="${REST:1}"
+        [ "$C" = G ] && exec ssh "$@"
+        case "$TAKES_VALUE" in
+          *"$C"*) if [ -z "$REST" ] && [ "$I" -lt "$N" ]; then OPTS+=("${ARGS[$I]}"); I=$((I + 1)); fi
+                  break ;;
+        esac
+      done ;;
+    *) break ;;
+  esac
+done
+DEST="${ARGS[$I]:-}"
+[ -n "$DEST" ] || exec ssh "$@"
+CMD="${ARGS[*]:$((I + 1))}"
+
+# [ssh://][user@]host[:port][/…] -> host, lower case, without its trailing dot
+host_of() {
+  local H="${1#ssh://}"
+  H="${H%%/*}"; H="${H##*@}"
+  case "$H" in
+    \[*) H="${H#\[}"; H="${H%%\]*}" ;;
+    *:*:*) ;;
+    *) H="${H%%:*}" ;;
+  esac
+  H="${H%.}"
+  printf '%s' "${H,,}"
+}
+is_ip() { [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || [[ "$1" == *:* ]]; }
+
+H1="$(host_of "$DEST")"
+T=""; command -v timeout >/dev/null 2>&1 && T="timeout 10"
+H2="$(host_of "$($T ssh "${OPTS[@]}" -G "$DEST" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')")"
+
+ORIGIN=""
+IFS=, read -r -a LIST <<<"${HOSTS,,}"
+for X in "${LIST[@]}"; do
+  X="${X%.}"; [ -n "$X" ] || continue
+  if [ "$H1" = "$X" ] || [ "$H2" = "$X" ]; then ORIGIN="$X"; break; fi
+done
+if [ -z "$ORIGIN" ] && { is_ip "$H1" || is_ip "$H2"; }; then
+  for X in "${LIST[@]}"; do
+    X="${X%.}"; [ -n "$X" ] || continue
+    ADDRS="$(command -v getent >/dev/null 2>&1 && $T getent ahosts "$X" 2>/dev/null | awk '{ print tolower($1) }' | sort -u)"
+    if [ -z "$ADDRS" ]; then ORIGIN="$X (unresolved: ${H2:-$H1} may be it)"; break; fi
+    for Y in "$H1" "$H2"; do
+      [ -n "$Y" ] && printf '%s\n' "$ADDRS" | grep -qxF -- "$Y" && { ORIGIN="$X ($Y)"; break 2; }
+    done
+  done
+fi
+
+if [ -n "$ORIGIN" ]; then
+  Q="'"
+  READ="^git[- ]upload-(pack|archive) ${Q}([^${Q}]|${Q}\\\\[!${Q}]${Q})*${Q}\$"
+  if ! [[ "$CMD" =~ $READ ]]; then
+    printf 'verrou 4 (ssh guard): « %s » to %s refused — nothing is ever pushed to an upstream host from here (only git-upload-pack and git-upload-archive go through)\n' \
+      "${CMD%% *}" "$ORIGIN" >&2
+    exit 1
+  fi
+fi
+exec ssh "$@"

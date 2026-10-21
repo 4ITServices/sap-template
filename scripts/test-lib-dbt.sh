@@ -31,6 +31,8 @@ has()  { grep -qF -- "$2" <<<"$1"; }
 REAL_USERBASE="$(python3 -m site --user-base 2>/dev/null)"
 export HOME="$W/home"; mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1
+# aucune configuration git, aucun ssh ni assistant hérités de l'appelant (le vrai ~/.gitconfig reste hors d'atteinte)
+unset GIT_CONFIG_GLOBAL GIT_SSH_COMMAND GIT_SSH GIT_ASKPASS SSH_ASKPASS SSH_AUTH_SOCK
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export DBT_V1_VENV="$W/opt/dbt-v1" DBT_BIN_DIR="$W/bin" DBT_LOG="$W/dbt.log"
 export STUB_LOG="$W/stub.log" STUB_DBT="$W/stubs/dbt-engine"
@@ -92,6 +94,7 @@ make_ws() {
   cp "$SRC/"*"lib-dbt.sh"* "$1/.devcontainer/lib-dbt.sh"
   cp "$SRC/"*"dbt-run.sh"* "$1/.devcontainer/dbt-run.sh"
   cp "$SRC/"*"dbt-doctor.sh"* "$1/.devcontainer/dbt-doctor.sh"
+  cp "$SRC/"*"git-ssh-garde.sh"* "$1/.devcontainer/git-ssh-garde.sh"
   printf 'DBT_SEND_ANONYMOUS_USAGE_STATS=false\nEXTRA_VAR=from-env-file\n' > "$1/profiles/dbt.env"
   printf '/v1/\n/v2/\n' > "$1/.gitignore"
 }
@@ -453,11 +456,11 @@ rm -f "$HOME/.gitconfig"
 G() { git config --global "$@"; }
 has "$(G --get core.sshCommand)" "UserKnownHostsFile=$WS3/.devcontainer/upstream_known_hosts $HOME/.ssh/known_hosts" && pass "core.sshCommand : clé épinglée d'abord, ~/.ssh/known_hosts ensuite" || bad "core.sshCommand inattendu"
 check "https://hôte/ est lu en SSH (packages dbt privés)" test "$(G --get url.git@git.invalid:.insteadOf)" = "https://git.invalid/"
-[ "$(G --get-all url.DISABLED://.pushInsteadOf | wc -l)" = 3 ] && pass "verrou de push : scp, ssh:// et https://" || bad "verrou de push incomplet"
+[ "$(G --get-all url.DISABLED://.pushInsteadOf | wc -l)" = 13 ] && pass "verrou de push : scp, ssh://, https:// et les 10 formes de plus (pushInsteadOf)" || bad "verrou de push incomplet"
 O="$(git -C "$WS3" push git@git.invalid:grp/repo.git HEAD:refs/heads/x 2>&1)"
 has "$O" "DISABLED" && pass "push par URL explicite : refusé par git avant tout accès réseau" || bad "push par URL explicite non verrouillé ($O)"
 ( cd "$WS3" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_git_setup' ) >/dev/null 2>&1
-[ "$(G --get-all url.DISABLED://.pushInsteadOf | wc -l)" = 3 ] && pass "verrou rejoué : aucune entrée dupliquée" || bad "verrou dupliqué"
+[ "$(G --get-all url.DISABLED://.pushInsteadOf | wc -l)" = 13 ] && pass "verrou rejoué : aucune entrée dupliquée" || bad "verrou dupliqué"
 G core.sshCommand "ssh -i /custom/key"
 ( cd "$WS3" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_git_setup' ) >/dev/null 2>&1
 check "un core.sshCommand personnalisé n'est pas écrasé" test "$(G --get core.sshCommand)" = "ssh -i /custom/key"
@@ -467,6 +470,197 @@ OUT="$( cd "$WS3" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "
 refute "DBT_UPSTREAM_PUSH_LOCK=0 lève le verrou de cet hôte…" grep -q "git.invalid" <<<"$(G --get-all url.DISABLED://.pushInsteadOf)"
 check "…sans toucher au verrou posé pour un autre hôte" test "$(G --get-all url.DISABLED://.pushInsteadOf)" = "git@other.invalid:"
 has "$OUT" "UNLOCKED" && pass "…et le dit en clair" || bad "levée du verrou silencieuse"
+check "…et ses quitteurs https retirés (un hôte déverrouillé se relit en https)" test -z "$(G --get-regexp '^credential\..*git\.invalid.*helper$')"
+
+# =============================================================================
+echo "== Verrou 4 : les 22 formes d'URL d'un hôte d'origine, couche par couche, et un mutant par couche =="
+# Sans réseau : ssh est un bouchon qui consigne ce qu'on lui demande (seul « ssh -G », local, passe au vrai
+# ssh, avec un fichier de configuration du test) ; https est jugé par `git credential fill` sur l'URL où
+# partirait le push — ce que git ferait au premier 401 —, l'assistant général étant « généreux ».
+V4="$W/verrou4"; mkdir -p "$V4/bin"
+WS5="$W/ws5"; make_ws "$WS5"; conf "$WS5"
+sed -i 's#^DBT_UPSTREAM_URL=.*#DBT_UPSTREAM_URL="git@git.invalid:grp/repo.git"#' "$WS5/.devcontainer/dbt.conf"
+cp "$WS3/.devcontainer/upstream_known_hosts" "$WS5/.devcontainer/"
+printf 'Host gl-alias\n  HostName git.invalid\nHost ip-alias\n  HostName 127.0.0.1\n' > "$V4/ssh_config"
+REAL_SSH="$(command -v ssh 2>/dev/null || true)"
+cat > "$V4/bin/ssh" <<EOF
+#!/bin/bash
+for a in "\$@"; do
+  if [ "\$a" = -G ]; then
+    [ -n "$REAL_SSH" ] && exec "$REAL_SSH" -F "$V4/ssh_config" "\$@"
+    d="\${@: -1}"; printf 'hostname %s\n' "\${d##*@}"; exit 0
+  fi
+done
+printf '%s\n' "\$*" >> "$V4/ssh.log"
+echo "ssh (bouchon du test) : aucune connexion" >&2; exit 1
+EOF
+printf '#!/bin/sh\necho "ASKPASS $*" >> %q\necho secret\n' "$V4/cred.log" > "$V4/askpass"
+printf '#!/bin/sh\ncat >/dev/null; echo "GENEREUX $1" >> %q\n[ "$1" = get ] && printf "username=jb\\npassword=secret\\n"\nexit 0\n' "$V4/cred.log" > "$V4/genereux"
+chmod +x "$V4/bin/ssh" "$V4/askpass" "$V4/genereux"
+ESS="$V4/essai"; git init -q "$ESS"; git -C "$ESS" commit -q --allow-empty -m "essai (jamais poussé)"
+
+# v4_setup NOM [code évalué après lib-dbt.sh, avant dbt_git_setup : un mutant] — le cycle git sur une
+# configuration globale à part ($V4/NOM.cfg, vidée), où l'assistant général « généreux » est posé avant
+v4_setup() {
+  : > "$V4/$1.cfg"; GIT_CONFIG_GLOBAL="$V4/$1.cfg" git config --global credential.helper "$V4/genereux"
+  ( cd "$WS5" && GIT_CONFIG_GLOBAL="$V4/$1.cfg" bash -c 'source .devcontainer/lib-dbt.sh && eval "$1" && dbt_load_conf "$PWD" && dbt_git_setup' _ "${2:-:}" ) 2>&1
+}
+# v4_forme CFG u|p URL [VAR=valeur…] -> DISABLED | GARDE | QUITTEUR | FUITE-SSH | FUITE-HTTPS | AUTRE:…
+v4_forme() {
+  local cfg="$1" k="$2" u="$3" v out; shift 3
+  git -C "$ESS" remote remove t >/dev/null 2>&1
+  git -C "$ESS" remote add t "$u"; [ "$k" = p ] && git -C "$ESS" remote set-url --push t "$u"
+  v="$(GIT_CONFIG_GLOBAL="$cfg" git -C "$ESS" remote get-url --push t)"
+  case "$v" in
+    DISABLED://*) echo DISABLED ;;
+    https://*|http://*)
+      : > "$V4/cred.log"
+      out="$(printf 'url=%s\n\n' "$v" | GIT_CONFIG_GLOBAL="$cfg" GIT_ASKPASS="$V4/askpass" GIT_TERMINAL_PROMPT=0 git -C "$ESS" credential fill 2>&1)"
+      if grep -q 'verrou 4' <<<"$out" && [ ! -s "$V4/cred.log" ]; then echo QUITTEUR; else echo FUITE-HTTPS; fi ;;
+    *)
+      : > "$V4/ssh.log"
+      out="$(cd "$ESS" && env GIT_CONFIG_GLOBAL="$cfg" PATH="$V4/bin:$PATH" "$@" timeout 30 git push --dry-run t HEAD:refs/heads/probe 2>&1 </dev/null)"
+      if grep -q 'receive-pack' "$V4/ssh.log"; then echo FUITE-SSH
+      elif grep -q 'verrou 4 (ssh guard)' <<<"$out"; then echo GARDE
+      else echo "AUTRE:$(tail -1 <<<"$out")"; fi ;;
+  esac
+}
+H=git.invalid; HU=GIT.INVALID; HM=Git.Invalid; A=grp/autre.git
+# forme|URL|couche attendue — DISABLED (pushInsteadOf : les 3 historiques, ou la couche c), GARDE (a), QUITTEUR (b)
+FORMES=(
+  "u|https://$H/$A|DISABLED" "u|git@$H:$A|DISABLED" "u|ssh://git@$H/$A|DISABLED"
+  "u|git+ssh://git@$H/$A|DISABLED" "u|ssh+git://git@$H/$A|DISABLED" "u|ssh://git@$H:22/$A|DISABLED"
+  "u|ssh://$H/$A|DISABLED" "u|$H:$A|DISABLED" "u|jb@$H:$A|GARDE" "u|git@$H.:$A|GARDE"
+  "u|ssh://git@$HU/$A|GARDE" "u|git@$HM:$A|GARDE" "u|https://$HM/$A|QUITTEUR" "u|https://$H:443/$A|DISABLED"
+  "u|https://jb@$H/$A|QUITTEUR" "u|http://$H/$A|DISABLED" "u|https://$H./$A|QUITTEUR"
+  "p|https://$H/$A|GARDE" "p|git@$H:$A|GARDE" "p|ssh://git@$H/$A|GARDE" "p|https://$HM/$A|QUITTEUR"
+  "p|https://$H/grp/repo.git|GARDE"
+)
+lab() { local k="${1%%|*}" r="${1#*|}"; r="${r%|*}"; if [ "$k" = p ]; then printf 'pushurl explicite %s' "$r"; else printf '%s' "$r"; fi; }
+# v4_tableau CFG [VAR=valeur…] -> une ligne « issue » par forme, dans l'ordre de FORMES
+v4_tableau() { local cfg="$1" f r; shift; for f in "${FORMES[@]}"; do r="${f#*|}"; v4_forme "$cfg" "${f%%|*}" "${r%|*}" "$@"; done; }
+attendu() { local f; for f in "${FORMES[@]}"; do echo "${f##*|}"; done; }
+# ecarts ATTENDU OBTENU -> « n:attendu->obtenu » pour chaque forme qui diffère
+ecarts() { paste -d'|' <(printf '%s\n' "$1") <(printf '%s\n' "$2") | awk -F'|' '$1 != $2 { printf "%d:%s->%s ", NR, $1, $2 }'; }
+nb() { grep -o -- "$1" <<<"$2" | wc -l | tr -d ' '; }
+
+O="$(v4_setup complet)"
+has "$O" "push to git.invalid LOCKED (pushInsteadOf, no https credentials)" && has "$O" "ssh push guard on git.invalid" \
+  && pass "dbt_git_setup : les trois couches posées, et dites" || bad "dbt_git_setup verrou 4 ($O)"
+has "$(GIT_CONFIG_GLOBAL="$V4/complet.cfg" git config --global --get core.sshCommand)" "git-ssh-garde.sh --hosts=git.invalid -o \"UserKnownHostsFile=$WS5/.devcontainer/upstream_known_hosts $HOME/.ssh/known_hosts\"" \
+  && pass "core.sshCommand = la garde ssh, qui porte la clé épinglée" || bad "core.sshCommand de la garde inattendu"
+ATT="$(attendu)"; COMPLET="$(v4_tableau "$V4/complet.cfg")"
+i=0; while IFS= read -r r; do
+  f="${FORMES[$i]}"; i=$((i + 1))
+  if [ "$r" = "${f##*|}" ]; then pass "forme $i/22 : $(lab "$f") — $r"; else bad "forme $i/22 : $(lab "$f") — $r (attendu ${f##*|})"; fi
+done <<<"$COMPLET"
+cp "$V4/complet.cfg" "$V4/complet.avant"
+( cd "$WS5" && GIT_CONFIG_GLOBAL="$V4/complet.cfg" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_git_setup' ) >/dev/null 2>&1
+cmp -s "$V4/complet.avant" "$V4/complet.cfg" && pass "rejoué : configuration identique (idempotent)" || bad "verrou 4 non idempotent ($(diff "$V4/complet.avant" "$V4/complet.cfg" | head -5))"
+
+# sans le correctif : les trois couches retirées = le lib-dbt.sh d'avant
+v4_setup avant '_dbt_push_lock_ssh() { :; }; _dbt_push_lock_https() { :; }; _dbt_push_prefixes_more() { :; }' >/dev/null
+O="$(v4_tableau "$V4/avant.cfg")"; N="$(grep -c '^FUITE' <<<"$O")"
+[ "$N" = 19 ] && pass "sans le correctif : $N formes sur 22 partent vers l'hôte d'origine (le tableau voit les trous)" || bad "sans le correctif : $N fuite(s), 19 attendues ($(ecarts "$ATT" "$O"))"
+# mutant (a) : sans la garde ssh, les 8 formes qu'elle seule arrête partent par ssh
+v4_setup mut-a '_dbt_push_lock_ssh() { :; }' >/dev/null
+E="$(ecarts "$ATT" "$(v4_tableau "$V4/mut-a.cfg")")"
+[ "$(nb 'GARDE->FUITE-SSH' "$E")" = 8 ] && [ "$(wc -w <<<"$E")" = 8 ] \
+  && pass "mutant (a) sans garde ssh : détecté — 8 formes partent par ssh ($E)" || bad "mutant (a) non détecté ($E)"
+# mutant (b) : sans le quitteur, les 4 formes https qu'il arrête seul obtiennent un identifiant
+v4_setup mut-b '_dbt_push_lock_https() { :; }' >/dev/null
+E="$(ecarts "$ATT" "$(v4_tableau "$V4/mut-b.cfg")")"
+[ "$(nb 'QUITTEUR->FUITE-HTTPS' "$E")" = 4 ] && [ "$(wc -w <<<"$E")" = 4 ] \
+  && pass "mutant (b) sans quitteur https : détecté — 4 formes reçoivent un identifiant ($E)" || bad "mutant (b) non détecté ($E)"
+# mutant (c) : sans les 10 préfixes de plus, la garde et le quitteur rattrapent tout… sauf sous GIT_SSH_COMMAND
+v4_setup mut-c '_dbt_push_prefixes_more() { :; }' >/dev/null
+E="$(ecarts "$ATT" "$(v4_tableau "$V4/mut-c.cfg")")"
+[ "$(nb 'DISABLED->GARDE' "$E")" = 5 ] && [ "$(nb 'DISABLED->QUITTEUR' "$E")" = 2 ] && [ "$(wc -w <<<"$E")" = 7 ] \
+  && pass "mutant (c) sans les préfixes de plus : détecté — 7 formes arrêtées par une autre couche ($E)" || bad "mutant (c) non détecté ($E)"
+O="$(v4_tableau "$V4/complet.cfg" GIT_SSH_COMMAND=ssh)"; E="$(ecarts "$O" "$(v4_tableau "$V4/mut-c.cfg" GIT_SSH_COMMAND=ssh)")"
+[ "$(nb 'DISABLED->FUITE-SSH' "$E")" = 5 ] && [ "$(nb 'DISABLED->QUITTEUR' "$E")" = 2 ] && [ "$(wc -w <<<"$E")" = 7 ] \
+  && pass "…sous GIT_SSH_COMMAND (garde remplacée), le mutant (c) laisse partir 5 formes que le correctif arrête ($E)" || bad "mutant (c) sous GIT_SSH_COMMAND ($E)"
+E="$(ecarts "$ATT" "$O")"
+[ -n "$E" ] && [ "$(nb 'GARDE->FUITE-SSH' "$E")" = "$(wc -w <<<"$E")" ] \
+  && pass "limite dite : GIT_SSH_COMMAND exporté ne retire que la garde ssh ($(wc -w <<<"$E") formes ; pushInsteadOf et quitteur tiennent)" || bad "GIT_SSH_COMMAND : autre couche touchée ($E)"
+
+# la lecture de l'hôte d'origine par ssh reste possible : fetch, ls-remote, clone, archive
+G5() { env GIT_CONFIG_GLOBAL="$V4/complet.cfg" PATH="$V4/bin:$PATH" timeout 30 git "$@" 2>&1 </dev/null; }
+lu() { : > "$V4/ssh.log"; O="$(cd "$V4" && G5 "$@")"; ! grep -q 'verrou 4' <<<"$O" && grep -qF -- "$LU" "$V4/ssh.log"; }
+LU="git-upload-pack 'grp/repo.git'"
+lu ls-remote "git@$H:grp/repo.git" && pass "lecture : git ls-remote git@$H: part vers ssh (git-upload-pack)" || bad "ls-remote bloqué ($O)"
+lu ls-remote "https://$H/grp/repo.git" && pass "lecture : https://$H/ se lit par ssh (réécriture), la garde laisse passer" || bad "ls-remote https bloqué ($O)"
+lu ls-remote "jb@$HU:grp/repo.git" && pass "lecture : autre utilisateur, majuscules — la lecture passe aussi" || bad "lecture variante bloquée ($O)"
+lu clone -q "git@$H:grp/repo.git" "$V4/clone" && pass "lecture : git clone part vers ssh (git-upload-pack)" || bad "clone bloqué ($O)"
+git -C "$ESS" remote set-url t "git@$H:grp/repo.git"; git -C "$ESS" config --unset remote.t.pushurl
+lu -C "$ESS" fetch t && pass "lecture : git fetch d'un remote de l'hôte part vers ssh" || bad "fetch bloqué ($O)"
+LU="git-upload-archive 'grp/repo.git'"
+lu archive "--remote=git@$H:grp/repo.git" HEAD && pass "lecture : git archive --remote part vers ssh (git-upload-archive)" || bad "archive bloqué ($O)"
+# ce qui ressemble à une lecture sans en être une
+: > "$V4/ssh.log"; O="$(cd "$V4" && G5 ls-remote --upload-pack=git-receive-pack "git@$H:grp/repo.git")"
+grep -q 'verrou 4 (ssh guard)' <<<"$O" && ! grep -q receive-pack "$V4/ssh.log" && pass "--upload-pack=git-receive-pack : refusé par la garde" || bad "--upload-pack détourné ($O)"
+: > "$V4/ssh.log"; O="$(cd "$V4" && G5 ls-remote "--upload-pack=git-upload-pack 'x'; git-receive-pack" "git@$H:grp/repo.git")"
+grep -q 'verrou 4 (ssh guard)' <<<"$O" && [ ! -s "$V4/ssh.log" ] && pass "une lecture suivie d'autre chose : refusée" || bad "commande composée passée ($O)"
+GA() { PATH="$V4/bin:$PATH" bash "$WS5/.devcontainer/git-ssh-garde.sh" "$@" </dev/null 2>&1; }
+O="$(GA --hosts=$H "git@$H" "git-lfs-authenticate 'grp/repo.git' upload")"; has "$O" "verrou 4 (ssh guard)" && pass "git-lfs-authenticate … upload : refusé" || bad "lfs upload passé ($O)"
+O="$(GA --hosts=$H -4vp 22 "git@$H" "git-receive-pack 'grp/repo.git'")"; has "$O" "verrou 4 (ssh guard)" && pass "options groupées (-4vp 22) : l'hôte reste lu, push refusé" || bad "options groupées ($O)"
+if [ -n "$REAL_SSH" ]; then
+  : > "$V4/ssh.log"; O="$(cd "$ESS" && G5 push --dry-run gl-alias:grp/repo.git HEAD:refs/heads/probe)"
+  grep -q 'verrou 4 (ssh guard)' <<<"$O" && [ ! -s "$V4/ssh.log" ] && pass "alias de ~/.ssh/config (HostName de l'hôte d'origine) : push refusé (ssh -G)" || bad "alias ssh passé ($O)"
+  O="$(GA --hosts=localhost ip-alias "git-receive-pack 'x'")"; has "$O" "to localhost (127.0.0.1)" && pass "alias vers une adresse IP de l'hôte : refusé" || bad "alias IP ($O)"
+else pass "alias ssh : pas de client ssh pour « ssh -G » (non joué)"; fi
+O="$(GA --hosts=localhost git@127.0.0.1 "git-receive-pack 'x'")"; has "$O" "to localhost (127.0.0.1)" && pass "adresse IP de l'hôte d'origine : push refusé" || bad "IP de l'hôte ($O)"
+: > "$V4/ssh.log"; GA --hosts=localhost git@127.0.0.1 "git-upload-pack 'x'" >/dev/null; grep -q "git-upload-pack 'x'" "$V4/ssh.log" && pass "…et la lecture par cette adresse passe" || bad "lecture par IP bloquée"
+O="$(GA --hosts=$H git@192.0.2.1 "git-receive-pack 'x'")"; has "$O" "unresolved" && pass "adresse IP quand l'hôte ne se résout pas : push refusé (fail closed)" || bad "IP non résolue ($O)"
+
+# les autres hôtes ne sont pas touchés
+: > "$V4/ssh.log"; O="$(cd "$ESS" && G5 push --dry-run git@github.com:acme/x.git HEAD:refs/heads/probe)"
+grep -q "git@github.com git-receive-pack 'acme/x.git'" "$V4/ssh.log" && ! grep -q 'verrou 4' <<<"$O" && pass "GitHub par ssh : le push passe à ssh tel quel" || bad "GitHub ssh touché ($O)"
+: > "$V4/cred.log"; O="$(printf 'url=https://github.com/acme/x.git\n\n' | GIT_CONFIG_GLOBAL="$V4/complet.cfg" GIT_TERMINAL_PROMPT=0 git -C "$ESS" credential fill 2>&1)"
+grep -q 'GENEREUX get' "$V4/cred.log" && has "$O" "password=secret" && pass "GitHub par https : l'assistant général répond, comme avant" || bad "GitHub https touché ($O)"
+git -C "$ESS" remote set-url t https://github.com/acme/x.git
+case "$(GIT_CONFIG_GLOBAL="$V4/complet.cfg" git -C "$ESS" remote get-url --push t)" in DISABLED*) bad "push vers GitHub verrouillé" ;; *) pass "push vers GitHub : aucun pushInsteadOf" ;; esac
+# un assistant posé APRÈS le quitteur (comme VS Code à l'attache) n'est jamais consulté
+cp "$V4/complet.cfg" "$V4/apres.cfg"; GIT_CONFIG_GLOBAL="$V4/apres.cfg" git config --global --add credential.helper "$V4/genereux"
+[ "$(v4_forme "$V4/apres.cfg" u "https://$HM/$A")" = QUITTEUR ] && pass "assistant général ajouté après le quitteur : jamais consulté (quit=1)" || bad "assistant postérieur consulté"
+# rien de l'existant n'est retiré : un assistant posé pour l'hôte reste écrit (inerte derrière "")
+: > "$V4/sien.cfg"; GIT_CONFIG_GLOBAL="$V4/sien.cfg" git config --global "credential.https://$H.helper" store
+( cd "$WS5" && GIT_CONFIG_GLOBAL="$V4/sien.cfg" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_git_setup' ) >/dev/null 2>&1
+[ "$(GIT_CONFIG_GLOBAL="$V4/sien.cfg" git config --global --get-all "credential.https://$H.helper" | head -1)" = store ] \
+  && [ "$(v4_forme "$V4/sien.cfg" u "https://jb@$H/$A")" = QUITTEUR ] && pass "un assistant déjà posé pour l'hôte : gardé dans la configuration, et sans effet" || bad "assistant de l'hôte retiré ou actif"
+
+# core.sshCommand personnalisé : jamais écrasé, et dit
+: > "$V4/perso.cfg"; GIT_CONFIG_GLOBAL="$V4/perso.cfg" git config --global core.sshCommand "ssh -i /custom/key"
+O="$( cd "$WS5" && GIT_CONFIG_GLOBAL="$V4/perso.cfg" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_git_setup' 2>&1 )"
+[ "$(GIT_CONFIG_GLOBAL="$V4/perso.cfg" git config --global --get core.sshCommand)" = "ssh -i /custom/key" ] && has "$O" "the ssh push guard is NOT installed" \
+  && pass "core.sshCommand personnalisé : gardé, et l'absence de la garde dite" || bad "sshCommand personnalisé ($O)"
+# DBT_UPSTREAM_PUSH_LOCK=0 : les trois couches de cet hôte retirées, la clé épinglée seule revient
+cp "$V4/complet.cfg" "$V4/leve.cfg"
+O="$( cd "$WS5" && GIT_CONFIG_GLOBAL="$V4/leve.cfg" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && DBT_UPSTREAM_PUSH_LOCK=0 && dbt_git_setup' 2>&1 )"
+[ "$(GIT_CONFIG_GLOBAL="$V4/leve.cfg" git config --global --get core.sshCommand)" = "ssh -o \"UserKnownHostsFile=$WS5/.devcontainer/upstream_known_hosts $HOME/.ssh/known_hosts\"" ] \
+  && [ -z "$(GIT_CONFIG_GLOBAL="$V4/leve.cfg" git config --global --get-all url.DISABLED://.pushInsteadOf)" ] \
+  && [ -z "$(GIT_CONFIG_GLOBAL="$V4/leve.cfg" git config --global --get-regexp '^credential\..*git\.invalid')" ] \
+  && [ "$(GIT_CONFIG_GLOBAL="$V4/leve.cfg" git config --global --get credential.helper)" = "$V4/genereux" ] \
+  && pass "DBT_UPSTREAM_PUSH_LOCK=0 : garde, quitteurs et 13 préfixes retirés ; la clé épinglée seule, l'assistant général intact" || bad "levée du verrou 4 ($O)"
+# garde trop stricte (mutant) : elle refuserait aussi les lectures — le contrôle de lecture le voit
+cp "$WS5/.devcontainer/git-ssh-garde.sh" "$V4/garde.orig"
+sed -i 's/^  if ! \[\[ "\$CMD" =~ \$READ \]\]; then$/  if true; then/' "$WS5/.devcontainer/git-ssh-garde.sh"
+LU="git-upload-pack 'grp/repo.git'"
+if ! cmp -s "$V4/garde.orig" "$WS5/.devcontainer/git-ssh-garde.sh" && ! lu ls-remote "git@$H:grp/repo.git"; then pass "mutant « garde trop stricte » : détecté (la lecture ne part plus)"; else bad "mutant garde trop stricte non détecté"; fi
+cp "$V4/garde.orig" "$WS5/.devcontainer/git-ssh-garde.sh"
+
+# doctor : ce qu'il dit des trois couches
+DOC() { ( cd "$WS5" && env GIT_CONFIG_GLOBAL="$1" "${@:2}" bash .devcontainer/dbt-doctor.sh ) 2>/dev/null | sed -n '/^\[upstream/,/^\[worktrees/p'; }
+O="$(DOC "$V4/complet.cfg")"
+has "$O" "✅ push lock on git.invalid, global (pushInsteadOf: 13 forms)" && has "$O" "✅ no https credentials for git.invalid" \
+  && has "$O" "✅ ssh push guard: core.sshCommand = .devcontainer/git-ssh-garde.sh (git.invalid)" \
+  && has "$O" "✅ the ssh push guard refuses git-receive-pack to git.invalid" && has "$O" "✅ …and lets git-upload-pack through to git.invalid" \
+  && pass "doctor : les trois couches au vert, la garde éprouvée hors ligne" || bad "doctor verrou 4 ($O)"
+O="$(DOC "$V4/mut-a.cfg")"; has "$O" "❌ core.sshCommand is not the ssh push guard" && pass "doctor : garde absente -> ❌" || bad "doctor mutant a ($O)"
+O="$(DOC "$V4/mut-b.cfg")"; has "$O" "❌ https quitter missing for git.invalid" && pass "doctor : quitteur absent -> ❌" || bad "doctor mutant b ($O)"
+O="$(DOC "$V4/mut-c.cfg")"; has "$O" "❌ global push lock incomplete for git.invalid" && pass "doctor : préfixes manquants -> ❌" || bad "doctor mutant c ($O)"
+O="$(DOC "$V4/complet.cfg" GIT_SSH_COMMAND=ssh)"; has "$O" "❌ GIT_SSH_COMMAND or GIT_SSH is exported" && pass "doctor : GIT_SSH_COMMAND exporté -> ❌" || bad "doctor GIT_SSH_COMMAND ($O)"
+O="$(DOC "$V4/perso.cfg")"; has "$O" "❌ core.sshCommand is customised: the ssh push guard is not installed" && pass "doctor : core.sshCommand personnalisé -> ❌, avec la ligne à y mettre" || bad "doctor perso ($O)"
 
 echo "== Sans bac à sable déclaré : dbt reste verrouillé =="
 WS4="$W/ws4"; make_ws "$WS4"; conf "$WS4" 'DBT_BQ_PROJECT=""' 'DBT_BQ_DATASET=""'

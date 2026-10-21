@@ -194,6 +194,39 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Fixed (on the unreleased dbt-project type)
 
+- **The upstream push lock holds whatever the URL looks like.** It rested on
+  three textual `pushInsteadOf` prefixes per host (`git@<host>:`,
+  `ssh://git@<host>/`, `https://<host>/`) plus the remote's `pushurl`: of 22
+  ways of writing a GitLab URL, 19 still reached the upstream with the user's
+  key or asked for an https identifier — `git+ssh://`, `ssh+git://`,
+  `ssh://…:22/`, no user, another user, upper case, a trailing dot, `http://`,
+  `https://…:443/`, and any remote with an explicit pushurl (pushInsteadOf
+  ignores it, and the https -> ssh rewrite turns `https://<host>/…` into
+  `git@<host>:`). `dbt_git_setup` now adds three layers, idempotent and
+  replayed on every start, removing nothing it did not write:
+  (a) git's `core.sshCommand` is a new template-owned script,
+  `.devcontainer/git-ssh-garde.sh`: to an upstream host only `git-upload-pack`
+  and `git-upload-archive` with one quoted path go through — `git-receive-pack`,
+  `git-lfs-authenticate`, a read followed by anything else are refused before
+  ssh runs; the host is read from the destination and from `ssh -G` (aliases
+  of `~/.ssh/config`), an IP address is compared with the host's addresses
+  (unresolved: refused, writes only); the pinned host keys ride along, every
+  other host and git's `ssh -G` probe go to ssh unchanged;
+  (b) an upstream host read over ssh gets `credential.https://<host>.helper`
+  and `credential.http://<host>.helper` = `""` then a quitter (`quit=1`): no
+  other helper is asked, no prompt opens — urlmatch covers case, `:443`, a
+  user and a trailing dot; an upstream read over https keeps its credentials;
+  (c) ten more `pushInsteadOf` prefixes per host, which still hold when an
+  exported `GIT_SSH_COMMAND` replaces the guard. A customised
+  `core.sshCommand` is left as is and reported. `DBT_UPSTREAM_PUSH_LOCK=0`
+  removes the three layers of its hosts (the pinned keys come back alone).
+  `just doctor` checks each layer, proves the guard offline (ssh stubbed: a
+  `git-receive-pack` to `git@<host>`, `jb@<HOST>`, `<host>.` refused, a
+  `git-upload-pack` let through), and reports an exported `GIT_SSH_COMMAND` /
+  `GIT_SSH` and a workspace-level `core.sshCommand`. Tests: the 22 forms one
+  by one, one mutant per layer (and the lib-dbt.sh of before: 19 leaks),
+  reads (ls-remote, fetch, clone, archive), GitHub untouched — 61 more
+  offline checks in `scripts/test-lib-dbt.sh` (487 in all).
 - **`dbt-run.sh`: what the seal of global-v4's hook proof cannot see is
   refused there, and dbt can no longer load packages from elsewhere.** On
   global-v4's compile/show under a proof of its hooks, `--vars` (it overrides

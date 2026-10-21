@@ -131,10 +131,20 @@ ignored by `main`:
 1. **Upstream access, read-only.** The upstream host key is pinned in
    `.devcontainer/upstream_known_hosts` (`~/.ssh` is mounted read-only, so ssh
    cannot record it). `https://<upstream host>/` is fetched over SSH (private
-   dbt packages). Pushing to that host is impossible: a global
-   `url."DISABLED://".pushInsteadOf` covers explicit URLs and submodules, and
-   `remote.upstream.pushurl` is `DISABLED`. `DBT_UPSTREAM_PUSH_LOCK=0` lifts
-   both.
+   dbt packages). Pushing to that host is impossible, whatever the URL looks
+   like: a global `url."DISABLED://".pushInsteadOf` covers explicit URLs and
+   submodules (13 prefixes per host: `git@`, `ssh://`, `https://`, and
+   `git+ssh://`, `ssh+git://`, `:22`, no user, `http://`, `:443`),
+   `remote.upstream.pushurl` is `DISABLED`, git's `core.sshCommand` is the
+   ssh push guard `.devcontainer/git-ssh-garde.sh` (to an upstream host only
+   `git-upload-pack` / `git-upload-archive` go through: another user, upper
+   case, a trailing dot, an `~/.ssh/config` alias, an IP address or an
+   explicit pushurl reach no `git-receive-pack`), and an upstream host read
+   over ssh gets no https credentials (`credential.https://<host>.helper` is
+   reset, then a quitter: no prompt). Reads are unchanged, and every other
+   host (GitHub) goes through untouched. An exported `GIT_SSH_COMMAND`
+   replaces the guard — `just doctor` says so. `DBT_UPSTREAM_PUSH_LOCK=0`
+   lifts all of it.
 2. **Worktrees.** Branches come from `origin` when already published, else
    `v1` is created from the upstream branch (fetched once) and `v2` from
    `v1`. The worktrees are **locked**: their git links are container paths

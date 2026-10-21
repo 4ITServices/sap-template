@@ -73,22 +73,80 @@ fi
 echo "[upstream — read-only]"
 KH="$(_dbt_known_hosts)"
 HOSTS=""
+SSH_HOSTS=""
 while IFS= read -r U; do
   H="$(_dbt_url_host "$U")"; [ -n "$H" ] || continue
   case " $HOSTS " in *" $H "*) continue ;; esac
   HOSTS="$HOSTS $H"
   if _dbt_url_is_ssh "$U"; then
+    SSH_HOSTS="$SSH_HOSTS $H"
     if ssh-keygen -F "$H" -f "$KH" >/dev/null 2>&1; then
       ok "$H host key pinned: $(ssh-keygen -lf "$KH" 2>/dev/null | grep -F "$H" | awk '{print $2" "$NF}' | paste -sd' ' -)"
     else
       ko "no pinned host key for $H" "just setup (needs the network), then commit .devcontainer/upstream_known_hosts"
     fi
   fi
-  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
-    git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "git@$H:" \
-      && ok "push lock on $H, global (pushInsteadOf)" || ko "global push lock missing for $H" "just setup"
-  fi
 done < <(_dbt_upstream_urls)
+# The push lock (verrou 4), layer by layer — offline: ssh is stubbed, nothing connects anywhere
+if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+  PL="$(git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null)"
+  for H in $HOSTS; do
+    NP=0; MISS=""
+    while IFS= read -r P; do
+      NP=$((NP + 1)); grep -qxF -- "$P" <<<"$PL" || MISS="$MISS $P"
+    done < <(_dbt_push_prefixes "$H")
+    [ -z "$MISS" ] && ok "push lock on $H, global (pushInsteadOf: $NP forms)" \
+      || ko "global push lock incomplete for $H (pushInsteadOf missing:$MISS)" "just setup"
+    if _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; then
+      QOK=1
+      for U in "https://$H" "http://$H"; do
+        mapfile -t QV < <(git config --global --get-all "credential.$U.helper" 2>/dev/null)
+        [ "${#QV[@]}" -ge 2 ] && [ -z "${QV[${#QV[@]}-2]}" ] && [ "${QV[${#QV[@]}-1]}" = "$(_dbt_https_quitter "$H")" ] || QOK=0
+      done
+      L="$(git -C "$WS" config --local --get-regexp '^credential\..*helper$' 2>/dev/null | grep -ic -- "$H")"
+      if [ "$QOK" = 1 ] && [ "${L:-0}" = 0 ]; then ok "no https credentials for $H (https/http quitter: no helper asked, no prompt)"
+      elif [ "$QOK" = 1 ]; then ko "a credential helper for $H is set in the workspace's own git config: it may outrank the quitter" "git config --local --unset-all it"
+      else ko "https quitter missing for $H (credential.https://$H.helper)" "just setup"; fi
+    else
+      info "$H is read over https: no https quitter (an explicit pushurl https://$H/… is stopped by nothing but its credentials)"
+    fi
+  done
+  G="$(_dbt_ssh_guard)"
+  SC="$(git -C "$WS" config --get core.sshCommand 2>/dev/null || true)"
+  GH="$(printf '%s' "$SC" | sed -n 's/.*git-ssh-garde.sh --hosts=\([^ ]*\).*/\1/p' | tr ',' ' ')"
+  MISS=""; for H in $HOSTS; do case " $GH " in *" ${H,,} "*) ;; *) MISS="$MISS $H" ;; esac; done
+  if [ ! -f "$G" ]; then ko "ssh push guard missing (.devcontainer/git-ssh-garde.sh)" "copier update, then: just setup"
+  elif [ -z "$GH" ]; then
+    case "$SC" in ""|*upstream_known_hosts*) ko "core.sshCommand is not the ssh push guard" "just setup" ;;
+      *) ko "core.sshCommand is customised: the ssh push guard is not installed" "put bash $G --hosts=$(echo $HOSTS | tr ' ' ',') in front of its options" ;; esac
+  elif [ -n "$MISS" ]; then ko "the ssh push guard does not cover$MISS" "just setup"
+  elif [ "$(git config --global --get core.sshCommand 2>/dev/null)" != "$SC" ]; then
+    ko "the workspace's own git config overrides core.sshCommand" "git -C $WS config --local --unset core.sshCommand"
+  elif ! STUB="$(mktemp -d 2>/dev/null)" || [ -z "$STUB" ]; then
+    ko "cannot prove the ssh push guard (mktemp failed)" "check /tmp"
+  else
+    ok "ssh push guard: core.sshCommand = .devcontainer/git-ssh-garde.sh (${GH// /, })"
+    # prove it, offline: ssh replaced by a stub that only answers `ssh -G` (local, no connection)
+    REAL_SSH="$(command -v ssh 2>/dev/null || echo ssh)"
+    printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = -G ] && exec "%s" "$@"; done\necho "doctor stub: ssh $*" >&2\nexit 42\n' "$REAL_SSH" > "$STUB/ssh"
+    chmod +x "$STUB/ssh"
+    for H in $HOSTS; do
+      REF=0; ASK=""
+      for D in "git@$H" "jb@${H^^}" "$H."; do
+        PATH="$STUB:$PATH" bash "$G" --hosts="${GH// /,}" "$D" "git-receive-pack 'doctor-probe.git'" </dev/null >/dev/null 2>"$STUB/err"
+        [ $? = 1 ] && grep -q 'verrou 4' "$STUB/err" && REF=$((REF + 1)) || ASK="$ASK $D"
+      done
+      [ "$REF" = 3 ] && ok "the ssh push guard refuses git-receive-pack to $H (git@$H, jb@${H^^}, $H. — tried, ssh stubbed)" \
+        || ko "the ssh push guard let git-receive-pack through to:$ASK" "check .devcontainer/git-ssh-garde.sh (copier update), then: just setup"
+      PATH="$STUB:$PATH" bash "$G" --hosts="${GH// /,}" "git@$H" "git-upload-pack 'doctor-probe.git'" </dev/null >/dev/null 2>&1
+      [ $? = 42 ] && ok "…and lets git-upload-pack through to $H (reads unchanged)" \
+        || ko "the ssh push guard blocks reads from $H" "check .devcontainer/git-ssh-garde.sh (copier update)"
+    done
+    rm -rf "${STUB:?}"
+  fi
+  [ -z "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ] \
+    || ko "GIT_SSH_COMMAND or GIT_SSH is exported: it replaces the ssh push guard (pushInsteadOf and the quitter still hold)" "unset it"
+fi
 if [ -z "$HOSTS" ]; then
   if dbt_is_fleet; then ko "no data product declared" "just product-add <name> <git-url>"; else ko "no upstream declared" "set DBT_UPSTREAM_URL in .devcontainer/dbt.conf"; fi
 else
