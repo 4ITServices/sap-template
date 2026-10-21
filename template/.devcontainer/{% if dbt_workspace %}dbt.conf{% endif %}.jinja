@@ -25,10 +25,11 @@ DBT_UPSTREAM_BRANCH="{{ upstream_branch }}"
 # empty = auto-detect, possible when it has a single dbt_project.yml)
 DBT_PROJECT_SUBDIR="{{ dbt_project_subdir }}"
 {%- endif %}
-# 1 = no push to the upstream host{% if project_type == 'dbt-fleet' %}s{% endif %} can leave this container (global
-# pushInsteadOf, remote pushurl, the ssh push guard git-ssh-garde.sh as
-# core.sshCommand, no https credentials). Set to 0 only for the day a branch must be
-# delivered upstream, then put it back.
+# 1 = no push by git to the upstream host{% if project_type == 'dbt-fleet' %}s{% endif %} (global pushInsteadOf, remote
+# pushurl, the ssh push guard git-ssh-garde.sh as core.sshCommand, no https: a
+# dead proxy, no credentials). Not ssh outside git with the same key: only a
+# read-only access on the server covers that. Set to 0 only for the day a branch
+# must be delivered upstream, then put it back.
 DBT_UPSTREAM_PUSH_LOCK=1
 # 1 = fetch https://<upstream host>/… over SSH: private dbt packages hosted
 # next to the project are usually declared over HTTPS, which only CI can auth

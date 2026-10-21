@@ -40,10 +40,13 @@
 #
 # What `dbt_process <workspace> create|start` guarantees:
 #   - every UPSTREAM repository (the dbt projects taken over) is readable and
-#     cannot be pushed to: pinned host keys, HTTPS->SSH rewrite for their
+#     receives no push by git: pinned host keys, HTTPS->SSH rewrite for their
 #     private dbt packages, push lock (global pushInsteadOf + remote pushurl
-#     + the ssh push guard git-ssh-garde.sh as core.sshCommand + no https
-#     credentials for an upstream host read over ssh)
+#     + the ssh push guard git-ssh-garde.sh, copied out of the worktree, as
+#     core.sshCommand + no https for an upstream host read over ssh: a dead
+#     proxy, no credentials). Not covered: ssh outside git with the same key,
+#     a deliberate override of git's configuration — only a read-only access
+#     on the server covers those (see git-ssh-garde.sh)
 #   - the v1 and v2 git worktrees of each product (branches of THIS repository)
 #   - two engines side by side: dbt Core 1.x in the /opt/dbt-v1 venv (`dbt1`)
 #     — built from the project's own pins, or from DBT_V1_PINS, the version a
@@ -335,19 +338,23 @@ dbt_git_setup() {
   fi
 
   # Push lock (verrou 4), in three layers — pushInsteadOf alone is textual: git+ssh://, ssh://…:22/, no
-  # user, another user, upper case, a trailing dot, https://…:443/, http://, and any remote with an
-  # explicit pushurl (pushInsteadOf ignores it; the https -> ssh rewrite turns it into git@<host>:)
-  # reached the upstream with the user's key.
+  # user, another user, upper case, a trailing dot, https://…:443/, http://, any remote with an explicit
+  # pushurl (pushInsteadOf ignores it; the https -> ssh rewrite turns it into git@<host>:) and
+  # `git send-pack` (it never reads pushInsteadOf) reached the upstream with the user's key.
   #   pushInsteadOf rewrites the push URL of ANY destination on an upstream host to a protocol that
   #     does not exist — `git push <explicit url>` and submodules too, which a remote's pushurl alone
-  #     does not see; (c) more prefixes than the three historic ones, kept when GIT_SSH_COMMAND
-  #     replaces the guard;
-  #   (b) no https/http credentials for an upstream host read over ssh: a quitter (urlmatch: any
-  #     case, :443, any user, a trailing dot) — git stops, no other helper, no prompt;
-  #   (a) core.sshCommand = .devcontainer/git-ssh-garde.sh: no git-receive-pack to an upstream host,
-  #     whatever the URL — reads (git-upload-pack) and every other host go through unchanged.
-  # Idempotent, replayed on every start. Nothing the user wrote is taken out: a helper of their own for
-  # an upstream host stays written (inert behind the reset), a customised core.sshCommand stays as is.
+  #     does not see; (c) more prefixes than the three historic ones, kept for `git push` when
+  #     GIT_SSH_COMMAND replaces the guard;
+  #   (b) no https/http for an upstream host read over ssh: http.<url>.proxy = a dead proxy
+  #     (127.0.0.1:9 — urlmatch: any case, :443, any user, a trailing dot; the most specific key wins
+  #     whatever the order, so a general http.proxy, a reset of the helpers, a password in the URL or
+  #     an http.extraHeader do not get round it), then a credential quitter as a second line — git
+  #     stops, no other helper, no prompt;
+  #   (a) core.sshCommand = the ssh push guard, copied to ~/.local/libexec/git-ssh-garde.sh (a
+  #     checkout of an older commit cannot take it away): no git-receive-pack to an upstream host,
+  #     named or reached by address — reads (git-upload-pack) and every other host go through unchanged.
+  # Idempotent, replayed on every start. Nothing the user wrote is taken out: a helper or a proxy of their
+  # own for an upstream host stays written (inert behind ours), a customised core.sshCommand stays as is.
   for HOST in $ALL_HOSTS; do
     if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
       while IFS= read -r P; do
@@ -355,18 +362,18 @@ dbt_git_setup() {
           || git config --global --add url.DISABLED://.pushInsteadOf "$P"
       done < <(_dbt_push_prefixes "$HOST")
       if _dbt_https_read_over_ssh "$HOST" "$SSH_HOSTS"; then
-        _dbt_push_lock_https 1 "$HOST"
-        echo "  push to $HOST LOCKED (pushInsteadOf, no https credentials)"
+        _dbt_push_lock_proxy 1 "$HOST"; _dbt_push_lock_https 1 "$HOST"
+        echo "  push to $HOST LOCKED (pushInsteadOf; https: dead proxy, no credentials)"
       else
-        _dbt_push_lock_https 0 "$HOST"
-        echo "  push to $HOST LOCKED (pushInsteadOf; read over https: no https quitter)"
+        _dbt_push_lock_proxy 0 "$HOST"; _dbt_push_lock_https 0 "$HOST"
+        echo "  push to $HOST LOCKED (pushInsteadOf; read over https: no dead proxy, no https quitter)"
       fi
     else
       # only this host's entries: a lock set by hand for another host stays
       while IFS= read -r P; do
         git config --global --fixed-value --unset-all url.DISABLED://.pushInsteadOf "$P" 2>/dev/null || true
       done < <(_dbt_push_prefixes "$HOST")
-      _dbt_push_lock_https 0 "$HOST"
+      _dbt_push_lock_proxy 0 "$HOST"; _dbt_push_lock_https 0 "$HOST"
       echo "  WARNING: push to $HOST is UNLOCKED (DBT_UPSTREAM_PUSH_LOCK=0 in dbt.conf)"
     fi
   done
@@ -401,8 +408,26 @@ _dbt_https_quitter() {
 }
 _DBT_QUITTER_MARK='verrou 4: no https credentials for '
 
-# Layer (b): credential.https://HOST.helper and credential.http://HOST.helper = "" (forget the helpers
-# configured before), then the quitter. Lock 0 removes them (ours only: the quitters, the empty resets).
+# Layer (b), first line: http.https://HOST.proxy and http.http://HOST.proxy = a dead proxy — nothing listens
+# on 127.0.0.1:9, git fails at once (« Failed to connect to 127.0.0.1 port 9 »), no request leaves, no
+# helper is asked. Added last (a value of the user's own stays, inert: the last one of a key wins). An
+# exported NO_PROXY / no_proxy covering the host goes round it (`just doctor` says so): the quitter holds.
+# Lock 0 removes ours only.
+_DBT_DEAD_PROXY="http://127.0.0.1:9"
+_dbt_push_lock_proxy() {   # <lock 1|0> <host>
+  local LOCK="$1" H="$2" U
+  local -a V
+  for U in "https://$H" "http://$H"; do
+    mapfile -t V < <(git config --global --get-all "http.$U.proxy" 2>/dev/null)
+    if [ "$LOCK" = 1 ] && [ "${#V[@]}" -ge 1 ] && [ "${V[${#V[@]}-1]}" = "$_DBT_DEAD_PROXY" ]; then continue; fi
+    git config --global --fixed-value --unset-all "http.$U.proxy" "$_DBT_DEAD_PROXY" 2>/dev/null || true
+    [ "$LOCK" = 1 ] && git config --global --add "http.$U.proxy" "$_DBT_DEAD_PROXY"
+  done
+  return 0
+}
+
+# Layer (b), second line: credential.https://HOST.helper and credential.http://HOST.helper = "" (forget the
+# helpers configured before), then the quitter. Lock 0 removes them (ours only: the quitters, the empty resets).
 _dbt_push_lock_https() {   # <lock 1|0> <host>
   local LOCK="$1" H="$2" U Q
   local -a V
@@ -424,9 +449,20 @@ _dbt_push_lock_https() {   # <lock 1|0> <host>
   return 0
 }
 
-_dbt_ssh_guard() { printf '%s' "$DBT_WS/.devcontainer/git-ssh-garde.sh"; }
+# The ssh push guard: template-owned in the worktree (.devcontainer/git-ssh-garde.sh), run from its copy
+# in the container's home — a `git checkout` of an older commit (just lock-checkout) cannot take it away.
+_dbt_ssh_guard_src() { printf '%s' "$DBT_WS/.devcontainer/git-ssh-garde.sh"; }
+_dbt_ssh_guard() { printf '%s' "$HOME/.local/libexec/git-ssh-garde.sh"; }
+# Put the copy back (only when it differs; atomically: a git running meanwhile sees the old or the new one)
+_dbt_ssh_guard_install() {
+  local S D
+  S="$(_dbt_ssh_guard_src)"; D="$(_dbt_ssh_guard)"
+  [ -f "$S" ] || { [ -f "$D" ]; return; }
+  cmp -s "$S" "$D" && return 0
+  mkdir -p "${D%/*}" && cp "$S" "$D.tmp.$$" && chmod 0755 "$D.tmp.$$" && mv -f "$D.tmp.$$" "$D"
+}
 
-# Layer (a): core.sshCommand = bash <git-ssh-garde.sh> --hosts=<h1,h2> [-o "UserKnownHostsFile=…"].
+# Layer (a): core.sshCommand = bash ~/.local/libexec/git-ssh-garde.sh --hosts=<h1,h2> [-o "UserKnownHostsFile=…"].
 # One command for every upstream host: the hosts it already guards stay (like the pushInsteadOf of a
 # host no longer declared); lock 0 takes these hosts out, and with none left the pinned keys come back
 # alone. A core.sshCommand customised by hand is never overwritten: said, the other layers still hold.
@@ -434,6 +470,11 @@ _dbt_push_lock_ssh() {   # <lock 1|0> <host>…
   local LOCK="$1" KH G CUR HAVE="" WANT="" H CMD
   shift
   KH="$(_dbt_known_hosts)"; G="$(_dbt_ssh_guard)"
+  if [ "$LOCK" = 1 ] && ! _dbt_ssh_guard_install; then
+    echo "  WARNING: the ssh push guard cannot be installed (.devcontainer/git-ssh-garde.sh missing? copier update)"
+    echo "           — pushInsteadOf, the dead proxy and the https quitter still hold"
+    return 0
+  fi
   CUR="$(git config --global --get core.sshCommand 2>/dev/null || true)"
   case "$CUR" in
     *git-ssh-garde.sh*) HAVE="$(printf '%s' "$CUR" | sed -n 's/.*--hosts=\([^ ]*\).*/\1/p' | tr ',' ' ')" ;;
@@ -458,7 +499,7 @@ _dbt_push_lock_ssh() {   # <lock 1|0> <host>…
     CMD="bash $(printf '%q' "$G") --hosts=${WANT// /,}"
     [ -s "$KH" ] && CMD="$CMD -o \"UserKnownHostsFile=$KH $HOME/.ssh/known_hosts\""
     [ "$CUR" = "$CMD" ] || git config --global core.sshCommand "$CMD"
-    echo "  ssh push guard on $WANT (core.sshCommand = .devcontainer/git-ssh-garde.sh: reads only)"
+    echo "  ssh push guard on $WANT (core.sshCommand = ~/.local/libexec/git-ssh-garde.sh: reads only)"
   elif [ -n "$HAVE" ]; then
     if [ -s "$KH" ]; then git config --global core.sshCommand "ssh -o \"UserKnownHostsFile=$KH $HOME/.ssh/known_hosts\""
     else git config --global --unset-all core.sshCommand 2>/dev/null || true; fi
