@@ -77,6 +77,12 @@ DBT_TARGET_NAME="{{ dbt_target_name }}"
 # v4/ and global-v4/ write under their own prefix, <DBT_BQ_DATASET_PREFIX>_<x>
 # (profiles/v4.env is generated from profiles/dbt.env with it); the guard
 # requires it there and refuses it everywhere else. Empty = no v4 space.
+# A FLUX — a working copy where v4 work runs in parallel with this one — is
+# declared OUTSIDE this file: .devcontainer/flux.conf, one line
+# DBT_V4_FLUX=<A999> (a capital letter, three digits), ignored by git. Its v4/
+# and global-v4/ then write under <DBT_BQ_DATASET_PREFIX_V4>_<A999> only
+# (profiles/v4-<A999>.env), its v1/v2/global build nothing, and this copy never
+# writes there. Never set DBT_V4_FLUX here: every dbt command would be refused.
 DBT_V4_PRODUCTS=""
 DBT_BQ_DATASET_PREFIX_V4=""
 {%- endif %}

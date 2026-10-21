@@ -1355,6 +1355,219 @@ check "alpha publiée (dépôt origin) : v4/alpha/ suit origin/alpha/v4" test "$
 check "…verrous de push toujours inchangés" test "$(git config --global --get-all url.DISABLED://.pushInsteadOf | sort)" = "$LOCKS_BEFORE"
 git config --global --unset-all url."file://$W/gh/".insteadOf
 
+echo "== flux : la déclaration (.devcontainer/flux.conf), lue du fichier seul =="
+# un flux = une copie de travail de la flotte dont la v4 écrit sous JDOE_V4_<FLUX> ; ici, FW joue cette copie
+FLUXF="$FW/.devcontainer/flux.conf"
+FLUX() { printf '%b' "$1" > "$FLUXF"; }
+NOFLUX() { rm -rf "$FLUXF"; }
+LIBF() { ( cd "$FW" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && "$@"' _ "$@" ) 2>&1; }
+cp "$FW/.gitignore" "$W/gitignore-avant-flux"
+printf '/.devcontainer/flux.conf\n/profiles/v4-*.env\n' >> "$FW/.gitignore"
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4 ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4.env" ] \
+  && pass "sans flux.conf : l'espace v4 principal (JDOE_V4, profiles/v4.env)" || bad "sans flux ($(LIBF dbt_v4_prefix))"
+O="$(DBT_V4_FLUX=D006 FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "DBT_V4_FLUX exporté par le shell : ignoré (le fichier seul déclare un flux)" || bad "flux pris de l'environnement ($O)"
+FLUX '# flux de D005\n\nDBT_V4_FLUX=D005\n'
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4_D005 ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4-D005.env" ] \
+  && pass "flux.conf (commentaire, ligne vide, DBT_V4_FLUX=D005) : JDOE_V4_D005, profiles/v4-D005.env" || bad "flux D005 ($(LIBF dbt_v4_prefix))"
+O="$(DBT_V4_FLUX=D006 LIBF dbt_v4_prefix)"; [ "$O" = JDOE_V4_D005 ] && pass "…et un DBT_V4_FLUX exporté ne le change pas" || bad "flux exporté l'emporte ($O)"
+# refusenv NOM CONTENU — une déclaration à laquelle on ne peut pas se fier : toute commande dbt refusée, v2 comprise
+refusenv() {
+  FLUX "$2"
+  O="$(FRUN v2 delta parse)"; local O4; O4="$(FRUN v4 delta parse)"
+  if has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && has "$O4" "cannot be trusted" && ! has "$O4" "ARGS="; then
+    pass "flux.conf refusé ($1) : toute commande dbt refusée, v2 comprise"
+  else bad "flux.conf accepté : $1 ($O | $O4)"; fi
+}
+refusenv "minuscule d005"            'DBT_V4_FLUX=d005\n'
+refusenv "nom d'un paquet (DWH)"     'DBT_V4_FLUX=DWH\n'
+refusenv "DWH_REF"                   'DBT_V4_FLUX=DWH_REF\n'
+refusenv "deux chiffres"             'DBT_V4_FLUX=D05\n'
+refusenv "quatre chiffres"           'DBT_V4_FLUX=D0050\n'
+refusenv "lettre accentuée"          'DBT_V4_FLUX=É005\n'
+refusenv "entre guillemets"          'DBT_V4_FLUX="D005"\n'
+refusenv "export"                    'export DBT_V4_FLUX=D005\n'
+refusenv "espace en tête"            ' DBT_V4_FLUX=D005\n'
+refusenv "commentaire en fin"        'DBT_V4_FLUX=D005 # x\n'
+refusenv "CRLF"                      'DBT_V4_FLUX=D005\r\n'
+refusenv "deux déclarations"         'DBT_V4_FLUX=D005\nDBT_V4_FLUX=D006\n'
+refusenv "la même deux fois"         'DBT_V4_FLUX=D005\nDBT_V4_FLUX=D005\n'
+refusenv "une autre variable"        'DBT_V4_FLUX=D005\nDATASET_PREFIX=JDOE_V4\n'
+refusenv "fichier vide"              ''
+refusenv "commentaires seuls"        '# rien\n'
+FLUX 'DBT_V4_FLUX=D005\n'; mv "$FLUXF" "$W/flux-cible.conf"; ln -s "$W/flux-cible.conf" "$FLUXF"
+O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "flux.conf refusé (un lien, même vers une déclaration valide)" || bad "flux.conf lien ($O)"
+NOFLUX; mkdir "$FLUXF"
+O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && pass "flux.conf refusé (un dossier)" || bad "flux.conf dossier ($O)"
+NOFLUX
+echo 'DBT_V4_FLUX="D005"' >> "$FW/.devcontainer/dbt.conf"
+O="$(FRUN v4 delta parse)"; has "$O" "set in .devcontainer/dbt.conf" && ! has "$O" "ARGS=" && pass "DBT_V4_FLUX dans dbt.conf (committé) : refusé, jamais un flux" || bad "flux de dbt.conf ($O)"
+sed -i '/^DBT_V4_FLUX=/d' "$FW/.devcontainer/dbt.conf"
+FLUX 'DBT_V4_FLUX=D005\n'
+cp "$W/gitignore-avant-flux" "$FW/.gitignore"
+O="$(FRUN v4 delta parse)"; has "$O" ".devcontainer/flux.conf is not ignored by git" && ! has "$O" "ARGS=" && pass "flux.conf non ignoré par git : refusé (git add -A le committerait)" || bad "flux non ignoré ($O)"
+printf '/.devcontainer/flux.conf\n' >> "$FW/.gitignore"
+O="$(FRUN v4 delta parse)"; has "$O" "profiles/v4-D005.env is not ignored by git" && pass "…profiles/v4-D005.env non ignoré : refusé aussi" || bad "env du flux non ignoré ($O)"
+printf '/profiles/v4-*.env\n' >> "$FW/.gitignore"
+git -C "$FW" add -f .devcontainer/flux.conf
+O="$(FRUN v4 delta parse)"; has "$O" ".devcontainer/flux.conf is tracked by git" && ! has "$O" "ARGS=" && pass "flux.conf suivi par git (git add -f) : refusé" || bad "flux suivi ($O)"
+git -C "$FW" rm -q --cached .devcontainer/flux.conf
+printf 'DBT_V4_FLUX=D005\n' > "$WS/.devcontainer/flux.conf"
+O="$(RUN v2 parse)"; has "$O" "a flux exists in a fleet only" && ! has "$O" "ARGS=" && pass "flux.conf dans un projet seul (pas de flotte) : refusé" || bad "flux hors flotte ($O)"
+O="$( (cd "$WS" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ .devcontainer/flux.conf in a single-product workspace" && pass "…et doctor le dit" || bad "doctor flux hors flotte ($(grep -A2 '\[flux' <<<"$O"))"
+rm -f "$WS/.devcontainer/flux.conf"
+
+echo "== flux : just setup — profiles/v4-<FLUX>.env, les .env de la v4 et de global-v4 =="
+mkdir -p "$FW/global-v4"; printf 'name: fleet_global_v4\nprofile: "prof_global"\n' > "$FW/global-v4/dbt_project.yml"
+SUM4="$(sha256sum < "$FW/profiles/v4.env")"
+O="$(life "$FW" start)"
+check "profiles/v4-D005.env : DATASET_PREFIX=JDOE_V4_D005" grep -qx 'DATASET_PREFIX=JDOE_V4_D005' "$FW/profiles/v4-D005.env"
+check "…et sinon profiles/dbt.env à l'identique (généré)" diff <(tail -n +3 "$FW/profiles/v4-D005.env") <(sed 's/^DATASET_PREFIX=.*/DATASET_PREFIX=JDOE_V4_D005/' "$FW/profiles/dbt.env")
+[ "$(sha256sum < "$FW/profiles/v4.env")" = "$SUM4" ] && pass "…profiles/v4.env (l'espace principal, committé) inchangé" || bad "v4.env réécrit dans un flux"
+for P in v4/delta/dbt v4/rho/dbt global-v4; do
+  check ".env de $P -> profiles/v4-D005.env" test "$(readlink -f "$FW/$P/.env")" = "$(readlink -f "$FW/profiles/v4-D005.env")"
+done
+check ".env de v2/delta : toujours profiles/dbt.env" test "$(readlink -f "$FW/v2/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/dbt.env")"
+check "réglages de la fenêtre v4/delta : envFile du flux" python3 -c "import json; d=json.load(open('$FW/v4/delta/.vscode/settings.json')); assert d['python.envFile'].endswith('profiles/v4-D005.env')"
+check "git ne voit ni flux.conf ni profiles/v4-D005.env (ignorés)" test -z "$(git -C "$FW" status --porcelain --ignored=no -- .devcontainer/flux.conf profiles/v4-D005.env)"
+
+echo "== flux : le garde-fou — la v4 et global-v4 sous JDOE_V4_D005 seulement, rien ailleurs =="
+O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "just v4 delta → DATASET_PREFIX=JDOE_V4_D005" || bad "v4 delta dans le flux ($O)"
+O="$(FRUN global-v4 parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "just global-v4 → DATASET_PREFIX=JDOE_V4_D005" || bad "global-v4 dans le flux ($O)"
+O="$(CWD="$FW/v4/delta/dbt" FRUN auto parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "\`dbt\` dans v4/delta/ du flux → même espace" || bad "auto v4 flux ($O)"
+O="$(DATASET_PREFIX=JDOE_V4 FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "…même avec DATASET_PREFIX=JDOE_V4 exporté par le shell" || bad "préfixe exporté dans le flux ($O)"
+for X in JDOE_V4_D005_DELTA__X JDOE_V4_D005 JDOE_V4_d005_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "flux : écriture v4 sous $X acceptée" || bad "flux : $X refusé ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4 JDOE_V4_D006_DELTA__X JDOE_V4_D006 JDOE_V4_D005X JDOE_V4_D0050_X JDOE_DELTA__X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "flux D005" && ! has "$O" "ARGS=" && pass "flux : écriture v4 sous $X refusée (l'espace principal, un autre flux, une borne, la v2)" || bad "flux : $X accepté ($O)"
+done
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "outside the sandbox" && ! has "$O" "ARGS=" && pass "flux : global-v4 sous l'espace principal refusé" || bad "global-v4 flux vers principal ($O)"
+FJ JDOE_V4_D005_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "all inside the sandbox" && pass "flux : global-v4 sous JDOE_V4_D005_* accepté" || bad "global-v4 flux ($O)"
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+for C in "v2 delta run -s a" "v1 delta run -s a" "global run -s a" "v2 delta seed -s a" "v2 delta test" "v2 delta docs generate" "v2 delta run-operation m" "v2 delta source freshness"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" DBT_ALLOW_RUN_OPERATION=1 FRUN $C)"
+  has "$O" "a flux writes only its v4 space" && ! has "$O" "ARGS=" && pass "flux : \`$C\` refusé (v1/v2/global n'écrivent rien depuis un flux)" || bad "flux : $C accepté ($O)"
+done
+for C in "v2 delta parse" "v2 delta compile" "v1 delta parse"; do
+  # shellcheck disable=SC2086
+  O="$(FRUN $C)"; has "$O" "ARGS=${C##* }" && ! has "$O" "⛔" && pass "flux : \`$C\` accepté (lecture)" || bad "flux : $C refusé ($O)"
+done
+O="$(FRUN global parse)"; has "$O" "ARGS=parse" && pass "flux : \`global parse\` accepté (lecture)" || bad "flux : global parse refusé ($O)"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta ls)"; has "$O" "JDOE_DELTA__X" && ! has "$O" "⛔" && pass "flux : \`v2 delta ls\` accepté (lecture)" || bad "flux : v2 ls refusé ($O)"
+printf 'DATASET_PREFIX=JDOE_V4\n' > "$FW/profiles/env/delta.env"
+O="$(FRUN v4 delta parse)"; has "$O" "the v4 space is JDOE_V4_D005" && pass "flux : fichier d'env du produit qui repose JDOE_V4 → refusé" || bad "env produit dans le flux ($O)"
+rm -f "$FW/profiles/env/delta.env"
+ln -sfn ../../../profiles/v4.env "$FW/v4/delta/dbt/.env"
+O="$(FRUN v4 delta parse)"; has "$O" "does not point to profiles/v4-D005.env" && pass "flux : .env de v4/delta vers profiles/v4.env (l'espace principal) → refusé" || bad ".env v4 principal dans le flux ($O)"
+ln -sfn ../../../profiles/v4-D005.env "$FW/v4/delta/dbt/.env"
+ln -sfn ../../../profiles/v4-D005.env "$FW/v2/delta/dbt/.env"
+O="$(FRUN v2 delta parse)"; has "$O" "points to profiles/v4-D005.env" && pass "flux : .env de v2/delta vers profiles/v4-D005.env → refusé" || bad ".env v2 vers le flux ($O)"
+ln -sfn ../../../profiles/dbt.env "$FW/v2/delta/dbt/.env"
+cp "$FW/profiles/v4-D005.env" "$W/v4-D005.env"; sed -i 's/^DATASET_PREFIX=.*/DATASET_PREFIX=JDOE_V4/' "$FW/profiles/v4-D005.env"
+O="$(FRUN v4 delta parse)"; has "$O" "the v4 space is JDOE_V4_D005" && pass "flux : profiles/v4-D005.env retouché (JDOE_V4) → refusé" || bad "env du flux retouché ($O)"
+rm -f "$FW/profiles/v4-D005.env"
+O="$(FRUN v4 delta parse)"; has "$O" "profiles/v4-D005.env is missing" && pass "flux : profiles/v4-D005.env absent → refusé" || bad "env du flux absent ($O)"
+cp "$W/v4-D005.env" "$FW/profiles/v4-D005.env"
+O="$(FRUN hooks-approve)"; has "$O" "approve them there, never from a flux" && pass "flux : hooks-approve refusé (la liste approuvée est celle de la copie principale)" || bad "hooks-approve dans un flux ($O)"
+
+echo "== flux : un nom de flux qui se lirait comme un paquet de l'espace v4 =="
+mkdir -p "$FW/global-v4/dbt_packages/d005_utils"
+O="$(FRUN v4 delta parse)"; has "$O" "flux D005 reads as a package of the v4 space (d005_utils)" && ! has "$O" "ARGS=" && pass "paquet d005_utils dans global-v4 : le flux D005 est refusé" || bad "collision nom de paquet ($O)"
+rmdir "$FW/global-v4/dbt_packages/d005_utils"; mkdir -p "$FW/global-v4/dbt_packages/d0050"
+O="$(FRUN v4 delta parse)"; has "$O" "PFX=JDOE_V4_D005" && pass "…d0050 ne se lit pas comme D005 (borne « _ ») : accepté" || bad "borne du nom de paquet ($O)"
+rmdir "$FW/global-v4/dbt_packages/d0050"; rmdir "$FW/global-v4/dbt_packages" 2>/dev/null
+
+echo "== flux : la copie principale n'écrit jamais l'espace d'un flux =="
+NOFLUX; life "$FW" start >/dev/null
+for X in JDOE_V4_D005_DELTA__X JDOE_V4_D005 JDOE_V4_s001_x JDOE_V4_Z999; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "never a flux's" && ! has "$O" "ARGS=" && pass "principal : écriture v4 sous $X (l'espace d'un flux) refusée" || bad "principal : $X accepté ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4_DWH_X JDOE_V4_D05_X JDOE_V4_D0050_X JDOE_V4_DD005; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && pass "principal : écriture v4 sous $X acceptée (pas la forme d'un flux)" || bad "principal : $X refusé ($O)"
+done
+FJ JDOE_V4_D005_X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "never JDOE_V4" && pass "v2 sous JDOE_V4_D005_* : refusé (l'espace v4, flux compris)" || bad "v2 vers un flux ($O)"
+FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null; NOFLUX
+O="$(life "$FW" start)"
+check "flux retiré, just setup : .env de v4/delta -> profiles/v4.env de nouveau" test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+check "…et global-v4/.env aussi" test "$(readlink -f "$FW/global-v4/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+
+echo "== flux : destinations dans un flux =="
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__JDOE_RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_DELTA__RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v2.jsonl"
+cp "$W/stubs/dbt-cwd" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-cwd" "$DBT_BIN_DIR/dbt"
+FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null
+O="$(FRUN destinations delta)"
+has "$O" "[delta] v2 vs v4: 0 node(s) written elsewhere" && pass "destinations delta (flux) : v2 vs v4, préfixe du flux ignoré" || bad "v2 vs v4 flux ($O)"
+has "$O" "[delta] v4: every node in the v4 space (sandbox-prj, JDOE_V4_D005 / JDOE_V4_D005_*, flux D005)" && pass "…tout nœud de la v4 dans l'espace du flux" || bad "espace du flux ($O)"
+printf '%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
+O="$(FRUN destinations delta)"; has "$O" "1 node(s) OUTSIDE the v4 space (JDOE_V4_D005_*, flux D005)" && pass "…un nœud sous l'espace principal : hors de l'espace du flux" || bad "hors espace flux ($O)"
+cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
+
+echo "== flux : la preuve des hooks de global-v4 vaut pour un flux, et pour lui seul =="
+G="$FW/global-v4"; mkdir -p "$G/macros" "$G/dbt_packages" "$FW/docs"
+printf 'name: fleet_global_v4\nprofile: "prof_global"\non-run-start: ["select 1"]\n' > "$G/dbt_project.yml"
+printf 'packages:\n  - local: ../v4/delta/dbt\n' > "$G/packages.yml"
+printf 'packages:\n- local: ../v4/delta/dbt\n  name: delta\nsha1_hash: 0\n' > "$G/package-lock.yml"
+ln -sfn ../../v4/delta/dbt "$G/dbt_packages/delta"
+printf 'DBT_HOOKS_COMPILE_OK="global-v4"\nDBT_HOOKS_V4_PROOF="docs/hooks-v4.md"\n' >> "$FW/.devcontainer/dbt.conf"
+VLINE() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${2:+ FLUX $2}" "$1" > "$FW/docs/hooks-v4.md"; }
+NOFLUX; SM="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D005\n'; S5="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D006\n'; S6="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D005\n'
+[[ "$S5" =~ ^[0-9a-f]{20}$ ]] && [ "$S5" != "$SM" ] && [ "$S5" != "$S6" ] && pass "sceau : un par flux (principal $SM, D005 $S5, D006 $S6)" || bad "sceaux ($SM $S5 $S6)"
+[ "$(LIBF dbt_hooks_v4_verdict_line abc D005)" = "VERDICT HOOKS GLOBAL-V4 FLUX D005 : PREUVE OK ; TÉMOINS OK ; sceau abc" ] && pass "ligne de verdict d'un flux : « VERDICT HOOKS GLOBAL-V4 FLUX D005 : … »" || bad "ligne de verdict ($(LIBF dbt_hooks_v4_verdict_line abc D005))"
+VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $S5, docs/hooks-v4.md, flux D005" && pass "flux D005, preuve du flux D005 : compile accepté, et dit pourquoi" || bad "preuve du flux ($O)"
+VLINE "$S5"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict sans « FLUX D005 » (celui de la copie principale), même au sceau du flux : refusé" || bad "verdict principal dans le flux ($O)"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la copie principale : refusée dans le flux" || bad "preuve principale dans le flux ($O)"
+VLINE "$S5" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict d'un autre flux (D006) au sceau de D005 : refusé" || bad "verdict d'un autre flux ($O)"
+VLINE "$S6" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D006 : refusée dans D005" || bad "preuve d'un autre flux ($O)"
+VLINE "$S5" D005
+cp "$FW/profiles/v4.env" "$W/v4-env-sauve"; echo "ELEMENTARY=1" >> "$FW/profiles/v4.env"
+[ "$(SEAL)" = "$S5" ] && pass "sceau du flux : indépendant de profiles/v4.env (l'environnement principal, que le flux ne lit pas)" || bad "sceau du flux et v4.env"
+cp "$W/v4-env-sauve" "$FW/profiles/v4.env"
+echo "ELEMENTARY=1" >> "$FW/profiles/v4-D005.env"
+O="$(FRUN global-v4 compile)"; [ "$(SEAL)" != "$S5" ] && has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…profiles/v4-D005.env retouché : sceau changé, compile refusé" || bad "env du flux hors du sceau ($O)"
+cp "$W/v4-D005.env" "$FW/profiles/v4-D005.env"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (seal $S5, docs/hooks-v4.md, flux D005)" && pass "doctor : preuve du flux valable, dite" || bad "doctor preuve flux ($(grep global-v4 <<<"$O"))"
+has "$O" "✅ flux D005 (.devcontainer/flux.conf)" && has "$O" "✅ profiles/v4-D005.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_D005" && pass "doctor : le flux, son environnement" || bad "doctor flux ($(grep -i flux <<<"$O"))"
+has "$O" "✅ v4/delta/: .env -> profiles/v4-D005.env" && has "$O" "✅ global-v4/.env -> profiles/v4-D005.env" && pass "doctor : .env de la v4 et de global-v4 sur l'environnement du flux" || bad "doctor .env flux ($(grep '\.env' <<<"$O"))"
+NOFLUX; life "$FW" start >/dev/null
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "flux retiré : la preuve du flux D005 ne vaut pas pour la copie principale" || bad "preuve du flux hors du flux ($O)"
+[ "$(SEAL)" = "$SM" ] && pass "…et le sceau principal est celui d'avant le flux" || bad "sceau principal changé"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "…sa propre preuve : compile accepté" || bad "preuve principale ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ no flux (.devcontainer/flux.conf absent)" && pass "doctor : pas de flux, dit" || bad "doctor sans flux ($(grep -i flux <<<"$O"))"
+FLUX 'DBT_V4_FLUX=d005\n'; [ -z "$(SEAL)" ] && pass "flux.conf invalide : pas de sceau" || bad "sceau sous un flux invalide"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ flux: .devcontainer/flux.conf is not a regular file holding one line" && pass "doctor : déclaration refusée, signalée" || bad "doctor flux invalide ($(grep -i flux <<<"$O"))"
+O="$(life "$FW" start)"
+check "déclaration refusée, just setup : plus de .env dans v4/delta (aucun espace v4 lu par l'extension)" test ! -e "$FW/v4/delta/dbt/.env" -a ! -L "$FW/v4/delta/dbt/.env"
+check "…ni dans global-v4/" test ! -e "$FW/global-v4/.env" -a ! -L "$FW/global-v4/.env"
+has "$O" "WARNING: flux" && pass "…et dit" || bad "retrait silencieux"
+VLINE "$SM" D005
+LIBF dbt_hooks_v4_verdict "$FW/docs/hooks-v4.md" "$SM" D005 >/dev/null && ! LIBF dbt_hooks_v4_verdict "$FW/docs/hooks-v4.md" "$SM" 'D00.' >/dev/null \
+  && pass "dbt_hooks_v4_verdict : un nom de flux mal formé (D00., un motif qui couvrirait D005) ne vaut rien" || bad "verdict flux mal formé"
+NOFLUX; life "$FW" start >/dev/null
+sed -i -e '/^DBT_HOOKS_COMPILE_OK=/d' -e '/^DBT_HOOKS_V4_PROOF=/d' "$FW/.devcontainer/dbt.conf"
+rm -rf "$FW/docs" "$FW/global-v4"
+
+echo "== flux : \`dbt\` dans la copie de travail d'un autre espace (un flux) =="
+AW="$W/copie-flux"; mkdir -p "$AW/.devcontainer" "$AW/v4/delta/dbt/models"
+cp "$FW/.devcontainer/dbt-run.sh" "$FW/.devcontainer/lib-dbt.sh" "$AW/.devcontainer/"; printf 'DBT_V4_FLUX=D007\n' > "$AW/.devcontainer/flux.conf"
+printf 'name: delta\n' > "$AW/v4/delta/dbt/dbt_project.yml"
+O="$(CWD="$AW/v4/delta/dbt/models" FRUN auto run -s a)"; has "$O" "a dbt project of another workspace ($AW, a flux)" && ! has "$O" "ARGS=" && pass "\`dbt\` dans le projet d'une copie de flux : refusé, jamais dbt v2 brut" || bad "copie de flux lancée en brut ($O)"
+O="$(CWD="$AW" FRUN auto --version)"; has "$O" "dbt 2.0.0" && pass "…à la racine de cette copie, hors de tout projet : dbt v2 nu, comme avant" || bad "auto racine d'une copie ($O)"
+mkdir -p "$W/libre/m"; printf 'name: libre\n' > "$W/libre/dbt_project.yml"
+O="$(CWD="$W/libre/m" FRUN auto parse)"; has "$O" "ARGS=parse" && pass "un projet dbt hors de tout espace de travail : inchangé (dbt v2 nu)" || bad "projet libre ($O)"
+rm -rf "$AW" "$W/libre"
+cp "$W/gitignore-avant-flux" "$FW/.gitignore"
+
 echo "== Paquets v1 incomplets : deps relancé au create =="
 DP="$WS/v1/dbt"; DEPS() { ( cd "$WS" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_v1_deps' ) 2>&1; }
 printf 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n  - git: "https://git.example.com/p.git"\n' > "$DP/packages.yml"

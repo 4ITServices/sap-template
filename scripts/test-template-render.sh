@@ -276,6 +276,10 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
   grep -q 'dbt_workspace' "$D/.copier-answers.yml" && bad "FLEET: la variable calculée dbt_workspace est enregistrée" || pass "FLEET: dbt_workspace (calculée) absente des réponses"
   grep -q 'just product-add' "$D/justfile" && grep -q '^v1 product \*args:' "$D/justfile" && pass "FLEET: justfile de flotte (product-add, v1 <produit>)" || bad "FLEET: justfile de flotte inattendu"
   grep -q 'dbt-fleet' "$D/CLAUDE.md" && grep -q 'global/' "$D/CLAUDE.md" && pass "FLEET: CLAUDE.md de flotte" || bad "FLEET: CLAUDE.md inattendu"
+  grep -qxF '/.devcontainer/flux.conf' "$D/.gitignore" && grep -qxF '/profiles/v4-*.env' "$D/.gitignore" \
+    && pass "FLEET: .gitignore ignore la déclaration d'un flux et son environnement" || bad "FLEET: .gitignore n'ignore pas le flux"
+  grep -q 'A FLUX' "$D/.devcontainer/dbt.conf" && ! grep -q '^[[:space:]]*DBT_V4_FLUX=' "$D/.devcontainer/dbt.conf" \
+    && pass "FLEET: dbt.conf documente le flux sans en déclarer (jamais dans dbt.conf)" || bad "FLEET: dbt.conf et le flux"
   sh_ok=1
   for f in "$D"/.devcontainer/*.sh; do bash -n "$f" 2>/dev/null || { bad "FLEET: erreur de syntaxe dans ${f#"$D"/}"; sh_ok=0; }; done
   [ "$sh_ok" -eq 1 ] && pass "FLEET: tous les scripts passent bash -n"
@@ -289,6 +293,7 @@ grep -q 'dbt_workspace' "$WORK/off/.copier-answers.yml" && bad "OFF: dbt_workspa
 for leak in .devcontainer/products.conf global; do
   [ -e "$WORK/dbt/$leak" ] && bad "DBT: $leak (flotte) ne devrait PAS exister en dbt-project" || pass "DBT: pas de $leak"
 done
+grep -qF 'flux' "$WORK/dbt/.gitignore" && bad "DBT: le flux (flotte) ne devrait pas être dans le .gitignore d'un projet seul" || pass "DBT: pas de flux dans le .gitignore d'un projet seul"
 
 echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
 for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/dbt.conf \

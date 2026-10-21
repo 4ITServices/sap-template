@@ -246,9 +246,16 @@ for N in $(dbt_members); do
       if P="$(dbt_project_dir "$V")"; then
         ok "$(label "$V") dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
         if [ "$V" = v4 ]; then
-          [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$WS/profiles/v4.env")" ] \
-            && ok "$SHOW: .env -> profiles/v4.env (the dbt extension stays in the v4 space)" \
-            || ko "$SHOW: .env does not point to profiles/v4.env" "just setup — until then the dbt extension would read another space there"
+          E4="$(dbt_v4_env_file)"
+          if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+            [ -e "$P/.env" ] || [ -L "$P/.env" ] \
+              && ko "$SHOW: a .env while the flux declaration is refused" "just setup removes it (the dbt extension would read a space nobody vouches for)" \
+              || ok "$SHOW: no .env while the flux declaration is refused (the dbt extension reads no v4 space)"
+          else
+            [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$E4")" ] \
+              && ok "$SHOW: .env -> ${E4#"$WS"/} (the dbt extension stays in the v4 space${DBT_V4_FLUX:+ of flux $DBT_V4_FLUX})" \
+              || ko "$SHOW: .env does not point to ${E4#"$WS"/}" "just setup — until then the dbt extension would read another space there"
+          fi
         fi
       else
         ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
@@ -335,8 +342,14 @@ else
 fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
-# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf) or a v4 prefix is set
-if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)" ]; then
+# a flux declared where there is no fleet: refused, and said (a fleet says it in its v4 section)
+if ! dbt_is_fleet && [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+  echo "[flux]"
+  ko "$DBT_V4_FLUX_ERR" "remove .devcontainer/flux.conf — until then every dbt command is refused"
+fi
+
+# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf), a v4 prefix is set, or a flux
+if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)${DBT_V4_FLUX_ERR:-}" ]; then
   echo "[v4 space — datasets of its own]"
   if _dbt_v4_prefix_ok; then
     ok "write guard v4: v4/ and global-v4/ write under $DBT_BQ_DATASET_PREFIX_V4 / ${DBT_BQ_DATASET_PREFIX_V4}_* only — and nothing else writes there"
@@ -354,22 +367,44 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
     _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}' \
       || ko "DBT_V4_PRODUCTS names '$N', which is not in products.conf" "fix DBT_V4_PRODUCTS in .devcontainer/dbt.conf"
   done
-  # the reverse: no project outside the v4 space reads the v4's env
-  E4="$(readlink -f "$WS/profiles/v4.env")"; LEAK=""
+  # the flux of this working copy (lib-dbt.sh, "a flux"): none (the main copy), a sound one, or one that refuses all
+  FPB="$(dbt_v4_flux_problem)"
+  if [ -n "$FPB" ]; then
+    while IFS= read -r L; do
+      ko "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: $L" "fix .devcontainer/flux.conf (one line DBT_V4_FLUX=<A999>, ignored by git) or remove it — until then every dbt command is refused"
+    done <<< "$FPB"
+  elif [ -n "${DBT_V4_FLUX:-}" ]; then
+    ok "flux $DBT_V4_FLUX (.devcontainer/flux.conf): v4/ and global-v4/ write under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* only — never the main v4 space nor another flux's; v1/, v2/ and global/ build nothing here"
+    E4F="$(dbt_v4_env_file)"
+    if [ -f "$WS/profiles/dbt.env" ] && cmp -s <(_dbt_v4_env_render "$DBT_V4_FLUX") "$E4F"; then
+      ok "${E4F#"$WS"/} = profiles/dbt.env with DATASET_PREFIX=$(dbt_v4_prefix) (generated, ignored by git)"
+    else
+      ko "${E4F#"$WS"/} missing or stale" "just setup (never commit it)"
+    fi
+  elif _dbt_v4_prefix_ok; then
+    ok "no flux (.devcontainer/flux.conf absent): the main v4 space — a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999> / ${DBT_BQ_DATASET_PREFIX_V4}_<A999>_*, is never written from here"
+  fi
+  # the reverse: no project outside the v4 space reads an env of the v4 space (profiles/v4.env, profiles/v4-<flux>.env)
+  E4="$(readlink -f "$(dbt_v4_env_file)")"; LEAK=""
   for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     for V in $(dbt_versions); do
       [ "$V" = v4 ] && continue
       P="$(dbt_project_dir "$V")" || continue
-      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK ${P#"$WS"/}"
+      _dbt_is_v4_env "$P/.env" && LEAK="$LEAK ${P#"$WS"/}"
     done
   done
-  P="$(dbt_project_dir global)" && [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK global"
-  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env" \
-    || ko "these .env point to profiles/v4.env:$LEAK" "point them back to their env file (or remove them), then: just setup"
+  P="$(dbt_project_dir global)" && _dbt_is_v4_env "$P/.env" && LEAK="$LEAK global"
+  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env$( [ -n "${DBT_V4_FLUX:-}" ] && echo " nor profiles/v4-$DBT_V4_FLUX.env")" \
+    || ko "these .env point to an env of the v4 space (profiles/v4.env, profiles/v4-<flux>.env):$LEAK" "point them back to their env file (or remove them), then: just setup"
   if P="$(dbt_project_dir global-v4)"; then
-    [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> profiles/v4.env" \
-      || ko "global-v4/.env does not point to profiles/v4.env" "just setup"
+    if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+      [ -e "$P/.env" ] || [ -L "$P/.env" ] && ko "global-v4/.env present while the flux declaration is refused" "just setup removes it" \
+        || ok "global-v4/: no .env while the flux declaration is refused"
+    else
+      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> ${E4#"$(readlink -f "$WS")"/}" \
+        || ko "global-v4/.env does not point to $(dbt_v4_env_file | sed "s|^$WS/||")" "just setup"
+    fi
   fi
 fi
 
@@ -396,10 +431,10 @@ check_hooks() {   # check_hooks V PROJECT_DIR
           ko "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF names no proof: compile/show refused" "DBT_HOOKS_V4_PROOF in .devcontainer/dbt.conf"
         elif ! S="$(cd "$WS" && dbt_hooks_v4_seal)"; then
           ko "global-v4: its hooks cannot be sealed — compile/show refused" "$(dbt_just_cmd "$V") deps, then prove its hooks again"
-        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S"; then
-          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
+        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}"; then
+          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
         else
-          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) — compile/show refused" "prove its hooks again"
+          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) — compile/show refused" "prove its hooks again${DBT_V4_FLUX:+ in this flux (its verdict line names it: « $(dbt_hooks_v4_verdict_line '<hex>' "$DBT_V4_FLUX") »)}"
         fi ;;
       *) info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name $N for compile/show$([ "$N" = global-v4 ] && echo ', under a proof of its hooks — DBT_HOOKS_V4_PROOF')): $(dbt_hook_commands "$V")" ;;
     esac

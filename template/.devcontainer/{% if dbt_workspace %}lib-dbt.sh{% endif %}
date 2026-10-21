@@ -37,6 +37,14 @@
 # the v2 and the v4 of a product carry the same package names, so under one
 # prefix they would write the same tables. dbt_versions tells which worktrees
 # the current product follows.
+# A FLUX is a working copy of the fleet where v4 work runs in parallel with the
+# main copy (one redescente, one simulation…): declared by an untracked,
+# git-ignored .devcontainer/flux.conf — one line DBT_V4_FLUX=<A999>, a capital
+# letter and three digits —, never by dbt.conf nor by an exported variable. Its
+# v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
+# profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
+# flux, not the v1/v2/global spaces (no build there). Without flux.conf nothing
+# changes, except that the main copy never writes a flux's space either.
 #
 # What `dbt_process <workspace> create|start` guarantees:
 #   - every UPSTREAM repository (the dbt projects taken over) is readable and
@@ -90,6 +98,7 @@ dbt_load_conf() {
   DBT_PRODUCTS_CONF="$DBT_WS/.devcontainer/products.conf"
   DBT_LOCK_FILE="$DBT_WS/.devcontainer/products.lock"
   DBT_REFERENTS_CONF="$DBT_WS/.devcontainer/referents.conf"
+  DBT_V4_FLUX_FILE="$DBT_WS/.devcontainer/flux.conf"
   DBT_FLEET=0
   DBT_UPSTREAM_URL=""
   DBT_UPSTREAM_BRANCH="main"
@@ -116,8 +125,12 @@ dbt_load_conf() {
   # v4 (fleet): the products that have one, and the dataset prefix of v4/ and global-v4/ — empty: none, refused
   DBT_V4_PRODUCTS=""
   DBT_BQ_DATASET_PREFIX_V4=""
+  # fleet: the flux of this working copy — read from .devcontainer/flux.conf only (_dbt_flux_read): whatever the
+  # environment exported, and refused when dbt.conf sets it
+  DBT_V4_FLUX=""
   # shellcheck disable=SC1090
   [ -f "$DBT_CONF" ] && . "$DBT_CONF"
+  _dbt_flux_read
   dbt_use_product "" >/dev/null 2>&1 || true
   return 0
 }
@@ -1195,15 +1208,146 @@ _dbt_under_v4() {
   return 1
 }
 
-# _dbt_v4_env_render — profiles/dbt.env, its DATASET_PREFIX line(s) replaced by the v4's, on stdout
+# -----------------------------------------------------------------------------
+# Fleet: a flux — a working copy whose v4 writes under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>
+# -----------------------------------------------------------------------------
+# Several v4 works may run side by side (one redescente each, a simulation…), each in its own working copy of the
+# fleet: under one prefix they would build — and prove against — the same tables. A copy declares its flux in
+# .devcontainer/flux.conf, ONE line (blank lines and # comments aside)
+#   DBT_V4_FLUX=<A999>        a capital letter and three digits (D005, S001) — never a package's name (DWH_…, DBT_…)
+# The file belongs to the working copy: parsed, never sourced; ignored by git and untracked, or every dbt command is
+# refused (dbt_v4_flux_problem). Then:
+#   - v4/ and global-v4/ run on profiles/v4-<FLUX>.env (generated from profiles/dbt.env, DATASET_PREFIX =
+#     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>, never committed either) and write under that prefix (= or _*) only;
+#   - v1/, v2/ and global/ build nothing (their spaces belong to the main copy): every write, run-operation and
+#     hook command but compile and show is refused there (dbt-run.sh);
+#   - the seal of global-v4's hook proof covers profiles/v4-<FLUX>.env (its path, its prefix) instead of
+#     profiles/v4.env, and the verdict line names the flux: a proof holds for one flux only (dbt_hooks_v4_seal,
+#     dbt_hooks_v4_verdict).
+# Without flux.conf — the main copy — nothing changes, but one thing: its v4 never writes a dataset shaped like a
+# flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*). Spaces are disjoint: a flux name is followed by `_` or
+# the end, and the main space is what no flux can name.
+
+# explicit classes: [A-Z] may match lowercase letters under some locales
+DBT_V4_FLUX_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]$'
+_DBT_FLUX_LINE_RE='^DBT_V4_FLUX=([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789])$'
+
+_dbt_upper() { printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]'; }
+
+# _dbt_flux_parse FILE — prints the flux FILE declares (nothing when there is no FILE), or returns 1: FILE is not a
+# regular file (a link included), or holds anything but ONE line DBT_V4_FLUX=<A999>, blank lines and # comments aside
+# (a CRLF line is not one). Parsed, never sourced.
+_dbt_flux_parse() {
+  local F="${1:-}" L N=0 X=""
+  [ -e "$F" ] || [ -L "$F" ] || return 0
+  { [ -f "$F" ] && [ ! -L "$F" ] && [ -r "$F" ]; } || return 1
+  while IFS= read -r L || [ -n "$L" ]; do
+    [[ "$L" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    [[ "$L" =~ $_DBT_FLUX_LINE_RE ]] || return 1
+    X="${BASH_REMATCH[1]}"; N=$((N + 1))
+  done < "$F"
+  [ "$N" = 1 ] || return 1
+  printf '%s' "$X"
+}
+
+# _dbt_flux_read — (dbt_load_conf, after dbt.conf) DBT_V4_FLUX: the flux of this working copy, from
+# .devcontainer/flux.conf — or DBT_V4_FLUX_ERR: why that declaration cannot be trusted (DBT_V4_FLUX is then empty,
+# and dbt-run.sh refuses every dbt command). dbt.conf is committed: a DBT_V4_FLUX set there is an error, never a flux.
+_dbt_flux_read() {
+  local F
+  DBT_V4_FLUX_ERR=""
+  if [ -n "${DBT_V4_FLUX:-}" ]; then
+    DBT_V4_FLUX=""
+    DBT_V4_FLUX_ERR="DBT_V4_FLUX is set in .devcontainer/dbt.conf, a committed file: a flux belongs to one working copy (.devcontainer/flux.conf, never committed)"
+    return 0
+  fi
+  if ! F="$(_dbt_flux_parse "$DBT_V4_FLUX_FILE")"; then
+    DBT_V4_FLUX_ERR=".devcontainer/flux.conf is not a regular file holding one line DBT_V4_FLUX=<A999> (a capital letter, three digits; blank lines and # comments aside)"
+    return 0
+  fi
+  if [ -n "$F" ] && ! dbt_is_fleet; then
+    DBT_V4_FLUX_ERR=".devcontainer/flux.conf in a single-product workspace: a flux exists in a fleet only (its v4 space)"
+    return 0
+  fi
+  DBT_V4_FLUX="$F"
+  return 0
+}
+
+# dbt_v4_prefix — the dataset prefix of THIS copy's v4 space: DBT_BQ_DATASET_PREFIX_V4, or <it>_<FLUX> in a flux
+dbt_v4_prefix() { printf '%s' "${DBT_BQ_DATASET_PREFIX_V4:-}${DBT_V4_FLUX:+_$DBT_V4_FLUX}"; }
+
+# dbt_v4_env_file — the environment of THIS copy's v4 space: profiles/v4.env, or profiles/v4-<FLUX>.env in a flux
+dbt_v4_env_file() { printf '%s' "$DBT_WS/profiles/v4${DBT_V4_FLUX:+-$DBT_V4_FLUX}.env"; }
+
+# _dbt_is_v4_env PATH — PATH resolves to an environment of the v4 space: profiles/v4.env or profiles/v4-<x>.env
+_dbt_is_v4_env() {
+  local L D
+  L="$(readlink -f "${1:-}" 2>/dev/null)" && [ -n "$L" ] || return 1
+  D="$(readlink -f "$DBT_WS/profiles" 2>/dev/null)" && [ -n "$D" ] || return 1
+  [ "$L" = "$D/v4.env" ] && return 0
+  case "$L" in "$D"/v4-*.env) [ "$(dirname "$L")" = "$D" ] && return 0 ;; esac
+  return 1
+}
+
+# _dbt_flux_clash — in a flux, the packages of the v4 space whose name reads as the flux (<flux> or <flux>_…, any
+# case): their datasets <DBT_BQ_DATASET_PREFIX_V4>_<PACKAGE>__… would be the flux's. Read from the files only (the v4
+# projects of the members, global-v4/dbt_project.yml, global-v4/package-lock.yml, global-v4/dbt_packages/), in a
+# subshell: the current product is left as it was.
+_dbt_flux_clash() {
+  local F="${DBT_V4_FLUX:-}"
+  [ -n "$F" ] || return 0
+  (
+    G="$DBT_WS/global-v4"
+    {
+      for N in $(dbt_members); do
+        dbt_use_product "$N" >/dev/null 2>&1 && dbt_v4_enabled || continue
+        P="$(dbt_project_dir v4 2>/dev/null)" || continue
+        sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$P/dbt_project.yml" | head -1
+      done
+      [ -f "$G/dbt_project.yml" ] && sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$G/dbt_project.yml" | head -1
+      [ -f "$G/package-lock.yml" ] && sed -nE 's/^[[:space:]]+name:[[:space:]]*([A-Za-z0-9_]+)[[:space:]]*$/\1/p' "$G/package-lock.yml"
+      [ -d "$G/dbt_packages" ] && find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -printf '%f\n'
+    } 2>/dev/null | LC_ALL=C awk -v f="$F" '{ u = toupper($0); if (u == f || index(u, f "_") == 1) print $0 }' | LC_ALL=C sort -u
+  )
+}
+
+# dbt_v4_flux_problem — prints why this copy's flux cannot be trusted, one reason per line (nothing: no flux, or a
+# sound one). dbt-run.sh refuses every dbt command while it prints anything:
+#   - the declaration itself (DBT_V4_FLUX_ERR, _dbt_flux_read);
+#   - .devcontainer/flux.conf or profiles/v4-<FLUX>.env tracked by git, or not ignored: `git add -A` would commit the
+#     flux, and merging its work would carry it into the main copy;
+#   - a package of the v4 space whose name reads as the flux (_dbt_flux_clash).
+dbt_v4_flux_problem() {
+  local F="${DBT_V4_FLUX:-}" X C
+  if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then printf '%s\n' "$DBT_V4_FLUX_ERR"; return 0; fi
+  [ -n "$F" ] || return 0
+  for X in .devcontainer/flux.conf "profiles/v4-$F.env"; do
+    if git -C "$DBT_WS" ls-files --error-unmatch -- "$X" >/dev/null 2>&1; then
+      echo "$X is tracked by git: a flux is never committed — git rm --cached $X, and ignore it (.gitignore)"
+    elif ! git -C "$DBT_WS" check-ignore -q -- "$X" 2>/dev/null; then
+      echo "$X is not ignored by git: \`git add -A\` would commit the flux — add /$X to .gitignore"
+    fi
+  done
+  C="$(_dbt_flux_clash)"
+  [ -z "$C" ] || echo "flux $F reads as a package of the v4 space ($(printf '%s\n' "$C" | paste -sd' ' -)): its datasets ${DBT_BQ_DATASET_PREFIX_V4:-<V4>}_<PACKAGE>__… would be the flux's — choose another flux name"
+  return 0
+}
+
+# _dbt_v4_env_render [FLUX] — profiles/dbt.env, its DATASET_PREFIX line(s) replaced by the v4's (in a flux:
+# <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>), on stdout. Without FLUX, the very same bytes as before fluxes existed.
 _dbt_v4_env_render() {
-  local SRC="$DBT_WS/profiles/dbt.env"
-  echo "# GENERATED by .devcontainer/lib-dbt.sh from profiles/dbt.env, with DATASET_PREFIX=DBT_BQ_DATASET_PREFIX_V4"
-  echo "# (dbt.conf): the environment of v4/ and global-v4/. Edit those two files, never this one (just setup rewrites it)."
-  if grep -qE "$_DBT_PREFIX_LINE_RE" "$SRC"; then
-    sed -E "s/${_DBT_PREFIX_LINE_RE}.*/DATASET_PREFIX=${DBT_BQ_DATASET_PREFIX_V4}/" "$SRC"
+  local SRC="$DBT_WS/profiles/dbt.env" P="${DBT_BQ_DATASET_PREFIX_V4:-}${1:+_$1}"
+  if [ -z "${1:-}" ]; then
+    echo "# GENERATED by .devcontainer/lib-dbt.sh from profiles/dbt.env, with DATASET_PREFIX=DBT_BQ_DATASET_PREFIX_V4"
+    echo "# (dbt.conf): the environment of v4/ and global-v4/. Edit those two files, never this one (just setup rewrites it)."
   else
-    cat "$SRC"; printf 'DATASET_PREFIX=%s\n' "$DBT_BQ_DATASET_PREFIX_V4"
+    echo "# GENERATED by .devcontainer/lib-dbt.sh from profiles/dbt.env, with DATASET_PREFIX=DBT_BQ_DATASET_PREFIX_V4_$1: the"
+    echo "# environment of v4/ and global-v4/ in flux $1 (.devcontainer/flux.conf). Never committed; just setup rewrites it."
+  fi
+  if grep -qE "$_DBT_PREFIX_LINE_RE" "$SRC"; then
+    sed -E "s/${_DBT_PREFIX_LINE_RE}.*/DATASET_PREFIX=${P}/" "$SRC"
+  else
+    cat "$SRC"; printf 'DATASET_PREFIX=%s\n' "$P"
   fi
 }
 
@@ -1225,10 +1369,12 @@ _dbt_link_env() {
   return 0
 }
 
-# dbt_ensure_v4_env — profiles/v4.env (re)generated from profiles/dbt.env; global-v4/.env linked to it. Nothing
-# written while DBT_BQ_DATASET_PREFIX_V4 is empty or invalid: every v4 command is then refused (dbt-run.sh).
+# dbt_ensure_v4_env — profiles/v4.env (re)generated from profiles/dbt.env; in a flux, profiles/v4-<FLUX>.env too;
+# global-v4/.env linked to this copy's one. Nothing written while DBT_BQ_DATASET_PREFIX_V4 is empty or invalid: every
+# v4 command is then refused (dbt-run.sh). A flux declaration that cannot be trusted: global-v4/.env removed (a link
+# left on profiles/v4.env would let the dbt extension write the main v4 space from a flux).
 dbt_ensure_v4_env() {
-  local SRC="$DBT_WS/profiles/dbt.env" DST="$DBT_WS/profiles/v4.env" TMP
+  local SRC="$DBT_WS/profiles/dbt.env" DST="$DBT_WS/profiles/v4.env" TMP E PB
   dbt_is_fleet || return 0
   if [ -z "${DBT_BQ_DATASET_PREFIX_V4:-}" ]; then
     [ -z "${DBT_V4_PRODUCTS:-}$(dbt_referents)" ] \
@@ -1249,7 +1395,27 @@ dbt_ensure_v4_env() {
     echo "  profiles/v4.env written (DATASET_PREFIX=$DBT_BQ_DATASET_PREFIX_V4) — review and commit it"
   fi
   rm -f "$TMP"
-  [ -f "$DBT_WS/global-v4/dbt_project.yml" ] && _dbt_link_env "$DBT_WS/global-v4" "$DST" fix
+  if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+    echo "  WARNING: flux — $DBT_V4_FLUX_ERR: every dbt command is refused, and no .env of the v4 space is linked"
+    [ -L "$DBT_WS/global-v4/.env" ] && rm -f "$DBT_WS/global-v4/.env"
+    return 0
+  fi
+  E="$DST"
+  if [ -n "${DBT_V4_FLUX:-}" ]; then
+    E="$(dbt_v4_env_file)"
+    TMP="$(mktemp)"
+    _dbt_v4_env_render "$DBT_V4_FLUX" > "$TMP"
+    if cmp -s "$TMP" "$E"; then
+      echo "  ${E#"$DBT_WS"/} (flux $DBT_V4_FLUX: DATASET_PREFIX=$(dbt_v4_prefix))"
+    else
+      cat "$TMP" > "$E"
+      echo "  ${E#"$DBT_WS"/} written (flux $DBT_V4_FLUX: DATASET_PREFIX=$(dbt_v4_prefix)) — never commit it"
+    fi
+    rm -f "$TMP"
+    PB="$(dbt_v4_flux_problem)"
+    [ -z "$PB" ] || printf '%s\n' "$PB" | sed "s/^/  WARNING: flux $DBT_V4_FLUX — /; s/\$/ (every dbt command is refused until then)/"
+  fi
+  [ -f "$DBT_WS/global-v4/dbt_project.yml" ] && _dbt_link_env "$DBT_WS/global-v4" "$E" fix
   return 0
 }
 
@@ -1273,17 +1439,23 @@ dbt_ensure_editor_files() {
       WT="$(_dbt_wt "$V")"
       _dbt_is_worktree "$WT" || continue
       # dbt v2 and its extension read a .env from the project directory: point
-      # it at the env file of the product — for a v4, at profiles/v4.env, a
-      # link that points elsewhere re-pointed (none rather than one on dbt.env).
-      ENVF="$P_ENV"; [ "$V" = v4 ] && ENVF="$DBT_WS/profiles/v4.env"
+      # it at the env file of the product — for a v4, at this copy's
+      # profiles/v4.env (profiles/v4-<FLUX>.env in a flux), a link that points
+      # elsewhere re-pointed (none rather than one on dbt.env, or on the main
+      # v4 space from a flux whose declaration cannot be trusted).
+      ENVF="$P_ENV"; [ "$V" = v4 ] && ENVF="$(dbt_v4_env_file)"
       if PROJ="$(dbt_project_dir "$V")"; then
         if [ "$V" != v4 ]; then
           _dbt_link_env "$PROJ" "$ENVF"
-        elif [ -f "$ENVF" ]; then
+        elif [ -f "$ENVF" ] && [ -z "${DBT_V4_FLUX_ERR:-}" ]; then
           _dbt_link_env "$PROJ" "$ENVF" fix
         else
           [ -L "$PROJ/.env" ] && rm -f "$PROJ/.env"
-          echo "  WARNING: ${P_TAG}no profiles/v4.env (DBT_BQ_DATASET_PREFIX_V4, dbt.conf): no .env in $(_dbt_show v4) — its commands are refused"
+          if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+            echo "  WARNING: ${P_TAG}flux declaration refused (.devcontainer/flux.conf): no .env in $(_dbt_show v4) — its commands are refused"
+          else
+            echo "  WARNING: ${P_TAG}no ${ENVF#"$DBT_WS"/} (DBT_BQ_DATASET_PREFIX_V4, dbt.conf): no .env in $(_dbt_show v4) — its commands are refused"
+          fi
         fi
       fi
       # Settings for a window opened on the worktree alone (one extension per
@@ -1506,7 +1678,9 @@ dbt_hooks_compile_name() {
 #
 # dbt_hooks_v4_seal — from the workspace root: prints the seal of global-v4/ (20 hex), or returns 1 (no seal). One line
 # per entry, in this order, each ended by a newline — "<sha256 hex of the file, or ->  <path from the workspace root>":
-#   1. global-v4/{dbt_project,packages,dependencies,package-lock}.yml, .devcontainer/hooks.approved, profiles/v4.env,
+#   1. global-v4/{dbt_project,packages,dependencies,package-lock}.yml, .devcontainer/hooks.approved, profiles/v4.env
+#      — in a flux (.devcontainer/flux.conf, read here, never from the environment) profiles/v4-<FLUX>.env instead, the
+#      environment its global-v4 runs on: its path and its DATASET_PREFIX make the seal the flux's —,
 #      profiles/profiles.yml; then the dbt_project.yml, packages.yml and dependencies.yml of every member (each
 #      `- local: ../<v2|v4>/<product>/<dir>` of global-v4/packages.yml, in its order);
 #   2. every file of global-v4/macros/ and of global-v4/vendor/ (optional: copies of local packages), sorted by bytes;
@@ -1514,7 +1688,9 @@ dbt_hooks_compile_name() {
 #      vendor/ package) as "l<sha256 hex of its target, newline included>  <path>", a directory as every file outside
 #      its own .git (a .git differs from one install to the next, and dbt never reads it);
 #   4. "<sha256 hex of `$DBT_BIN_DIR/dbt --version`>  dbt --version";
-# the seal is the first 20 hex of the sha256 of these lines. No seal: a package declared `local` in a form other than
+# the seal is the first 20 hex of the sha256 of these lines — without a flux, the very lines of the seal before fluxes
+# existed: the main copy's proof keeps its seal. No seal: a flux.conf that _dbt_flux_parse refuses, a package declared
+# `local` in a form other than
 # `- local: ../<v2|v4>/<product>/<dir>` or `- local: vendor/<package>`, any `local` in global-v4/dependencies.yml,
 # macros/ or dbt_packages/ missing (or a link), vendor/ a link or not a directory, no package-lock.yml, no engine, a
 # link, a special file or a name with a newline or a backslash in macros/, vendor/ or an installed package, at the top
@@ -1522,8 +1698,10 @@ dbt_hooks_compile_name() {
 # vendor/ package, names that are not exactly those of package-lock.yml. The proof tool checks what this cannot (the
 # install against package-lock.yml, the packages against a reference) before writing the seal.
 dbt_hooks_v4_seal() {
-  local G=global-v4 L M V X T B="${DBT_BIN_DIR:-${HOME:-/home/vscode}/.local/bin}/dbt"
+  local G=global-v4 L M V X T F E4=profiles/v4.env B="${DBT_BIN_DIR:-${HOME:-/home/vscode}/.local/bin}/dbt"
   local -a A=("$G/macros")
+  F="$(_dbt_flux_parse .devcontainer/flux.conf)" || return 1
+  [ -z "$F" ] || E4="profiles/v4-$F.env"
   L='\blocal["'"'"']?[[:space:]]*:'
   M='^[[:space:]]*-[[:space:]]*local:[[:space:]]*\.\./(v2|v4)/([^/[:space:]]+)/([^[:space:]#]+)[[:space:]]*(#.*)?$'
   V='^[[:space:]]*-[[:space:]]*local:[[:space:]]*vendor/[A-Za-z0-9_]+/?[[:space:]]*(#.*)?$'
@@ -1556,7 +1734,7 @@ dbt_hooks_v4_seal() {
   [ "$(find "$G/dbt_packages" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = \
     "$(sed -nE 's/^[[:space:]]+name:[[:space:]]*([A-Za-z0-9_]+)[[:space:]]*$/\1/p' "$G/package-lock.yml" | LC_ALL=C sort)" ] || return 1
   { { printf '%s\n' "$G/dbt_project.yml" "$G/packages.yml" "$G/dependencies.yml" "$G/package-lock.yml" \
-        .devcontainer/hooks.approved profiles/v4.env profiles/profiles.yml
+        .devcontainer/hooks.approved "$E4" profiles/profiles.yml
       sed -nE "s@$M@\1/\2/\3@p" "$G/packages.yml" 2>/dev/null | sed 's@/$@@' |
         while IFS= read -r X; do printf '%s\n' "$X/dbt_project.yml" "$X/packages.yml" "$X/dependencies.yml"; done
     } | while IFS= read -r X; do
@@ -1573,19 +1751,26 @@ dbt_hooks_v4_seal() {
   } | sha256sum | cut -c1-20
 }
 
-# dbt_hooks_v4_verdict PROOF SEAL — does the proof hold for SEAL (the seal now)? Required: exactly one line naming
-# « VERDICT HOOKS GLOBAL-V4 », and it is exactly — anchored, nothing before or after, LF —
-#   VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>
+# dbt_hooks_v4_verdict PROOF SEAL [FLUX] — does the proof hold for SEAL (the seal now)? Required: exactly one line
+# naming « VERDICT HOOKS GLOBAL-V4 », and it is exactly — anchored, nothing before or after, LF —
+#   VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>                 (the main copy)
+#   VERDICT HOOKS GLOBAL-V4 FLUX <FLUX> : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>     (in flux FLUX)
 # no « PREUVE HOOKS » line (an older banner), no other seal quoted anywhere (« sceau », then spaces, colons or
 # backquotes, then 20 hex — any case), and that seal is SEAL. Both conditions of the proof (PREUVE OK: every hook is an
-# approved one; TÉMOINS OK: the proof was seen refusing) stand on the seal's line. return 1: the proof does not hold.
+# approved one; TÉMOINS OK: the proof was seen refusing) stand on the seal's line. A proof written for the main copy
+# never holds in a flux, nor one written for a flux anywhere else (the seals differ too). return 1: it does not hold.
 dbt_hooks_v4_verdict() {
-  local F="$1" S
+  local F="$1" S X="GLOBAL-V4"
+  if [ -n "${3:-}" ]; then [[ "$3" =~ $DBT_V4_FLUX_RE ]] || return 1; X="GLOBAL-V4 FLUX $3"; fi
   [ -f "$F" ] && [ "$(grep -c 'VERDICT HOOKS GLOBAL-V4' "$F")" = 1 ] && [ "$(grep -c 'PREUVE HOOKS' "$F")" = 0 ] \
     && [ "$(grep -oiE 'sceau[ :`]*[0-9a-f]{20}' "$F" | wc -l)" = 1 ] || return 1
-  S="$(sed -nE 's/^VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau ([0-9a-f]{20})$/\1/p' "$F")"
+  S="$(sed -nE "s/^VERDICT HOOKS $X : PREUVE OK ; TÉMOINS OK ; sceau ([0-9a-f]{20})\$/\\1/p" "$F")"
   [ -n "$S" ] && [ "$S" = "${2:-}" ]
 }
+
+# dbt_hooks_v4_verdict_line SEAL [FLUX] — the one verdict line a proof writes for SEAL (and FLUX): what the proof tool
+# of the fleet prints, and what dbt_hooks_v4_verdict accepts
+dbt_hooks_v4_verdict_line() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${2:+ FLUX $2}" "${1:-}"; }
 
 # -----------------------------------------------------------------------------
 # Lifecycle entry point
