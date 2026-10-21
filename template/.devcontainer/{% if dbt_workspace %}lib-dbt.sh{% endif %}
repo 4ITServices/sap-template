@@ -43,8 +43,13 @@
 # letter and three digits —, never by dbt.conf nor by an exported variable. Its
 # v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
 # profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
-# flux, not the v1/v2/global spaces (no build there). Without flux.conf nothing
-# changes, except that the main copy never writes a flux's space either.
+# flux, not the v1/v2/global spaces (no build there). The MAIN copy is named,
+# never guessed: DBT_V4_MAIN_WS (dbt.conf) is its real path, and it is never a
+# flux. In a fleet with a v4, a copy that is neither the main one nor a flux (a
+# clone, a flux whose flux.conf was erased by `git clean -X`) has no v4 space
+# and builds nothing — `just setup` does not make it the main copy. Only the
+# main copy writes the container's state (~/.bashrc, the global git settings
+# that name a path, the engines). The main copy never writes a flux's space.
 #
 # What `dbt_process <workspace> create|start` guarantees:
 #   - every UPSTREAM repository (the dbt projects taken over) is readable and
@@ -98,7 +103,6 @@ dbt_load_conf() {
   DBT_PRODUCTS_CONF="$DBT_WS/.devcontainer/products.conf"
   DBT_LOCK_FILE="$DBT_WS/.devcontainer/products.lock"
   DBT_REFERENTS_CONF="$DBT_WS/.devcontainer/referents.conf"
-  DBT_V4_FLUX_FILE="$DBT_WS/.devcontainer/flux.conf"
   DBT_FLEET=0
   DBT_UPSTREAM_URL=""
   DBT_UPSTREAM_BRANCH="main"
@@ -125,11 +129,21 @@ dbt_load_conf() {
   # v4 (fleet): the products that have one, and the dataset prefix of v4/ and global-v4/ — empty: none, refused
   DBT_V4_PRODUCTS=""
   DBT_BQ_DATASET_PREFIX_V4=""
+  # fleet with a v4: the real path of its MAIN working copy (dbt_v4_role) — empty: no copy is the main one
+  DBT_V4_MAIN_WS=""
   # fleet: the flux of this working copy — read from .devcontainer/flux.conf only (_dbt_flux_read): whatever the
-  # environment exported, and refused when dbt.conf sets it
+  # environment exported. dbt.conf sets nothing of the flux: a DBT_V4_FLUX* or _DBT_FLUX* variable it sets, adds,
+  # changes or unsets — the file's path, the syntax — is an error (_DBT_CONF_FLUX_SET: every dbt command refused), and
+  # the file is read at its fixed path. (dbt.conf is sourced: it could redefine any function — these checks catch an
+  # accident, not malice.)
   DBT_V4_FLUX=""
+  unset DBT_V4_FLUX_FILE DBT_V4_FLUX_ERR
+  _dbt_flux_consts
+  _DBT_CONF_FLUXSNAP="$(_dbt_flux_vars)"
   # shellcheck disable=SC1090
   [ -f "$DBT_CONF" ] && . "$DBT_CONF"
+  _DBT_CONF_FLUX_SET="$(_dbt_flux_changed "$_DBT_CONF_FLUXSNAP")"
+  DBT_V4_FLUX_FILE="$DBT_WS/.devcontainer/flux.conf"
   _dbt_flux_read
   dbt_use_product "" >/dev/null 2>&1 || true
   return 0
@@ -293,9 +307,14 @@ _dbt_upstream_urls() {
 }
 
 # dbt_git_setup — ~/.gitconfig lives in the container filesystem, so this is
-# replayed on every start. One pass per distinct upstream host.
+# replayed on every start. One pass per distinct upstream host. ~/.gitconfig is
+# the container's, shared by every working copy: a copy that does not own the
+# container (_dbt_owns_container: a flux, an orphan) only ADDS the push locks it
+# needs — it never rewrites core.sshCommand (it names this copy's pinned keys)
+# nor the HTTPS->SSH rewrite, and never lifts a lock.
 dbt_git_setup() {
-  local KH CUR P U HOST SSH_HOSTS="" ALL_HOSTS=""
+  local KH CUR P U HOST SSH_HOSTS="" ALL_HOSTS="" OWN=1
+  _dbt_owns_container || OWN=0
   KH="$(_dbt_known_hosts)"
   while IFS= read -r U; do
     HOST="$(_dbt_url_host "$U")"
@@ -328,13 +347,17 @@ dbt_git_setup() {
     # Private dbt packages hosted next to the projects are usually declared
     # over HTTPS (CI authenticates with a job token); locally only the SSH key
     # can read them.
-    if [ "${DBT_UPSTREAM_HTTPS_TO_SSH:-1}" != "0" ]; then
+    if [ "$OWN" = 0 ]; then
+      :
+    elif [ "${DBT_UPSTREAM_HTTPS_TO_SSH:-1}" != "0" ]; then
       git config --global "url.git@$HOST:.insteadOf" "https://$HOST/"
     else
       git config --global --unset-all "url.git@$HOST:.insteadOf" 2>/dev/null || true
     fi
   done
-  if [ -n "$SSH_HOSTS" ] && [ -s "$KH" ]; then
+  if [ "$OWN" = 0 ]; then
+    echo "  the container's git settings (core.sshCommand, HTTPS->SSH) are the main copy's (${DBT_V4_MAIN_WS:-?}): left as they are"
+  elif [ -n "$SSH_HOSTS" ] && [ -s "$KH" ]; then
     CUR="$(git config --global --get core.sshCommand 2>/dev/null || true)"
     case "$CUR" in
       *git-ssh-garde.sh*)
@@ -369,7 +392,7 @@ dbt_git_setup() {
   # Idempotent, replayed on every start. Nothing the user wrote is taken out: a helper or a proxy of their
   # own for an upstream host stays written (inert behind ours), a customised core.sshCommand stays as is.
   for HOST in $ALL_HOSTS; do
-    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || [ "$OWN" = 0 ]; then
       while IFS= read -r P; do
         git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF -- "$P" \
           || git config --global --add url.DISABLED://.pushInsteadOf "$P"
@@ -377,10 +400,15 @@ dbt_git_setup() {
       if _dbt_https_read_over_ssh "$HOST" "$SSH_HOSTS"; then
         _dbt_push_lock_proxy 1 "$HOST"; _dbt_push_lock_https 1 "$HOST"
         echo "  push to $HOST LOCKED (pushInsteadOf; https: dead proxy, no credentials)"
+      elif [ "$OWN" = 0 ]; then
+        # a copy that does not own the container never lifts a lock: the https layer is left as it is
+        echo "  push to $HOST LOCKED (pushInsteadOf; read over https here: the https layer is the main copy's, left as it is)"
       else
         _dbt_push_lock_proxy 0 "$HOST"; _dbt_push_lock_https 0 "$HOST"
         echo "  push to $HOST LOCKED (pushInsteadOf; read over https: no dead proxy, no https quitter)"
       fi
+      [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] \
+        || echo "  WARNING: DBT_UPSTREAM_PUSH_LOCK=0 in this copy's dbt.conf — ignored: a copy that does not own the container never lifts a lock"
     else
       # only this host's entries: a lock set by hand for another host stays
       while IFS= read -r P; do
@@ -391,7 +419,8 @@ dbt_git_setup() {
     fi
   done
   # shellcheck disable=SC2086
-  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then _dbt_push_lock_ssh 1 $ALL_HOSTS; else _dbt_push_lock_ssh 0 $ALL_HOSTS; fi
+  if [ "$OWN" = 0 ]; then echo "  core.sshCommand (the ssh push guard) is the main copy's (${DBT_V4_MAIN_WS:-?}): left as it is"
+  elif [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then _dbt_push_lock_ssh 1 $ALL_HOSTS; else _dbt_push_lock_ssh 0 $ALL_HOSTS; fi
   return 0
 }
 
@@ -520,6 +549,7 @@ _dbt_push_lock_ssh() {   # <lock 1|0> <host>…
   fi
   return 0
 }
+
 
 # Bounded fetch of the current product's upstream remote. In a hook (no
 # terminal) ssh must never prompt nor hang; from a terminal a passphrase
@@ -652,7 +682,8 @@ dbt_ensure_worktrees() {
       git -C "$WS" remote add "$P_REMOTE" "$P_URL"
     fi
     git -C "$WS" config "remote.$P_REMOTE.tagOpt" --no-tags
-    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+    # a copy that does not own the container (a flux, an orphan) never lifts a lock, not even its own remote's
+    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || ! _dbt_owns_container; then
       git -C "$WS" config "remote.$P_REMOTE.pushurl" DISABLED
     else
       git -C "$WS" config --unset-all "remote.$P_REMOTE.pushurl" 2>/dev/null || true
@@ -674,6 +705,8 @@ dbt_ensure_worktrees() {
     P="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"; SHOW="$(_dbt_show "$V")"
     # Same trust as the workspace folder (onCreateCommand registers only that
     # one): a bind mount owned by another uid would otherwise be refused.
+    # Added, never removed: the one global git setting a copy that does not own
+    # the container (a flux) writes too — it names its own worktrees only.
     git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$P" \
       || git config --global --add safe.directory "$P"
     # The links between a worktree and the repository are absolute paths:
@@ -1189,12 +1222,19 @@ dbt_ensure_global() {
 
 _DBT_PREFIX_LINE_RE='^[[:space:]]*(export[[:space:]]+)?DATASET_PREFIX[[:space:]]*='
 
-# _dbt_v4_prefix_ok — DBT_BQ_DATASET_PREFIX_V4 is <DBT_BQ_DATASET_PREFIX>_<letters, digits, _>
+# _dbt_v4_prefix_ok — DBT_BQ_DATASET_PREFIX_V4 is <DBT_BQ_DATASET_PREFIX>_<letters, digits, _>, and no `_`-separated
+# segment of what follows <DBT_BQ_DATASET_PREFIX>_ has a flux's shape, <A999> (any case): JDOE_V4_D005 would be the
+# space of flux D005 seen from the main copy, and a flux D006 under it would write JDOE_V4_D005_D006_…, inside D005's
 _dbt_v4_prefix_ok() {
+  local S X LC_ALL=C
   case "${DBT_BQ_DATASET_PREFIX_V4:-}" in ""|*[!A-Za-z0-9_]*) return 1 ;; esac
   [ -n "${DBT_BQ_DATASET_PREFIX:-}" ] || return 1
-  case "$DBT_BQ_DATASET_PREFIX_V4" in "${DBT_BQ_DATASET_PREFIX}_"?*) return 0 ;; esac
-  return 1
+  case "$DBT_BQ_DATASET_PREFIX_V4" in "${DBT_BQ_DATASET_PREFIX}_"?*) ;; *) return 1 ;; esac
+  S="${DBT_BQ_DATASET_PREFIX_V4#"${DBT_BQ_DATASET_PREFIX}_"}"
+  for X in ${S//_/ }; do
+    [[ "$(_dbt_upper "$X")" =~ $DBT_V4_FLUX_RE ]] && return 1
+  done
+  return 0
 }
 
 # _dbt_under_v4 DATASET — DATASET is in the v4 space: DBT_BQ_DATASET_PREFIX_V4 itself, or <it>_… (any case)
@@ -1219,30 +1259,67 @@ _dbt_under_v4() {
 # refused (dbt_v4_flux_problem). Then:
 #   - v4/ and global-v4/ run on profiles/v4-<FLUX>.env (generated from profiles/dbt.env, DATASET_PREFIX =
 #     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>, never committed either) and write under that prefix (= or _*) only;
-#   - v1/, v2/ and global/ build nothing (their spaces belong to the main copy): every write, run-operation and
-#     hook command but compile and show is refused there (dbt-run.sh);
+#   - v1/, v2/ and global/ build nothing (their spaces belong to the main copy): only the commands of
+#     DBT_FLUX_READ_CMDS run there — parse, ls, compile, show, deps (dbt_read_only_args, dbt-run.sh);
+#   - its dbt.conf gives the main copy's sandbox, prefixes and engine pins (_DBT_FLUX_SHARED), read from the main
+#     copy's dbt.conf (DBT_V4_MAIN_WS), or every dbt command is refused (_dbt_flux_main_problem);
+#   - its `just setup` sets up this copy only: the container's state — engines, ~/.bashrc, the global git settings —
+#     stays the main copy's (_dbt_owns_container);
 #   - the seal of global-v4's hook proof covers profiles/v4-<FLUX>.env (its path, its prefix) instead of
 #     profiles/v4.env, and the verdict line names the flux: a proof holds for one flux only (dbt_hooks_v4_seal,
 #     dbt_hooks_v4_verdict).
-# Without flux.conf — the main copy — nothing changes, but one thing: its v4 never writes a dataset shaped like a
-# flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*). Spaces are disjoint: a flux name is followed by `_` or
-# the end, and the main space is what no flux can name.
+# Without flux.conf, in the MAIN copy — the one DBT_V4_MAIN_WS (dbt.conf) names by its real path — nothing changes,
+# but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*).
+# Spaces are disjoint: a flux name is followed by `_` or the end, and the main space is what no flux can name. Writes
+# are accepted byte by byte (BigQuery dataset names are case-sensitive), refused in any case.
+# The main copy is named, never inferred from a missing file (flux.conf is ignored by git: `git clean -X` erases it):
+# a copy of a fleet with a v4 that is neither the main copy nor a flux — an ORPHAN (dbt_v4_role) — has no v4 space and
+# builds nothing; `just setup` does not change that. Only the main copy writes the container's state
+# (_dbt_owns_container): a flux's `just setup` sets up that copy, never ~/.bashrc, the global git settings or the
+# engines every other copy uses.
 
-# explicit classes: [A-Z] may match lowercase letters under some locales
-DBT_V4_FLUX_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]$'
-_DBT_FLUX_LINE_RE='^DBT_V4_FLUX=([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789])$'
+# _dbt_flux_consts — the flux syntax, explicit classes ([A-Z] may match lowercase letters under some locales). Set when
+# the lib is sourced, and by dbt_load_conf before dbt.conf: dbt.conf changing one is an error (_dbt_flux_changed).
+_dbt_flux_consts() {
+  DBT_V4_FLUX_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]$'
+  _DBT_FLUX_LINE_RE='^DBT_V4_FLUX=([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789])$'
+  # a blank or comment line: space, tab, CR, VT, FF — spelled out ([[:space:]] would follow the locale: U+2003 is a
+  # space under C.UTF-8, not under C)
+  _DBT_FLUX_BLANK_RE=$'^[ \t\r\v\f]*(#.*)?$'
+}
+_dbt_flux_consts
+
+# _dbt_flux_vars — every DBT_V4_FLUX* / _DBT_FLUX* variable of this shell, as `declare -p` prints it (sorted)
+_dbt_flux_vars() {
+  local V
+  for V in $(compgen -v | LC_ALL=C grep -E '^(DBT_V4_FLUX|_DBT_FLUX)' | LC_ALL=C sort); do declare -p "$V" 2>/dev/null; done
+}
+
+# _dbt_flux_changed BEFORE — (dbt_load_conf, after dbt.conf) the DBT_V4_FLUX* / _DBT_FLUX* variables dbt.conf set,
+# added, changed or exported since BEFORE (_dbt_flux_vars): their names, or "DBT_V4_FLUX*"; nothing: none
+_dbt_flux_changed() {
+  local A N
+  A="$(_dbt_flux_vars)"
+  [ "$A" = "${1:-}" ] && return 0
+  N="$(diff <(printf '%s\n' "${1:-}") <(printf '%s\n' "$A") 2>/dev/null \
+    | LC_ALL=C sed -nE 's/^[<>] declare -[^ ]* ([A-Za-z_][A-Za-z0-9_]*).*/\1/p' | LC_ALL=C sort -u | paste -sd' ' -)"
+  printf '%s' "${N:-DBT_V4_FLUX*}"
+}
 
 _dbt_upper() { printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]'; }
 
 # _dbt_flux_parse FILE — prints the flux FILE declares (nothing when there is no FILE), or returns 1: FILE is not a
-# regular file (a link included), or holds anything but ONE line DBT_V4_FLUX=<A999>, blank lines and # comments aside
-# (a CRLF line is not one). Parsed, never sourced.
+# regular file (a link included, even dangling), holds a NUL byte (bash's read would drop it: D0<NUL>05 is not D005),
+# or holds anything but ONE line DBT_V4_FLUX=<A999>, blank lines and # comments aside (a CRLF line is not one; the last
+# line counts even without its newline). Read byte by byte (LC_ALL=C: any byte in a comment, whatever the locale — as
+# the Python mirror of the fleet reads it). Parsed, never sourced.
 _dbt_flux_parse() {
-  local F="${1:-}" L N=0 X=""
+  local F="${1:-}" L N=0 X="" LC_ALL=C
   [ -e "$F" ] || [ -L "$F" ] || return 0
   { [ -f "$F" ] && [ ! -L "$F" ] && [ -r "$F" ]; } || return 1
+  [ "$(tr -d '\000' < "$F" | wc -c)" = "$(wc -c < "$F")" ] || return 1
   while IFS= read -r L || [ -n "$L" ]; do
-    [[ "$L" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    [[ "$L" =~ $_DBT_FLUX_BLANK_RE ]] && continue
     [[ "$L" =~ $_DBT_FLUX_LINE_RE ]] || return 1
     X="${BASH_REMATCH[1]}"; N=$((N + 1))
   done < "$F"
@@ -1252,13 +1329,17 @@ _dbt_flux_parse() {
 
 # _dbt_flux_read — (dbt_load_conf, after dbt.conf) DBT_V4_FLUX: the flux of this working copy, from
 # .devcontainer/flux.conf — or DBT_V4_FLUX_ERR: why that declaration cannot be trusted (DBT_V4_FLUX is then empty,
-# and dbt-run.sh refuses every dbt command). dbt.conf is committed: a DBT_V4_FLUX set there is an error, never a flux.
+# and dbt-run.sh refuses every dbt command). dbt.conf is committed and shared by every copy: a DBT_V4_FLUX* or
+# _DBT_FLUX* variable set there (_DBT_CONF_FLUX_SET) is an error, never a flux nor a way to hide one. The main copy
+# (DBT_V4_MAIN_WS) is never a flux.
 _dbt_flux_read() {
   local F
+  # DBT_V4_FLUX is "" here unless dbt.conf set it (dbt_load_conf resets it before dbt.conf: an exported one never
+  # survives) — and that is an error: no flux, ever, from there
   DBT_V4_FLUX_ERR=""
-  if [ -n "${DBT_V4_FLUX:-}" ]; then
+  if [ -n "${_DBT_CONF_FLUX_SET:-}" ]; then
     DBT_V4_FLUX=""
-    DBT_V4_FLUX_ERR="DBT_V4_FLUX is set in .devcontainer/dbt.conf, a committed file: a flux belongs to one working copy (.devcontainer/flux.conf, never committed)"
+    DBT_V4_FLUX_ERR="$_DBT_CONF_FLUX_SET set in .devcontainer/dbt.conf, a committed file shared by every copy: a flux belongs to one working copy (.devcontainer/flux.conf, never committed), and nothing of it is configured there"
     return 0
   fi
   if ! F="$(_dbt_flux_parse "$DBT_V4_FLUX_FILE")"; then
@@ -1269,7 +1350,142 @@ _dbt_flux_read() {
     DBT_V4_FLUX_ERR=".devcontainer/flux.conf in a single-product workspace: a flux exists in a fleet only (its v4 space)"
     return 0
   fi
+  if [ -n "$F" ] && _dbt_is_main_ws; then
+    DBT_V4_FLUX_ERR=".devcontainer/flux.conf in the MAIN copy (DBT_V4_MAIN_WS, dbt.conf): the main copy is never a flux — a flux is another working copy"
+    return 0
+  fi
   DBT_V4_FLUX="$F"
+  return 0
+}
+
+# _dbt_is_main_ws — this working copy is the main one: DBT_V4_MAIN_WS (dbt.conf) is an absolute path, and its real
+# path (links resolved) is this copy's
+_dbt_is_main_ws() {
+  local A B
+  case "${DBT_V4_MAIN_WS:-}" in /*) ;; *) return 1 ;; esac
+  A="$(cd "$DBT_WS" 2>/dev/null && pwd -P)" && B="$(cd "$DBT_V4_MAIN_WS" 2>/dev/null && pwd -P)" || return 1
+  [ -n "$A" ] && [ "$A" = "$B" ]
+}
+
+# _dbt_v4_declared — this workspace is a fleet with a v4: DBT_V4_PRODUCTS, a referent, or a v4 prefix
+_dbt_v4_declared() { dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)" ]; }
+
+# dbt_v4_role — what this working copy is (fleet only; nothing printed for a single product, nor for a fleet that
+# declares no v4 and no flux — as before fluxes):
+#   refused  its flux declaration cannot be trusted (DBT_V4_FLUX_ERR): every dbt command is refused;
+#   flux     it declares a sound flux (.devcontainer/flux.conf);
+#   main     a fleet with a v4 whose real path is DBT_V4_MAIN_WS (dbt.conf) — it declares no flux;
+#   orphan   a fleet with a v4, neither: a clone, a flux whose flux.conf was erased (`git clean -X`), a main copy moved,
+#            or DBT_V4_MAIN_WS empty or relative — no v4 space (every v4 command refused), and in the v1/v2/global
+#            spaces, the main copy's, what a flux may do only (parse, ls, compile, show, deps).
+dbt_v4_role() {
+  dbt_is_fleet || return 0
+  if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then echo refused
+  elif [ -n "${DBT_V4_FLUX:-}" ]; then echo flux
+  elif ! _dbt_v4_declared; then return 0
+  elif _dbt_is_main_ws; then echo main
+  else echo orphan; fi
+}
+
+# The settings a flux shares with its main copy, read from the main copy's dbt.conf: where the spaces are carved (the
+# sandbox, its prefixes, the main copy itself) and which engines run (the container's, the main copy's). A flux whose
+# dbt.conf says otherwise would carve its space from another layout, or ask for engines it does not get.
+_DBT_FLUX_SHARED="DBT_BQ_PROJECT DBT_BQ_DATASET_PREFIX DBT_BQ_DATASET_PREFIX_V4 DBT_V4_MAIN_WS DBT_V1_PINS DBT_V2_VERSION"
+
+# _dbt_conf_values DIR — the values of _DBT_FLUX_SHARED that DIR/.devcontainer/dbt.conf gives, from their defaults
+# (dbt_load_conf), one NAME=VALUE per line; return 1: no such file. Sourced in a subshell: nothing leaks here.
+_dbt_conf_values() {
+  local C="${1:-}/.devcontainer/dbt.conf"
+  [ -f "$C" ] || return 1
+  (
+    DBT_BQ_PROJECT=""; DBT_BQ_DATASET_PREFIX=""; DBT_BQ_DATASET_PREFIX_V4=""; DBT_V4_MAIN_WS=""; DBT_V1_PINS=""
+    DBT_V2_VERSION="latest"
+    # shellcheck disable=SC1090
+    . "$C" >/dev/null 2>&1
+    for V in $_DBT_FLUX_SHARED; do printf '%s=%s\n' "$V" "${!V:-}"; done
+  )
+}
+
+# _dbt_flux_main_problem — (a flux) why its main copy does not vouch for it, one reason per line: no main copy named,
+# the main copy not there, or a shared setting (_DBT_FLUX_SHARED) that differs between the two dbt.conf
+_dbt_flux_main_problem() {
+  local M H V
+  case "${DBT_V4_MAIN_WS:-}" in
+    /*) ;;
+    *) echo "DBT_V4_MAIN_WS ('${DBT_V4_MAIN_WS:-}') names no main copy by an absolute path (.devcontainer/dbt.conf): a flux's space is carved from the main copy's"; return 0 ;;
+  esac
+  if ! M="$(_dbt_conf_values "$DBT_V4_MAIN_WS")"; then
+    echo "the main copy $DBT_V4_MAIN_WS (DBT_V4_MAIN_WS) has no .devcontainer/dbt.conf: a flux's space is carved from the main copy's"
+    return 0
+  fi
+  H="$(for V in $_DBT_FLUX_SHARED; do printf '%s=%s\n' "$V" "${!V:-}"; done)"
+  [ "$M" = "$H" ] && return 0
+  diff <(printf '%s\n' "$H") <(printf '%s\n' "$M") 2>/dev/null | LC_ALL=C sed -nE 's/^< ([A-Z0-9_]+)=(.*)$/\1 \2/p' \
+    | while read -r V X; do
+        echo "$V differs from the main copy's ($DBT_V4_MAIN_WS: '$(printf '%s\n' "$M" | LC_ALL=C sed -n "s/^$V=//p")', here: '$X'): a flux shares its sandbox, prefixes and engines with the main copy — align .devcontainer/dbt.conf"
+      done
+}
+
+# _dbt_flux_vestiges — the fluxes, other than its own, this copy shows traces of: a profiles/v4-<A999>.env, or a .env
+# of the v4 space (v4/<member>/…, global-v4/) that links to one — even dangling: `git clean -X` erases the file and
+# leaves the link
+_dbt_flux_vestiges() {
+  (
+    for E in "$DBT_WS"/profiles/v4-*.env; do { [ -e "$E" ] || [ -L "$E" ]; } && basename "$E"; done
+    for N in $(dbt_members); do
+      dbt_use_product "$N" >/dev/null 2>&1 && dbt_v4_enabled || continue
+      P="$(dbt_project_dir v4 2>/dev/null)" || continue
+      [ -L "$P/.env" ] && basename "$(readlink "$P/.env")"
+    done
+    [ -L "$DBT_WS/global-v4/.env" ] && basename "$(readlink "$DBT_WS/global-v4/.env")"
+  ) 2>/dev/null | LC_ALL=C sed -nE 's/^v4-([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789]{3})\.env$/\1/p' \
+    | LC_ALL=C grep -vxF -- "${DBT_V4_FLUX:-@}" | LC_ALL=C sort -u
+}
+
+# dbt_v4_orphan_why — why this copy is an orphan (dbt_v4_role), and the flux it was, if it shows traces of one
+dbt_v4_orphan_why() {
+  local A V
+  A="$(cd "$DBT_WS" 2>/dev/null && pwd -P)"
+  case "${DBT_V4_MAIN_WS:-}" in
+    "") echo "DBT_V4_MAIN_WS is empty in .devcontainer/dbt.conf: no working copy is the main one (if this one is: DBT_V4_MAIN_WS=\"$A\", committed)" ;;
+    /*) echo "this copy is $A, the main copy is DBT_V4_MAIN_WS=\"$DBT_V4_MAIN_WS\" (dbt.conf), and this copy declares no flux (.devcontainer/flux.conf)" ;;
+    *)  echo "DBT_V4_MAIN_WS ('$DBT_V4_MAIN_WS', dbt.conf) is not an absolute path: no working copy is the main one (if this one is: DBT_V4_MAIN_WS=\"$A\")" ;;
+  esac
+  V="$(_dbt_flux_vestiges | paste -sd' ' -)"
+  [ -z "$V" ] || echo "this copy WAS flux $V (traces: profiles/v4-$V.env, or a .env of the v4 space linked to it): restore its .devcontainer/flux.conf (DBT_V4_FLUX=$V) — never make it the main copy"
+}
+
+# _dbt_owns_container — this copy may write the container's state, shared by every copy: ~/.bashrc (`dbt`,
+# DBT_PROFILES_DIR), the global git settings that name a path or lift a lock (core.sshCommand, url.*.insteadOf, an
+# unlocked push), ~/.bigqueryrc, the two engines (/opt/dbt-v1, ~/.local/bin/dbt). A single product: yes (as before). A
+# fleet: its main copy (DBT_V4_MAIN_WS) — or, while DBT_V4_MAIN_WS is empty, a copy that declares no flux (as before
+# fluxes; the doctor asks for it). A flux, a refused declaration, any other copy: never — their `just setup` sets up
+# their own working copy only, and leaves the container to the main copy (_dbt_guest_engines says what it found).
+_dbt_owns_container() {
+  dbt_is_fleet || return 0
+  [ -z "${DBT_V4_FLUX:-}${DBT_V4_FLUX_ERR:-}" ] || return 1
+  [ -n "${DBT_V4_MAIN_WS:-}" ] || return 0
+  _dbt_is_main_ws
+}
+
+# _dbt_guest_engines — (a copy that does not own the container) the engines it found, never installed nor rebuilt
+# from here: a WARNING when they are missing, or when dbt Core was not built from this copy's DBT_V1_PINS (a flux whose
+# pins differ from the main copy's is refused anyway: _dbt_flux_main_problem)
+_dbt_guest_engines() {
+  local OWNER="${DBT_V4_MAIN_WS:-the main copy}"
+  if [ -x "$DBT_V1_VENV/bin/dbt" ]; then
+    echo "  dbt Core $(_dbt_v1_version || echo '?') ($DBT_V1_VENV) — the container's, built by $OWNER"
+    if [ -n "${DBT_V1_PINS:-}" ] && [ "$(cat "$DBT_V1_VENV/.dbt-pins" 2>/dev/null)" != "pins:$DBT_V1_PINS" ]; then
+      echo "  WARNING: this copy pins '$DBT_V1_PINS', the container's dbt Core was not built from it — never rebuilt from here: align DBT_V1_PINS with $OWNER"
+    fi
+  else
+    echo "  WARNING: no dbt Core in $DBT_V1_VENV — never installed from here: just setup in $OWNER"
+  fi
+  if [ -x "$DBT_BIN_DIR/dbt" ]; then
+    echo "  $("$DBT_BIN_DIR/dbt" --version 2>/dev/null | head -1) ($DBT_BIN_DIR/dbt) — the container's"
+  else
+    echo "  WARNING: no dbt v2 at $DBT_BIN_DIR/dbt — never installed from here: just setup in $OWNER"
+  fi
   return 0
 }
 
@@ -1330,6 +1546,7 @@ dbt_v4_flux_problem() {
   done
   C="$(_dbt_flux_clash)"
   [ -z "$C" ] || echo "flux $F reads as a package of the v4 space ($(printf '%s\n' "$C" | paste -sd' ' -)): its datasets ${DBT_BQ_DATASET_PREFIX_V4:-<V4>}_<PACKAGE>__… would be the flux's — choose another flux name"
+  _dbt_flux_main_problem
   return 0
 }
 
@@ -1400,6 +1617,13 @@ dbt_ensure_v4_env() {
     [ -L "$DBT_WS/global-v4/.env" ] && rm -f "$DBT_WS/global-v4/.env"
     return 0
   fi
+  # neither the main copy nor a flux: no v4 space here — said, never made the main copy (dbt_v4_role)
+  if [ "$(dbt_v4_role)" = orphan ]; then
+    dbt_v4_orphan_why | sed 's/^/  WARNING: orphan copy — /'
+    echo "  WARNING: orphan copy — no v4 space here: every v4 command is refused, v1/v2/global build nothing, and no .env of the v4 space is linked"
+    [ -L "$DBT_WS/global-v4/.env" ] && rm -f "$DBT_WS/global-v4/.env"
+    return 0
+  fi
   E="$DST"
   if [ -n "${DBT_V4_FLUX:-}" ]; then
     E="$(dbt_v4_env_file)"
@@ -1426,7 +1650,8 @@ dbt_ensure_v4_env() {
 # Files the editors need inside the worktrees. None of them belongs to the
 # dbt branches: they are hidden from git through the shared info/exclude.
 dbt_ensure_editor_files() {
-  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF
+  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF ROLE
+  ROLE="$(dbt_v4_role)"
   EXCL="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
   if [ -d "$(dirname "$EXCL")" ]; then
     for PAT in ".vscode/" ".env"; do
@@ -1447,12 +1672,14 @@ dbt_ensure_editor_files() {
       if PROJ="$(dbt_project_dir "$V")"; then
         if [ "$V" != v4 ]; then
           _dbt_link_env "$PROJ" "$ENVF"
-        elif [ -f "$ENVF" ] && [ -z "${DBT_V4_FLUX_ERR:-}" ]; then
+        elif [ -f "$ENVF" ] && [ -z "${DBT_V4_FLUX_ERR:-}" ] && [ "$ROLE" != orphan ]; then
           _dbt_link_env "$PROJ" "$ENVF" fix
         else
           [ -L "$PROJ/.env" ] && rm -f "$PROJ/.env"
           if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
             echo "  WARNING: ${P_TAG}flux declaration refused (.devcontainer/flux.conf): no .env in $(_dbt_show v4) — its commands are refused"
+          elif [ "$ROLE" = orphan ]; then
+            echo "  WARNING: ${P_TAG}orphan copy (neither the main copy nor a flux): no .env in $(_dbt_show v4) — its commands are refused"
           else
             echo "  WARNING: ${P_TAG}no ${ENVF#"$DBT_WS"/} (DBT_BQ_DATASET_PREFIX_V4, dbt.conf): no .env in $(_dbt_show v4) — its commands are refused"
           fi
@@ -1484,10 +1711,17 @@ EOF
 }
 
 # ~/.bashrc lives in the container filesystem: the block is rewritten on
-# every start (it embeds the workspace path).
+# every start (it embeds the workspace path). The container's, shared by every
+# working copy: written by the copy that owns the container only
+# (_dbt_owns_container) — a flux's `just setup` never points `dbt` or
+# DBT_PROFILES_DIR at itself.
 dbt_shell_integration() {
   local RC="${HOME:-/home/vscode}/.bashrc" TMP WHERE
   local BEGIN="# >>> dbt-project (lib-dbt.sh) >>>" END="# <<< dbt-project (lib-dbt.sh) <<<"
+  if ! _dbt_owns_container; then
+    echo "  ~/.bashrc (\`dbt\`, DBT_PROFILES_DIR) is the main copy's (${DBT_V4_MAIN_WS:-?}): left as it is — here: just v4|v2 … or bash .devcontainer/dbt-run.sh"
+    return 0
+  fi
   touch "$RC" 2>/dev/null || return 0
   TMP="$(mktemp)"
   awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$RC" > "$TMP" \
@@ -1525,8 +1759,9 @@ dbt_gcloud_status() {
     echo "  ADC (dbt oauth): missing -> just gcp-login"
   fi
   # bq defaults: region + a cost guard (a query whose ESTIMATE exceeds it
-  # fails before running). Created once, then yours.
-  if [ ! -f "${HOME:-}/.bigqueryrc" ]; then
+  # fails before running). Created once, then yours — by the copy that owns
+  # the container.
+  if [ ! -f "${HOME:-}/.bigqueryrc" ] && _dbt_owns_container; then
     cat > "$HOME/.bigqueryrc" <<EOF
 --location=${DBT_BQ_LOCATION:-EU}
 
@@ -1587,17 +1822,35 @@ for line in sys.stdin:
 #       source freshness — and retry, which replays one of them. compile,
 #       show, ls, parse and docs run no hook (checked in dbt-core 1.11).
 #   v2 / global, dbt v2: compile and show run the on-run-start hooks too
-#       (observed with 2.0.6); docs is counted in as a precaution. parse and
-#       ls run none.
-#   v4 / global-v4 — and any V this function does not know: the same, plus
-#       check (dbt 2.0.8, not probed yet). Never an empty list: it would arm
-#       no hook check at all (fail-closed).
+#       (observed with 2.0.6); docs and check (dbt 2.0.8, not probed yet) are
+#       counted in as a precaution. parse and ls run none.
+#   v4 / global-v4 — and any V this function does not know: the same. Never an
+#       empty list: it would arm no hook check at all (fail-closed).
 dbt_hook_commands() {
   case "${1:-}" in
     v1) printf '%s' "run build seed snapshot test freshness retry" ;;
-    v2|global) printf '%s' "run build seed snapshot test freshness retry clone compile show docs" ;;
     *) printf '%s' "run build seed snapshot test freshness retry clone compile show docs check" ;;
   esac
+}
+
+# What a working copy that is not the main one (a flux, an orphan — dbt_v4_role) may run in the v1/v2/global spaces,
+# the main copy's: an allowlist, never a list of what is refused. DBT_FLUX_READ_CMDS is the only dbt command such a
+# copy may name there — as its FIRST word that is not an option (a value given to an option before the command, as in
+# `--log-level debug run`, reads as the command: refused) — and no other word may name a dbt command of
+# DBT_KNOWN_CMDS (a model called `run` costs a refusal, never a missed build).
+DBT_FLUX_READ_CMDS="parse ls list compile show deps"
+DBT_KNOWN_CMDS="build check clean clone compile debug deps docs format freshness help init lint list login ls man parse retry run run-operation seed show snapshot source system test"
+
+# dbt_read_only_args ARGS… — the arguments name a command of DBT_FLUX_READ_CMDS, and nothing else (see above)
+dbt_read_only_args() {
+  local A C0=""
+  for A in "$@"; do case "$A" in -*) ;; *) C0="$A"; break ;; esac; done
+  case "$C0" in ""|*[!a-z-]*) return 1 ;; esac
+  case " $DBT_FLUX_READ_CMDS " in *" $C0 "*) ;; *) return 1 ;; esac
+  for A in "$@"; do
+    case " $DBT_KNOWN_CMDS " in *" $A "*) case " $DBT_FLUX_READ_CMDS " in *" $A "*) ;; *) return 1 ;; esac ;; esac
+  done
+  return 0
 }
 
 # dbt_hook_sources PROJECT_DIR — files that declare hooks, relative to the
@@ -1824,6 +2077,11 @@ _dbt_v1_deps() {
 dbt_engines() {
   dbt_load_conf "${1:-}"
   [ -f "$DBT_CONF" ] || return 0
+  if ! _dbt_owns_container; then
+    echo "[dbt] engines: the container's, installed by the main copy (${DBT_V4_MAIN_WS:-?}) — never from this copy"
+    _dbt_guest_engines
+    return 0
+  fi
   export PATH="${HOME:-/home/vscode}/.local/bin:$PATH"
   if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 \
@@ -1845,6 +2103,11 @@ dbt_process() {
     return 0
   fi
   _dbt_load_token
+  case "$(dbt_v4_role)" in
+    flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})" ;;
+    refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
+    orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
+  esac
   echo "[dbt] upstream access..."
   dbt_git_setup
   if dbt_is_fleet; then
@@ -1880,10 +2143,15 @@ dbt_process() {
     dbt_use_product "" && dbt_ensure_worktrees
   fi
   dbt_use_product "" >/dev/null 2>&1 || true
-  echo "[dbt] engine v1 — dbt Core 1.x..."
-  dbt_ensure_v1_venv
-  echo "[dbt] engine v2 — dbt v2..."
-  dbt_ensure_v2
+  if _dbt_owns_container; then
+    echo "[dbt] engine v1 — dbt Core 1.x..."
+    dbt_ensure_v1_venv
+    echo "[dbt] engine v2 — dbt v2..."
+    dbt_ensure_v2
+  else
+    echo "[dbt] engines — the container's, the main copy's (never installed nor rebuilt from this copy)..."
+    _dbt_guest_engines
+  fi
   if dbt_is_fleet; then
     echo "[dbt] global project..."
     dbt_ensure_global

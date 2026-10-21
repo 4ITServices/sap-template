@@ -66,14 +66,22 @@
 #   - keeps the fluxes apart (lib-dbt.sh, "a flux"): in a working copy that
 #     declares one (.devcontainer/flux.conf, DBT_V4_FLUX=<A999>), v4/ and
 #     global-v4/ run on profiles/v4-<FLUX>.env and write only under
-#     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*), and v1/, v2/, global/ build
-#     nothing; without one, the v4 never writes a flux's space
-#     (<DBT_BQ_DATASET_PREFIX_V4>_<A999>, = or _*). A declaration that cannot be
-#     trusted refuses every dbt command
+#     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*, byte by byte), and v1/, v2/,
+#     global/ run an allowlist only (parse, ls, compile, show, deps); in the
+#     MAIN copy (DBT_V4_MAIN_WS, its real path), the v4 never writes a flux's
+#     space (<DBT_BQ_DATASET_PREFIX_V4>_<A999>, = or _*, any case); a copy that
+#     is neither (an ORPHAN: a clone, a flux whose flux.conf was erased) runs no
+#     v4 command and the same allowlist elsewhere. A declaration that cannot be
+#     trusted — or a flux whose dbt.conf differs from the main copy's on the
+#     sandbox, the prefixes or the engines — refuses every dbt command
 #   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
 #     copy, a probe…): never handed to plain dbt v2 — nor one of ANOTHER
 #     workspace of this kind (a flux's working copy): it runs through its own
-#     guard
+#     guard. Outside every project, plain dbt v2 runs an allowlist only
+#     (--version, help, system, login, man, init), and never with
+#     --project-dir, --profiles-dir, --packages-install-path, DBT_PROJECT_DIR
+#     or DBT_PACKAGES_INSTALL_PATH; a directory of the workspace reached through
+#     a link is routed by its real path
 #   - refuses every command that would execute hooks — the project's own or
 #     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
 #     commands run hooks depends on the engine: see dbt_hook_commands in
@@ -123,6 +131,38 @@ flux_guard() {
   refuse "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: this working copy's flux cannot be trusted — every dbt command is refused:" \
          "${WHY[@]}" \
          "A flux is .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999>, ignored by git (no flux: remove the file); then: just setup"
+}
+
+# orphan_refuse WHAT — an ORPHAN copy (dbt_v4_role: a fleet with a v4, neither the main copy nor a flux) has no v4 space
+orphan_refuse() {
+  local -a WHY=()
+  mapfile -t WHY < <(dbt_v4_orphan_why)
+  refuse "orphan copy: $1 refused — this working copy is neither the main copy (DBT_V4_MAIN_WS) nor a flux: it has no v4 space," \
+         "and its v1/v2/global build nothing (they are the main copy's spaces)." "${WHY[@]}" \
+         "A flux: .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999>, ignored by git. The main copy: DBT_V4_MAIN_WS=\"<its real path>\" in .devcontainer/dbt.conf. Then: just setup"
+}
+
+# role_guard V ARGS… — (run_dbt, after flux_guard) what a working copy that is not the main one runs (dbt_v4_role):
+#   orphan  nothing in the v4 space (v4/, global-v4/);
+#   flux, orphan  in the v1/v2/global spaces — the main copy's, shared with every other flux — the commands of
+#           DBT_FLUX_READ_CMDS only (dbt_read_only_args: an allowlist; parse, ls, compile, show, deps);
+#   a flux's v4 space: its own guards (offenders, space_check).
+# The main copy, a single product, a fleet without a v4: nothing changes.
+role_guard() {
+  local V="$1" R
+  shift
+  R="$(dbt_v4_role)"
+  case "$R" in flux|orphan) ;; *) return 0 ;; esac
+  if dbt_is_v4 "$V"; then
+    [ "$R" = orphan ] && orphan_refuse "\`dbt ${1:-…}\` under $(_dbt_show "$V")"
+    return 0
+  fi
+  dbt_read_only_args "$@" && return 0
+  if [ "$R" = flux ]; then
+    refuse "flux $DBT_V4_FLUX: \`dbt $*\` refused under $(_dbt_show "$V") — a flux writes only its v4 space ($(dbt_v4_prefix), v4/ and global-v4/)." \
+           "The v1/v2/global spaces belong to the main copy: build, test or operate there. Here, the command first: $DBT_FLUX_READ_CMDS."
+  fi
+  orphan_refuse "\`dbt $*\` under $(_dbt_show "$V")"
 }
 
 # check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
@@ -312,6 +352,7 @@ PY
 destinations() {
   local N RC=0
   flux_guard
+  [ "$(dbt_v4_role)" != orphan ] || orphan_refuse "just destinations"
   if dbt_is_assembly "${1:-}"; then destinations_global "$1"; return $?; fi
   if dbt_is_fleet && [ -z "${1:-}" ]; then
     for N in $(dbt_members); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
@@ -700,17 +741,20 @@ space_check() {
 # for everything else inside the v4 space (DBT_BQ_DATASET_PREFIX_V4, = or _*, every flux's included). This copy's v4
 # space: in a flux, <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*); else DBT_BQ_DATASET_PREFIX_V4 (= or _*) minus every
 # flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*). Without a v4 prefix, a v4 node always offends
-# (fail-closed). Spaces compared in upper case; the flux shape spelled byte by byte (mawk, any locale).
+# (fail-closed). BigQuery dataset names are case-sensitive: a write is ACCEPTED byte by byte (the exact prefix, then
+# `_` or the end: JDOE_V4_d005_x is not under JDOE_V4_D005) and REFUSED in any case (the v4 space for v1/v2/global, a
+# flux's shape for the main copy). The flux shape spelled byte by byte (mawk, any locale).
 offenders() {
   local ISV4=0
   dbt_is_v4 "${1:-}" && ISV4=1
   LC_ALL=C awk -F'\t' -v p="${DBT_BQ_PROJECT:-}" -v x="${DBT_BQ_DATASET_PREFIX:-}" -v v4="$ISV4" \
-    -v q="$(_dbt_upper "${DBT_BQ_DATASET_PREFIX_V4:-}")" -v fx="$(_dbt_upper "${DBT_V4_FLUX:-}")" '
-    function under(s, f) { s = toupper(s); return s == f || index(s, f "_") == 1 }
+    -v qx="${DBT_BQ_DATASET_PREFIX_V4:-}" -v q="$(_dbt_upper "${DBT_BQ_DATASET_PREFIX_V4:-}")" -v fx="${DBT_V4_FLUX:-}" '
+    function exact(s, f) { return s == f || index(s, f "_") == 1 }
+    function anycase(s, f) { return exact(toupper(s), toupper(f)) }
     function fluxlike(s,   r) { s = toupper(s); if (index(s, q "_") != 1) return 0
       r = substr(s, length(q) + 2); return r ~ /^[A-Z][0-9][0-9][0-9]$/ || r ~ /^[A-Z][0-9][0-9][0-9]_/ }
-    function here(s) { if (fx != "") return under(s, q "_" fx); return under(s, q) && !fluxlike(s) }
-    NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (q=="" || !here($3))) || (!v4 && q!="" && under($3,q))) {
+    function here(s) { if (fx != "") return exact(s, qx "_" fx); return exact(s, qx) && !fluxlike(s) }
+    NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (qx=="" || !here($3))) || (!v4 && qx!="" && anycase($3,qx))) {
       print "   " $1 " " $4 " -> " $2 "." $3 }'
 }
 
@@ -795,6 +839,7 @@ hooks_approve() {
   flux_guard
   [ -z "${DBT_V4_FLUX:-}" ] \
     || die "flux $DBT_V4_FLUX: the approved hooks (.devcontainer/hooks.approved) are the main copy's — approve them there, never from a flux"
+  [ "$(dbt_v4_role)" != orphan ] || orphan_refuse "just hooks-approve (the approved hooks are the main copy's)"
   if [ -z "$W" ] || [ "$W" = global ]; then
     dbt_is_fleet && M="$WS/global/target/manifest.json" || M="$(dbt_project_dir v2)/target/manifest.json"
   else
@@ -822,6 +867,7 @@ run_dbt() {
   local -a SEL=() UNSEALED=()
   shift
   flux_guard
+  role_guard "$V" "$@"
   JCMD="$(dbt_just_cmd "$V")"
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
   ENGINE="$(dbt_engine "$V")"
@@ -857,13 +903,6 @@ run_dbt() {
     # the arguments the seal of global-v4's hook proof cannot see (refused there: hooks_v4_proof_ok)
     case "$A" in --vars|--vars=*|--profile|--profile=*) UNSEALED+=("${A%%=*}") ;; esac
   done
-
-  # a flux writes its own v4 space and nothing else: its v1/, v2/ and global/ — the main copy's spaces, shared with
-  # every other flux — build, test and operate nothing (compile and show keep their own hook rules)
-  if [ -n "${DBT_V4_FLUX:-}" ] && ! dbt_is_v4 "$V" && [ -n "$CMD_WRITE$CMD_RUNOP$CMD_HOOKS_HARD" ]; then
-    refuse "flux $DBT_V4_FLUX: \`dbt ${CMD_WRITE:-${CMD_HOOKS_HARD:-run-operation}}\` refused under $(_dbt_show "$V") — a flux writes only its v4 space ($(dbt_v4_prefix), v4/ and global-v4/)." \
-           "The v1/v2/global spaces belong to the main copy: build or test there. Here: parse, ls, compile, show."
-  fi
 
   export_env "$V"
   space_check "$V"
@@ -1008,7 +1047,14 @@ PY
 
 # auto — the engine (and the product) from the current directory
 run_auto() {
-  local REL N UP L
+  local REL N UP L D A WSP CP INPROJ=""
+  # a directory of this workspace reached through a link (cd /tmp/lien, a link to v4/<product>/dbt): routed by the
+  # workspace's own paths — the same directory, entered under $WS (relative paths on the command line stay valid)
+  WSP="$(cd "$WS" 2>/dev/null && pwd -P)"; CP="$(pwd -P)"
+  case "$PWD/" in
+    "$WS/"*) ;;
+    *) case "$CP/" in "$WSP/"*) cd "$WS${CP#"$WSP"}" 2>/dev/null || die "cannot enter $WS${CP#"$WSP"}" ;; esac ;;
+  esac
   case "$PWD/" in
     "$WS/global/"*|"$WS/global-v4/"*)
       REL="${PWD#"$WS"/}"
@@ -1033,18 +1079,40 @@ run_auto() {
   done
   # outside the workspace, a dbt project of ANOTHER workspace of this kind (a flux's working copy, another fleet): the
   # `dbt` function of this shell runs this workspace's guard, which does not check that one — and plain dbt v2 would
-  # bypass that workspace's own guard (its flux, its v4 space). It runs through its own guard.
-  UP="$PWD"; L=""
-  case "$UP/" in "$WS/"*) UP="/" ;; esac
-  while [ "$UP" != "/" ] && [ -n "$UP" ]; do
-    [ -f "$UP/dbt_project.yml" ] && L="$UP"
-    if [ -n "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
-      die "${L}: a dbt project of another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')) — this shell's \`dbt\` guards $WS only, and plain dbt v2 would bypass that workspace's guard. Run it there: cd $UP && just v4|v2|… <product> …, or bash $UP/.devcontainer/dbt-run.sh auto … from the project's folder."
-    fi
-    UP="$(dirname "$UP")"
+  # bypass that workspace's own guard (its flux, its v4 space). It runs through its own guard. Both the path as typed
+  # and the real one (a link into that workspace) are walked.
+  for D in "$PWD" "$(pwd -P)"; do
+    UP="$D"; L=""
+    case "$UP/" in "$WS/"*|"$WSP/"*) UP="/" ;; esac
+    while [ "$UP" != "/" ] && [ -n "$UP" ]; do
+      [ -f "$UP/dbt_project.yml" ] && L="$UP" && INPROJ=1
+      if [ -n "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
+        die "${L}: a dbt project of another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')) — this shell's \`dbt\` guards $WS only, and plain dbt v2 would bypass that workspace's guard. Run it there: cd $UP && just v4|v2|… <product> …, or bash $UP/.devcontainer/dbt-run.sh auto … from the project's folder."
+      fi
+      UP="$(dirname "$UP")"
+    done
   done
-  # outside every project there is nothing to guard: plain dbt v2
-  # (`dbt --version`, `dbt system update`, `dbt login`…)
+  # From here on, plain dbt v2 — never on a project chosen from the command line or the environment: the guard routes
+  # by the current directory, and `dbt run --project-dir v4/<product>/dbt` typed at the root would run that project
+  # unguarded (no destination, NEVER_BUILD, hook, v4-space or flux check).
+  for A in "$@"; do
+    case "$A" in
+      --project-dir|--project-dir=*|--profiles-dir|--profiles-dir=*|--packages-install-path|--packages-install-path=*)
+        die "\`dbt … ${A%%=*}\` refused outside a project the guard knows: plain dbt v2 would run another project, profile or packages unguarded. cd into the project (v4/<product>/…), or: just v1|v2|v4 <product> … / just global|global-v4 …" ;;
+    esac
+  done
+  [ -z "${DBT_PROJECT_DIR:-}" ] \
+    || die "DBT_PROJECT_DIR is set ('$DBT_PROJECT_DIR'): plain dbt v2 would run that project unguarded — refused. unset DBT_PROJECT_DIR"
+  [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
+    || die "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): plain dbt v2 would load packages nobody checked — refused. unset DBT_PACKAGES_INSTALL_PATH"
+  # outside every dbt project there is nothing to guard, and nothing to run but what needs no project: an allowlist
+  # (`dbt --version`, `dbt system update`, `dbt login`, `dbt init`…). A project outside every workspace: plain dbt v2.
+  if [ -z "$INPROJ" ]; then
+    case "${1:-}" in
+      ""|--version|--help|-h|help|system|login|man|init) ;;
+      *) die "\`dbt ${1:-}\` outside every dbt project: plain dbt v2 runs only --version, help, system, login, man and init here. A dbt command runs from its project's folder (v4/<product>/…) or through just v1|v2|v4 <product> … / just global|global-v4 …" ;;
+    esac
+  fi
   ENGINE="$(dbt_engine v2)"
   [ -x "$ENGINE" ] || die "dbt v2 not installed ($ENGINE) — run: just setup"
   exec "$ENGINE" "$@"

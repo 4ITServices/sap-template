@@ -218,9 +218,54 @@ and commit messages; this changelog starts at v0.8.12.
   before. `dbt` typed in a dbt project of **another** workspace of this kind (a
   flux's copy) is refused instead of running plain dbt v2. `just destinations`
   and `just doctor` know the flux.
-- **Tests**: 114 more offline checks for fluxes in `scripts/test-lib-dbt.sh`
-  (540 in all), each guard seen failing when removed
-  (`scripts/test-flux-mutants.sh`).
+- **The main copy is named, never inferred from a missing file.** `flux.conf`
+  is ignored by git, so `git clean -X` erases it: a flux copy used to become a
+  second main copy at its next `just setup`, writing the main v4 space. Now a
+  fleet with a v4 names its main working copy in `dbt.conf`,
+  `DBT_V4_MAIN_WS="<its real path>"`; a copy that is neither that one nor a
+  flux — a clone, an ex-flux, a moved main copy, or any copy while
+  `DBT_V4_MAIN_WS` is empty — is an **orphan**: no v4 command at all, the
+  v1/v2/global allowlist below, no `destinations` nor `hooks-approve`, and
+  `just setup` says so (and which flux it was, from its traces) instead of
+  linking it to the main space. `flux.conf` in the main copy is refused.
+- **Only the main copy writes the container's state.** A flux's (or an
+  orphan's) `just setup` sets up its own working copy only: it never rewrites
+  `~/.bashrc` (`dbt`, `DBT_PROFILES_DIR`), `core.sshCommand` or the HTTPS→SSH
+  rewrite, never lifts a push lock (it only adds the ones it needs), never
+  creates `~/.bigqueryrc`, and never installs nor rebuilds an engine
+  (`dbt_engines` included). A flux must share the main copy's sandbox,
+  prefixes and engine pins (`DBT_BQ_PROJECT`, `DBT_BQ_DATASET_PREFIX`,
+  `DBT_BQ_DATASET_PREFIX_V4`, `DBT_V4_MAIN_WS`, `DBT_V1_PINS`,
+  `DBT_V2_VERSION`, read from the main copy's `dbt.conf`), or every dbt
+  command is refused there.
+- **An allowlist outside the main copy's v4.** In a flux or an orphan, `v1/`,
+  `v2/` and `global/` run `parse`, `ls`/`list`, `compile`, `show` and `deps`
+  only — the first word that is not an option must be one of them, and no
+  other word may name a dbt command (`--log-level debug run` is refused).
+  `check` (dbt 2.0.8) now counts as a hook command under v2 and global too.
+- **`dbt` outside every project** runs plain dbt v2 for `--version`, `help`,
+  `system`, `login`, `man` and `init` only, and never with `--project-dir`,
+  `--profiles-dir`, `--packages-install-path`, `DBT_PROJECT_DIR` or
+  `DBT_PACKAGES_INSTALL_PATH` (a hole older than fluxes: `dbt run
+  --project-dir v4/<product>/dbt` typed at the root ran unguarded). A
+  directory of the workspace reached through a link is routed by its real
+  path, and a link into another workspace's project is refused as that
+  project is.
+- **Spaces compared byte by byte when accepted.** BigQuery dataset names are
+  case-sensitive: a write is accepted under the exact prefix only
+  (`JDOE_V4_d005_x` is not under `JDOE_V4_D005`), and still refused in any
+  case. `DBT_BQ_DATASET_PREFIX_V4` may not hold a segment shaped like a flux
+  (`JDOE_V4_D005`). `dbt.conf` setting, changing or unsetting any
+  `DBT_V4_FLUX*` / `_DBT_FLUX*` variable (the file's path, the syntax) refuses
+  every dbt command. `flux.conf` is read byte by byte under `LC_ALL=C`
+  (whatever the locale: a U+2003 line is not blank, any byte may sit in a
+  comment, a NUL byte is refused), as the fleet's Python mirror reads it.
+- **Tests**: 236 more offline checks for fluxes in `scripts/test-lib-dbt.sh`
+  (662 in all), among them two real working copies (a flux's `just setup`
+  leaves `~/.bashrc`, the global git settings and the engines alone; `git
+  clean -fdX` then `just setup` gives an orphan, never a main copy). Each
+  guard of the list in `scripts/test-flux-mutants.sh` is seen failing when
+  removed (89 mutants); the redundant guards it cannot kill are named there.
 
 ### Fixed (on the unreleased dbt-project type)
 
