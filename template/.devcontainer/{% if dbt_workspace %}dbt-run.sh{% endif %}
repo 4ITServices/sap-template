@@ -63,8 +63,48 @@
 #     profiles/v4.env and write only under DBT_BQ_DATASET_PREFIX_V4 (= or _*),
 #     everything else never there — the DATASET_PREFIX in force and the .env
 #     the dbt extension reads are checked on every command, parse included
+#   - keeps the fluxes apart (lib-dbt.sh, "a flux"): in a working copy that
+#     declares one (.devcontainer/flux.conf, DBT_V4_FLUX=<A999>, or H for the
+#     harmonized line), v4/ and
+#     global-v4/ run on profiles/v4-<FLUX>.env and write only under
+#     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*, byte by byte), and v1/, v2/,
+#     global/ run an allowlist only (parse, ls, compile, show, deps) and no
+#     hook at all — whatever dbt.conf approves (compile and show only for a
+#     project that declares none: a hook there writes the main copy's space); in the
+#     MAIN copy (DBT_V4_MAIN_WS, its real path), the v4 never writes a flux's
+#     space (<DBT_BQ_DATASET_PREFIX_V4>_<A999> or _H, = or _*, any case: the
+#     ISO line never writes the harmonized line's space); a copy that
+#     is neither (an ORPHAN: a clone, a flux whose flux.conf was erased) runs no
+#     v4 command and the same allowlist elsewhere. A declaration that cannot be
+#     trusted — or a flux whose dbt.conf differs from the main copy's on the
+#     sandbox, the prefixes or the engines — refuses every dbt command
+#   - keeps the harmonized line (flux H) apart in git too (lib-dbt.sh, "the
+#     harmonized line in git"): its v4 copies on <product>/v4-h only — under
+#     v4/<product>, that copy; under global-v4/, every v4 copy —, a pre-push
+#     guard installed (or every dbt command is refused), its lock
+#     .devcontainer/products-h.lock (just lock, lock-status, lock-checkout),
+#     and clone, state, --state, --defer, --defer-state, --favor-state,
+#     --manage-state, --run-cache-mode, --task-cache-url (and their DBT_*
+#     variables, and the settings files that set them) refused in every space;
+#     an orphan copy or a refused declaration writes and replays no lock
+#   - in a copy that is not the main one, compile and show of the main copy's
+#     spaces only for a project whose packages are installed exactly as locked
+#     (a strict reader: dbt v2 would install the rest and run its hooks unread);
+#     product-new, product-add and referent-add refused (the main copy's: a
+#     repository created from a temporary one, which no hook of the copy sees),
+#     upstream-pull pushes no mirror, dbt login, init and system refused (the
+#     container's state), and --target-path, --log-path, DBT_TARGET_PATH,
+#     DBT_LOG_PATH never inside another working copy (its tools would read
+#     those artifacts as their own)
 #   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
-#     copy, a probe…): never handed to plain dbt v2
+#     copy, a probe…): never handed to plain dbt v2 — nor one of ANOTHER
+#     workspace of this kind (a flux's working copy): it runs through its own
+#     guard. Outside every project, plain dbt v2 runs an allowlist only
+#     (--version, help, system, login, man, init — system, login and init in
+#     the main copy only, never typed inside another copy), and never with
+#     --project-dir, --profiles-dir, --packages-install-path, DBT_PROJECT_DIR
+#     or DBT_PACKAGES_INSTALL_PATH; a directory of the workspace reached through
+#     a link is routed by its real path
 #   - refuses every command that would execute hooks — the project's own or
 #     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
 #     commands run hooks depends on the engine: see dbt_hook_commands in
@@ -84,6 +124,9 @@ WS="$(dirname "$HERE")"
 source "$HERE/lib-dbt.sh"
 dbt_load_conf "$WS"
 
+# the lock of THIS copy: .devcontainer/products.lock — products-h.lock in the harmonized line (lib-dbt.sh, dbt_load_conf)
+LOCKN="$(basename "$DBT_LOCK_FILE")"
+
 die()    { echo "⛔ $*" >&2; exit 1; }
 refuse() { echo "⛔ $1" >&2; shift; for L in "$@"; do echo "   $L" >&2; done; exit 1; }
 
@@ -101,6 +144,136 @@ select_product() {
     *" $N "*) die "which product? ${LIST:-none declared} — e.g. just ${MODE:-v1} <product> $N" ;;
   esac
   die "unknown product '$N' — declared in .devcontainer/products.conf$( [ -n "$(dbt_referents)" ] && echo ' and referents.conf'): ${LIST:-none}"
+}
+
+# flux_guard — a flux declaration that cannot be trusted (dbt_v4_flux_problem, lib-dbt.sh) refuses every dbt command:
+# where this copy writes would be unknown
+flux_guard() {
+  local PB
+  PB="$(dbt_v4_flux_problem)"
+  [ -z "$PB" ] && return 0
+  local -a WHY=()
+  mapfile -t WHY <<< "$PB"
+  refuse "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: this working copy's flux cannot be trusted — every dbt command is refused:" \
+         "${WHY[@]}" \
+         "A flux is .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999> (or H, the harmonized line), ignored by git (no flux: remove the file); then: just setup"
+}
+
+# orphan_refuse WHAT — an ORPHAN copy (dbt_v4_role: a fleet with a v4, neither the main copy nor a flux) has no v4 space
+orphan_refuse() {
+  local -a WHY=()
+  mapfile -t WHY < <(dbt_v4_orphan_why)
+  refuse "orphan copy: $1 refused — this working copy is neither the main copy (DBT_V4_MAIN_WS) nor a flux: it has no v4 space," \
+         "and its v1/v2/global build nothing (they are the main copy's spaces)." "${WHY[@]}" \
+         "A flux: .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999> (or H, the harmonized line), ignored by git. The main copy: DBT_V4_MAIN_WS=\"<its real path>\" in .devcontainer/dbt.conf. Then: just setup"
+}
+
+# role_guard V ARGS… — (run_dbt, after flux_guard) what a working copy that is not the main one runs (dbt_v4_role):
+#   orphan  nothing in the v4 space (v4/, global-v4/);
+#   flux, orphan  in the v1/v2/global spaces — the main copy's, shared with every other flux — the commands of
+#           DBT_FLUX_READ_CMDS only (dbt_read_only_args: an allowlist; parse, ls, compile, show, deps), and no hook
+#           (guest_hooks_guard: dbt v2 runs hooks on compile and show);
+#   a flux's v4 space: its own guards (offenders, space_check).
+# The main copy, a single product, a fleet without a v4: nothing changes.
+role_guard() {
+  local V="$1" R
+  shift
+  R="$(dbt_v4_role)"
+  case "$R" in flux|orphan) ;; *) return 0 ;; esac
+  if dbt_is_v4 "$V"; then
+    [ "$R" = orphan ] && orphan_refuse "\`dbt ${1:-…}\` under $(_dbt_show "$V")"
+    return 0
+  fi
+  dbt_read_only_args "$@" && return 0
+  if [ "$R" = flux ]; then
+    refuse "flux $DBT_V4_FLUX: \`dbt $*\` refused under $(_dbt_show "$V") — a flux writes only its v4 space ($(dbt_v4_prefix), v4/ and global-v4/)." \
+           "The v1/v2/global spaces belong to the main copy: build, test or operate there. Here, the command first: $DBT_FLUX_READ_CMDS."
+  fi
+  orphan_refuse "\`dbt $*\` under $(_dbt_show "$V")"
+}
+
+# guest_space V — this working copy is not the main one (a flux, an orphan: dbt_v4_role), and V is one of the main
+# copy's spaces (v1/, v2/, global/: everything but the v4 space)
+guest_space() {
+  dbt_is_v4 "${1:-}" && return 1
+  case "$(dbt_v4_role)" in flux|orphan) return 0 ;; esac
+  return 1
+}
+
+# guest_hooks_guard V — (run_dbt: a command that may run hooks, in guest_space V) a copy that is not the main one runs
+# NO hook in the main copy's spaces. A hook writes where its project writes — there, the main copy's datasets
+# (DATASET_PREFIX of profiles/dbt.env), shared with every other copy: `just v2 <product> compile` in a flux would run
+# that product's on-run-start hooks against the main copy's v2 space. The hook approvals of dbt.conf —
+# DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 (.devcontainer/hooks.approved), DBT_HOOKS_REVIEWED — are the main copy's:
+# they are never read here. A command of the allowlist that runs hooks (dbt v2: compile, show) passes only for a project
+# whose packages are installed exactly as locked (_dbt_packages_guest_problem: declared in a form a strict reader knows,
+# package-lock.yml locking what is declared, every locked package in dbt_packages/ — or dbt v2 installs the rest by
+# itself on compile, and runs its on-run-start unread) and that declares no hook at all — in its files, its installed
+# packages, or the files of a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
+guest_hooks_guard() {
+  local V="$1" WHO H PK
+  if [ "$(dbt_v4_role)" = flux ]; then WHO="flux $DBT_V4_FLUX"; else WHO="orphan copy"; fi
+  dbt_packages_unchecked "$PROJ" \
+    && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed:" \
+              "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"
+  PK="$(_dbt_packages_guest_problem "$PROJ")"
+  if [ -n "$PK" ]; then
+    local -a WHY=()
+    mapfile -t WHY < <(printf '%s\n' "$PK" | head -n 8)
+    refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed exactly as locked:" \
+           "${WHY[@]}" \
+           "dbt v2 would resolve or install them by itself, and run their hooks unread. Install them first (no hook runs): $JCMD deps" \
+           "— a package-lock.yml it rewrites is never committed from this copy."
+  fi
+  H="$(dbt_hook_sources_deep "$PROJ")"
+  [ -z "$H" ] && return 0
+  {
+    echo "⛔ $WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` refused under $(_dbt_show "$V") — it would run this project's hooks, and they would write"
+    echo "   where the project writes: the main copy's space (DATASET_PREFIX=${DATASET_PREFIX:-?}), shared with every other copy."
+    echo "   A copy that is not the main one runs no hook outside its v4 space: DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 and"
+    echo "   DBT_HOOKS_REVIEWED are the main copy's approvals, never this copy's. Declared in (under ${PROJ#"$WS"/}/):"
+    printf '%s\n' "$H" | head -n 12 | sed 's/^/     /'
+    [ "$(printf '%s\n' "$H" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$H" | wc -l) files)"
+    echo "   Here: parse or ls (no hook runs). Compile or show it in the main copy${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)}."
+  } >&2
+  exit 1
+}
+
+# line_h_guard V — (the harmonized line, flux H) the v4 copies V runs are the line's own (dbt_v4_line_h_branch_problem,
+# lib-dbt.sh): under v4/<product>, that product's; under global-v4/ — it assembles them all — every v4 copy of the
+# fleet. A copy on the ISO line's branch (<product>/v4), or detached outside its own history, is refused (exit): what it
+# would build is the ISO line's code under the harmonized line's space, and what it would commit, the ISO line's
+# branch. Elsewhere (v1/, v2/, global/: no v4 copy read), and in any other copy: nothing.
+line_h_guard() {
+  local V="${1:-}" N PB=""
+  _dbt_is_line_h || return 0
+  case "$V" in
+    v4) PB="$(dbt_v4_line_h_branch_problem)" ;;
+    global-v4) PB="$(for N in $(dbt_members); do ( dbt_use_product "$N" >/dev/null 2>&1 && dbt_v4_line_h_branch_problem ); done)" ;;
+    *) return 0 ;;
+  esac
+  [ -n "$PB" ] || return 0
+  local -a WHY=()
+  mapfile -t WHY <<< "$PB"
+  refuse "flux H (the harmonized line): \`dbt …\` refused under $(_dbt_show "$V") — a v4 copy it reads is not on the line's own branch:" \
+         "${WHY[@]}" \
+         "The harmonized line builds and commits its v4-h branches only (never the ISO line's v4)."
+}
+
+# main_only_guard WHAT — (product-new, product-add, referent-add) what only the main copy does: declare a product or a
+# referent in the committed products.conf / referents.conf, create its repository, publish its branches. A copy that
+# is not the main one (dbt_v4_role: a flux, an orphan, a refused declaration) never does — its pre-push hook would not
+# even see it: product_new pushes main, upstream-<branch>, v1 and v2 from a temporary repository of its own. Case: a
+# referent created from the harmonized line's copy would publish the ISO line's v4 from there, declared in that copy's
+# referents.conf only; the ISO line could no longer create it (« already exists »). Refused (exit); the main copy, a
+# single product and a fleet without a v4: nothing changes.
+main_only_guard() {
+  local R
+  R="$(dbt_v4_role)"
+  case "$R" in flux|orphan|refused) ;; *) return 0 ;; esac
+  refuse "$(case "$R" in flux) echo "flux $DBT_V4_FLUX" ;; orphan) echo "orphan copy" ;; *) echo "flux declaration refused" ;; esac): just $1 refused — only the main copy${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)} declares a product or a referent and publishes its branches." \
+         "This copy's products.conf and referents.conf are the main copy's (committed there); a repository created from here would be pushed" \
+         "from a temporary repository, which this copy's push guard never sees. Run it in the main copy."
 }
 
 # check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
@@ -128,18 +301,27 @@ upstream_pull_one() {
     echo "  $P_REMOTE/$BR: ${OLD:+${OLD:0:9} → }${NEW:0:9}"
     git -C "$WS" --no-pager log --oneline -n 20 "${OLD:+$OLD..}$NEW"
   fi
-  echo "→ mirror on $P_HOME: $P_MIRROR"
-  _dbt_git_home -C "$WS" push "$P_HOME" "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
-    || echo "  WARNING: mirror not pushed ($P_HOME unreachable, or upstream history was rewritten)" >&2
+  # the mirror is the main copy's to refresh: a copy that is not the main one (a flux, an orphan) pushes none — an
+  # orphan has no push guard at all, and the mirror is both lines' (it reads upstream, and says so)
+  case "$(dbt_v4_role)" in
+    flux|orphan|refused)
+      echo "→ mirror on $P_HOME ($P_MIRROR): NOT pushed — a copy that is not the main one refreshes no mirror (just upstream-pull ${P_NAME:-} in the main copy${DBT_V4_MAIN_WS:+, $DBT_V4_MAIN_WS})" ;;
+    *)
+      echo "→ mirror on $P_HOME: $P_MIRROR"
+      _dbt_git_home -C "$WS" push "$P_HOME" "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
+        || echo "  WARNING: mirror not pushed ($P_HOME unreachable, or upstream history was rewritten)" >&2 ;;
+  esac
   for V in $DBT_WORKTREES; do
     B="$(_dbt_br "$V")"
     git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
     echo "  $B: $(git -C "$WS" rev-list --count "$B..$P_REMOTE/$BR") commit(s) behind $P_REMOTE/$BR, $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$B") ahead"
   done
-  if dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
+  if dbt_v4_enabled && _dbt_is_line_h; then
+    echo "  $P_B4 (the harmonized line) follows the ISO line's v4, never $P_B2: recalibrated from $P_HOME/${P_HB4%-h}, in the line's own steps"
+  elif dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
     echo "  $P_B4: $(git -C "$WS" rev-list --count "$P_B4..$P_B2") commit(s) of $P_B2 not in it yet"
   fi
-  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1$(dbt_v4_enabled && printf ', then into %s && git merge %s' "${P_SHOW4%/}" "$P_B2")"
+  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1$(dbt_v4_enabled && ! _dbt_is_line_h && printf ', then into %s && git merge %s' "${P_SHOW4%/}" "$P_B2")"
 }
 
 upstream_pull() {
@@ -191,8 +373,9 @@ _in() { case " ${1:-} " in *" ${2:-} "*) return 0 ;; esac; return 1; }
 
 # dest_compare TMP VA VB PACKAGE — the nodes of VA and VB written to different places (TMP/<V>.tsv)
 dest_compare() {
+  # the v4 prefix of THIS copy: <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> in a flux (dbt_v4_prefix)
   python3 - "$1/$2.tsv" "$1/$3.tsv" "$P_TAG" "${DBT_BQ_DATASET_PREFIX:-}" "${DATASET_PREFIX:-}" "${4:-}" "$2" "$3" \
-    "${DBT_BQ_DATASET_PREFIX_V4:-}" <<'PY'
+    "$(dbt_v4_prefix)" <<'PY'
 import sys
 fa, fb, tag, p1, p2, pkg, va, vb, p4 = sys.argv[1:10]
 # The sandbox prefix is how a branch reaches the sandbox, not a move: v1,
@@ -242,15 +425,17 @@ for k in only2:
 PY
 }
 
-# dest_v4_check NODES.tsv V — every node of the v4 space resolves under DBT_BQ_DATASET_PREFIX_V4, in the sandbox
+# dest_v4_check NODES.tsv V — every node of the v4 space resolves under this copy's v4 prefix (dbt_v4_prefix: in a
+# flux, <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>; else DBT_BQ_DATASET_PREFIX_V4, out of every flux's space), in the sandbox
 dest_v4_check() {
-  local BAD
+  local BAD X
+  X="$(dbt_v4_prefix)"
   BAD="$(offenders "$2" < "$1")"
   if [ -z "$BAD" ]; then
-    echo "== ${P_TAG}$2: every node in the v4 space ($DBT_BQ_PROJECT, ${DBT_BQ_DATASET_PREFIX_V4} / ${DBT_BQ_DATASET_PREFIX_V4}_*) =="
+    echo "== ${P_TAG}$2: every node in the v4 space ($DBT_BQ_PROJECT, ${X} / ${X}_*$( [ -n "${DBT_V4_FLUX:-}" ] && echo ", flux $DBT_V4_FLUX" || echo ", no flux's")) =="
     return 0
   fi
-  echo "== ${P_TAG}$2: $(printf '%s\n' "$BAD" | wc -l) node(s) OUTSIDE the v4 space (${DBT_BQ_DATASET_PREFIX_V4:-?}_*) — their writes are refused =="
+  echo "== ${P_TAG}$2: $(printf '%s\n' "$BAD" | wc -l) node(s) OUTSIDE the v4 space (${X:-?}_*$( [ -n "${DBT_V4_FLUX:-}" ] && echo ", flux $DBT_V4_FLUX" || echo ", out of every flux's")) — their writes are refused =="
   printf '%s\n' "$BAD" | head -n 20
   return 1
 }
@@ -286,12 +471,17 @@ PY
 
 destinations() {
   local N RC=0
+  flux_guard
+  [ "$(dbt_v4_role)" != orphan ] || orphan_refuse "just destinations"
+  # the harmonized line reads its v4 copies on their own branch only (line_h_guard): all of them, or the product's
+  case "${1:-}" in global) ;; ""|global-v4) line_h_guard global-v4 ;; esac
   if dbt_is_assembly "${1:-}"; then destinations_global "$1"; return $?; fi
   if dbt_is_fleet && [ -z "${1:-}" ]; then
     for N in $(dbt_members); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
     return $RC
   fi
   dbt_is_fleet && select_product "$1"
+  ! dbt_v4_enabled || line_h_guard v4
   destinations_one
 }
 
@@ -334,12 +524,22 @@ sync_products() {
     done
   done
   if [ "$MOVED" = 0 ]; then echo "lock: every worktree is at its locked commit"
-  else echo "lock: $MOVED worktree(s) away from products.lock — just lock-status"; fi
+  else echo "lock: $MOVED worktree(s) away from $LOCKN — just lock-status"; fi
 }
 
 # -----------------------------------------------------------------------------
 # The fleet lock (.devcontainer/products.lock)
 # -----------------------------------------------------------------------------
+
+# lock_guard WHAT — the lock is written, and replayed, by the main copy (products.lock) or by a sound flux (the
+# harmonized line's: products-h.lock): a declaration that cannot be trusted refuses it (flux_guard), and so does an
+# ORPHAN copy — a clone, an ex-flux whose flux.conf was erased: its products.lock would be the ISO line's, written from
+# a copy that is not the main one (and an ex-H copy's v4 worktrees are v4-h ones)
+lock_guard() {
+  flux_guard
+  [ "$(dbt_v4_role)" != orphan ] \
+    || orphan_refuse "just $1 — the lock is the main copy's ($LOCKN), or the harmonized line's (products-h.lock, in its copy)"
+}
 
 # lock [PRODUCT] — record the current commit of each v1/v2 (and v4). Only commits that
 # are PUSHED where the product's branches live: a lock that names a commit
@@ -348,13 +548,20 @@ sync_products() {
 lock_write() {
   local ONLY="${1:-}" N V W B U C BAD="" WARN="" TMP OLD NEWL OLDC CHANGES=""
   dbt_is_fleet || die "single-product workspace: nothing to lock"
+  lock_guard lock
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
   TMP="$(mktemp)"
   {
-    echo "# products.lock — the exact commit of every product's v1 and v2, and v4 where there is one (just lock)."
-    echo "# Commit it with the change of global/ (or global-v4/) it goes with: \`git log -p\` on this file"
-    echo "# then tells which product versions each state of global/ was validated with."
+    if _dbt_is_line_h; then
+      echo "# products-h.lock — the lock of the HARMONIZED line (flux H): the exact commit of every product's v1 and v2,"
+      echo "# and of its v4-h where there is one (its v4 lines) (just lock, in the harmonized line's copy). Never products.lock,"
+      echo "# the ISO line's. Commit it with the change of global-v4/ it goes with, on the harmonized line's branch."
+    else
+      echo "# products.lock — the exact commit of every product's v1 and v2, and v4 where there is one (just lock)."
+      echo "# Commit it with the change of global/ (or global-v4/) it goes with: \`git log -p\` on this file"
+      echo "# then tells which product versions each state of global/ was validated with."
+    fi
     echo "# Generated — edit with \`just lock\`, not by hand. Replay: just lock-checkout"
     echo "# PRODUCT        VERSION  COMMIT                                    SOURCE"
   } > "$TMP"
@@ -395,22 +602,22 @@ lock_write() {
   done
   if [ -n "$BAD" ]; then
     rm -f "$TMP"
-    echo "⛔ products.lock NOT written:$BAD" >&2
+    echo "⛔ $LOCKN NOT written:$BAD" >&2
     exit 1
   fi
   [ -z "$WARN" ] || printf '⚠ not part of the lock:%s\n' "$WARN"
   if [ -z "$CHANGES" ] && [ -f "$DBT_LOCK_FILE" ]; then
-    rm -f "$TMP"; echo "products.lock already up to date"; return 0
+    rm -f "$TMP"; echo "$LOCKN already up to date"; return 0
   fi
   cat "$TMP" > "$DBT_LOCK_FILE"; rm -f "$TMP"
-  echo "products.lock written:$CHANGES"
-  echo "Commit it with the global/ change it goes with: git add .devcontainer/products.lock"
+  echo "$LOCKN written:$CHANGES"
+  echo "Commit it with the $(_dbt_is_line_h && echo global-v4/ || echo global/) change it goes with: git add .devcontainer/$LOCKN"
 }
 
 lock_status() {
   local N V
   dbt_is_fleet || die "single-product workspace: no lock"
-  [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/products.lock yet — just lock"; return 0; }
+  [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/$LOCKN yet — just lock"; return 0; }
   for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     for V in $(dbt_versions); do
@@ -425,7 +632,8 @@ lock_status() {
 lock_checkout() {
   local ONLY="${1:-}" N V W L DONE=0
   dbt_is_fleet || die "single-product workspace: no lock"
-  [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/products.lock — nothing to replay"
+  lock_guard lock-checkout
+  [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/$LOCKN — nothing to replay"
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
   for N in $(dbt_members); do
@@ -467,6 +675,7 @@ lock_release() {
 product_add() {
   local N="${1:-}" URL="${2:-}" BR="${3:-}" SUB="${4:-}" GL="${5:-}" HOMEU="${6:-}"
   dbt_is_fleet || die "single-product workspace: no products.conf"
+  main_only_guard product-add
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-add <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -494,6 +703,7 @@ product_add() {
 referent_add() {
   local N="${1:-}" HOMEU="${2:-}" SUB="${3:-}" H U
   dbt_is_fleet || die "single-product workspace: no referents.conf"
+  main_only_guard referent-add
   [ -n "$N" ] && [ -n "$HOMEU" ] || die "usage: just referent-add <name> <url of its own repository> [subdir]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid referent name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "'$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -528,6 +738,7 @@ product_new() {
   local N="${1:-}" URL="${2:-}" BR="${3:-main}" SUB="${4:--}" GL="${5:-no}"
   local A ORG SRC REF REPO HOMEU TMP R PROF
   dbt_is_fleet || die "single-product workspace: no products.conf"
+  main_only_guard product-new
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-new <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -606,7 +817,8 @@ product_new() {
 # The hub is imposed and the env files are loaded (fleet-wide, then the
 # product's own); nothing in them can move the lock. The v4 space (V = v4,
 # global-v4) starts from profiles/v4.env instead of profiles/dbt.env — chosen
-# by the MODE, never by a variable a shell could have exported.
+# by the MODE, never by a variable a shell could have exported; in a flux, from
+# profiles/v4-<FLUX>.env (dbt_v4_env_file: the working copy's flux.conf).
 # _guard_vars — every DBT_* variable of this shell with its value (DBT_SEND_ANONYMOUS_USAGE_STATS aside): what
 # export_env compares around each env file it sources.
 _guard_vars() {
@@ -621,8 +833,8 @@ export_env() {
   if dbt_is_v4 "$V"; then
     _dbt_v4_prefix_ok || refuse "$V: DBT_BQ_DATASET_PREFIX_V4 ('${DBT_BQ_DATASET_PREFIX_V4:-}') is not ${DBT_BQ_DATASET_PREFIX:-<DBT_BQ_DATASET_PREFIX>}_<x> in .devcontainer/dbt.conf:" \
                                 "the v4 has no datasets of its own — every v4 command is refused."
-    BASE="$WS/profiles/v4.env"
-    [ -f "$BASE" ] || refuse "$V: profiles/v4.env is missing — the v4 has no environment of its own." "Run: just setup"
+    BASE="$(dbt_v4_env_file)"
+    [ -f "$BASE" ] || refuse "$V: ${BASE#"$WS"/} is missing — the v4 has no environment of its own${DBT_V4_FLUX:+ in flux $DBT_V4_FLUX}." "Run: just setup"
     [ "$OWN" = "$WS/profiles/dbt.env" ] && OWN=""
   fi
   for F in "$BASE" "$OWN"; do
@@ -643,39 +855,52 @@ export_env() {
 }
 
 # space_check V — after export_env V: the dataset prefix in force and the .env the dbt extension reads in V's
-# project are the v4 space's under v4/ and global-v4/, never the v4 space's anywhere else. Every command, parse
-# included: a manifest computed under the other space's prefix names the other space's tables.
+# project are this copy's v4 space's under v4/ and global-v4/ (dbt_v4_prefix, dbt_v4_env_file: in a flux, its own),
+# never the v4 space's anywhere else. Every command, parse included: a manifest computed under the other space's
+# prefix names the other space's tables.
 space_check() {
-  local V="${1:-}" P L="" E4="$WS/profiles/v4.env"
+  local V="${1:-}" P L="" E4 X
+  E4="$(dbt_v4_env_file)"; X="$(dbt_v4_prefix)"
   if P="$(dbt_project_dir "$V" 2>/dev/null)"; then L="$(readlink -f "$P/.env" 2>/dev/null || true)"; else P=""; fi
   if dbt_is_v4 "$V"; then
-    [ "${DATASET_PREFIX:-}" = "$DBT_BQ_DATASET_PREFIX_V4" ] \
-      || refuse "DATASET_PREFIX is '${DATASET_PREFIX:-}' under $V — the v4 space is $DBT_BQ_DATASET_PREFIX_V4 (profiles/v4.env): refused." \
+    [ "${DATASET_PREFIX:-}" = "$X" ] \
+      || refuse "DATASET_PREFIX is '${DATASET_PREFIX:-}' under $V — the v4 space is $X (${E4#"$WS"/}${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}): refused." \
                 "An env file of the product (profiles/env/${P_NAME:-<name>}.env) must not set DATASET_PREFIX; then: just setup"
     [ -z "$P" ] || [ "$L" = "$(readlink -f "$E4")" ] \
-      || refuse "${P#"$WS"/}/.env does not point to profiles/v4.env: the dbt extension would read — and its Run/Build" \
-                "write — another space there. Run: just setup"
+      || refuse "${P#"$WS"/}/.env does not point to ${E4#"$WS"/}: the dbt extension would read — and its Run/Build" \
+                "write — another space there${DBT_V4_FLUX:+ (this copy is flux $DBT_V4_FLUX)}. Run: just setup"
   elif [ -n "${DBT_BQ_DATASET_PREFIX_V4:-}" ]; then
     ! _dbt_under_v4 "${DATASET_PREFIX:-}" \
       || refuse "DATASET_PREFIX is '$DATASET_PREFIX' under $V: that is the v4 space ($DBT_BQ_DATASET_PREFIX_V4), never written from $V — refused." \
                 "Check profiles/dbt.env and profiles/env/*.env."
-    [ -z "$P" ] || [ -z "$L" ] || [ "$L" != "$(readlink -f "$E4")" ] \
-      || refuse "${P#"$WS"/}/.env points to profiles/v4.env: the dbt extension would write $V into the v4 space." \
+    [ -z "$P" ] || [ -z "$L" ] || ! _dbt_is_v4_env "$L" \
+      || refuse "${P#"$WS"/}/.env points to profiles/$(basename "$L"): the dbt extension would write $V into the v4 space." \
                 "Point it back to its env file (or remove it), then: just setup"
   fi
   return 0
 }
 
 # offenders V < destinations — the nodes V may not write ("   type name -> db.schema"): outside the sandbox
-# project, outside DBT_BQ_DATASET_PREFIX — and, the v4 space, outside DBT_BQ_DATASET_PREFIX_V4 (= or _*) for v4/
-# and global-v4/, inside it for everything else. Without a v4 prefix, a v4 node always offends (fail-closed).
+# project, outside DBT_BQ_DATASET_PREFIX — and, the v4 space, for v4/ and global-v4/ outside this copy's v4 space,
+# for everything else inside the v4 space (DBT_BQ_DATASET_PREFIX_V4, = or _*, every flux's included). This copy's v4
+# space: in a flux, <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*); else DBT_BQ_DATASET_PREFIX_V4 (= or _*) minus every
+# flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*: the harmonized line's, never
+# written by the main copy's ISO line). Without a v4 prefix, a v4 node always offends
+# (fail-closed). BigQuery dataset names are case-sensitive: a write is ACCEPTED byte by byte (the exact prefix, then
+# `_` or the end: JDOE_V4_d005_x is not under JDOE_V4_D005) and REFUSED in any case (the v4 space for v1/v2/global, a
+# flux's shape for the main copy). The flux shape spelled byte by byte (mawk, any locale).
 offenders() {
   local ISV4=0
   dbt_is_v4 "${1:-}" && ISV4=1
-  awk -F'\t' -v p="${DBT_BQ_PROJECT:-}" -v x="${DBT_BQ_DATASET_PREFIX:-}" -v v4="$ISV4" \
-    -v q="$(printf '%s' "${DBT_BQ_DATASET_PREFIX_V4:-}" | tr '[:lower:]' '[:upper:]')" '
-    function under(s, f) { s = toupper(s); return s == f || index(s, f "_") == 1 }
-    NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (q=="" || !under($3,q))) || (!v4 && q!="" && under($3,q))) {
+  LC_ALL=C awk -F'\t' -v p="${DBT_BQ_PROJECT:-}" -v x="${DBT_BQ_DATASET_PREFIX:-}" -v v4="$ISV4" \
+    -v qx="${DBT_BQ_DATASET_PREFIX_V4:-}" -v q="$(_dbt_upper "${DBT_BQ_DATASET_PREFIX_V4:-}")" -v fx="${DBT_V4_FLUX:-}" '
+    function exact(s, f) { return s == f || index(s, f "_") == 1 }
+    function anycase(s, f) { return exact(toupper(s), toupper(f)) }
+    function fluxlike(s,   r) { s = toupper(s); if (index(s, q "_") != 1) return 0
+      r = substr(s, length(q) + 2); if (r == "H" || index(r, "H_") == 1) return 1
+      return r ~ /^[A-Z][0-9][0-9][0-9]$/ || r ~ /^[A-Z][0-9][0-9][0-9]_/ }
+    function here(s) { if (fx != "") return exact(s, qx "_" fx); return exact(s, qx) && !fluxlike(s) }
+    NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (qx=="" || !here($3))) || (!v4 && qx!="" && anycase($3,qx))) {
       print "   " $1 " " $4 " -> " $2 "." $3 }'
 }
 
@@ -704,12 +929,12 @@ hooks_compile_ok() {
 # hooks_v4_proof_ok NAME — a name of the v4 space listed in DBT_HOOKS_COMPILE_OK: the v4 has no approved-hooks list, so
 # its compile/show runs only while the proof of its hooks (DBT_HOOKS_V4_PROOF, a file of the workspace) holds for the
 # files on disk — its one verdict line carries the seal the guard recomputes here (dbt_hooks_v4_seal,
-# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
+# dbt_hooks_v4_verdict; in a flux, its own file: dbt_hooks_v4_proof_path). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
 # collected by run_dbt: --vars overrides the vars of the sealed dbt_project.yml — elementary's disable_* among them —,
 # --profile or DBT_PROFILE another profile than the sealed one), no proof named, a state that cannot be sealed, a proof
 # whose seal no longer matches.
 hooks_v4_proof_ok() {
-  local NAME="$1" S
+  local NAME="$1" S PF
   [ "$NAME" = global-v4 ] \
     || refuse "$NAME is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own (only global-v4 has one):" \
               "\`dbt ${CMD_HOOKS:-compile}\` refused. Remove it from DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)."
@@ -726,12 +951,15 @@ hooks_v4_proof_ok() {
     || refuse "global-v4: its hooks cannot be sealed — a package declared in a form the seal does not read, a link or a special" \
               "file in macros/, vendor/ or an installed package, or dbt_packages/ not exactly what package-lock.yml locks:" \
               "\`dbt ${CMD_HOOKS:-compile}\` refused. Install its packages (no hook runs): $JCMD deps; then prove its hooks again."
-  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" \
-    || refuse "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) —" \
+  # a proof holds for one flux only (or for the main copy only): it is a file of its own (dbt_hooks_v4_proof_path), its
+  # verdict line names the flux, and the seal covers it
+  PF="$(dbt_hooks_v4_proof_path)"
+  dbt_hooks_v4_verdict "$WS/$PF" "$S" "${DBT_V4_FLUX:-}" \
+    || refuse "global-v4: the proof of its hooks ($PF) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) —" \
               "something that decides which hooks run, or what they do, changed since it was written, or it has no single" \
-              "verdict line « VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <hex> »: \`dbt ${CMD_HOOKS:-compile}\` refused." \
-              "Prove its hooks again (the tool that writes $DBT_HOOKS_V4_PROOF), then compile."
-  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF)" >&2
+              "verdict line « $(dbt_hooks_v4_verdict_line '<hex>' "${DBT_V4_FLUX:-}") »: \`dbt ${CMD_HOOKS:-compile}\` refused." \
+              "Prove its hooks again (the tool that writes $PF$( [ -n "${DBT_V4_FLUX:-}" ] && echo ", in this flux's copy: DBT_HOOKS_V4_PROOF with -$DBT_V4_FLUX")), then compile."
+  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $PF${DBT_V4_FLUX:+, flux $DBT_V4_FLUX})" >&2
 }
 
 # DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks; the v4 space has no
@@ -756,6 +984,10 @@ hooks_v2_ok() {
 hooks_approve() {
   local W="${1:-}" M N
   case "$W" in global-v4|v4|v4/*) die "the v4 space has no approved-hooks list: its hooks stay refused (DBT_HOOKS_COMPILE_OK may name global-v4 or v4/<product>, for compile/show only)" ;; esac
+  flux_guard
+  [ -z "${DBT_V4_FLUX:-}" ] \
+    || die "flux $DBT_V4_FLUX: the approved hooks (.devcontainer/hooks.approved) are the main copy's — approve them there, never from a flux"
+  [ "$(dbt_v4_role)" != orphan ] || orphan_refuse "just hooks-approve (the approved hooks are the main copy's)"
   if [ -z "$W" ] || [ "$W" = global ]; then
     dbt_is_fleet && M="$WS/global/target/manifest.json" || M="$(dbt_project_dir v2)/target/manifest.json"
   else
@@ -777,11 +1009,64 @@ hooks_approve() {
   echo "$N hook(s) of ${M#"$WS"/} approved — $(grep -vc '^#' "$HOOKS_APPROVED_FILE") in ${HOOKS_APPROVED_FILE#"$WS"/}"
 }
 
+# _ws_root_of PATH — the root of the workspace of this kind (.devcontainer/dbt-run.sh and .devcontainer/lib-dbt.sh)
+# that PATH lies in, walking up from PATH itself; return 1: none
+_ws_root_of() {
+  local U="${1:-}"
+  while [ -n "$U" ] && [ "$U" != "/" ]; do
+    [ -f "$U/.devcontainer/dbt-run.sh" ] && [ -f "$U/.devcontainer/lib-dbt.sh" ] && { printf '%s' "$U"; return 0; }
+    U="$(dirname "$U")"
+  done
+  return 1
+}
+
+# The variables that set where dbt writes its artifacts or its logs (dbt 2.0.8: DBT_TARGET_PATH, DBT_LOG_PATH,
+# DBT_DOCS_TARGET_PATH — strings of its binary, not tried on the engine): a pattern, read by guest_paths_guard
+DBT_GUEST_PATH_ENV_RE='^_?DBT_[A-Z0-9_]*(TARGET_PATH|LOG_PATH)$'
+
+# guest_paths_guard DIR ARGS… — (run_dbt) a copy that is not the main one (dbt_v4_role: a flux, an orphan) writes its
+# artifacts and its logs nowhere in ANOTHER workspace of this kind — the main copy above all: `just v4 <p> compile
+# --target-path <main copy>/v4/<p>/dbt/target` from the harmonized line would put its manifest where the ISO line's
+# tools read theirs (estimer_build.py, the cost gates). --target-path, --log-path (= or as the next word) and the
+# variables of DBT_GUEST_PATH_ENV_RE, resolved from DIR (where dbt runs; .. and links resolved), may name this copy or
+# a place outside every workspace (/tmp/…, as the fleet's tools do) — never another copy. Refused (exit) otherwise. The
+# main copy, a single product, a fleet without a v4: nothing changes. Not read: a target-path written in a dbt_project.yml.
+guest_paths_guard() {
+  local DIR="$1" A NX="" X N VAL R ROOT ME
+  local -a PS=() BAD=()
+  shift
+  case "$(dbt_v4_role)" in flux|orphan) ;; *) return 0 ;; esac
+  for A in "$@"; do
+    if [ -n "$NX" ]; then PS+=("$NX $A"); NX=""; continue; fi
+    case "$A" in
+      --target-path|--log-path) NX="$A" ;;
+      --target-path=*|--log-path=*) PS+=("${A%%=*} ${A#*=}") ;;
+    esac
+  done
+  for N in $(compgen -e | LC_ALL=C grep -E "$DBT_GUEST_PATH_ENV_RE"); do PS+=("$N ${!N}"); done
+  ME="$(cd "$WS" 2>/dev/null && pwd -P)"
+  for X in ${PS[@]+"${PS[@]}"}; do
+    N="${X%% *}"; VAL="${X#* }"
+    [ -n "$VAL" ] || continue
+    case "$VAL" in /*) R="$VAL" ;; *) R="$DIR/$VAL" ;; esac
+    R="$(realpath -m -- "$R" 2>/dev/null)" || R=""
+    ROOT="$(_ws_root_of "$R")" || continue
+    [ "$(cd "$ROOT" 2>/dev/null && pwd -P)" = "$ME" ] || BAD+=("$N $VAL → $R, in $ROOT")
+  done
+  [ -z "${BAD[*]-}" ] && return 0
+  refuse "$( [ "$(dbt_v4_role)" = flux ] && echo "flux $DBT_V4_FLUX" || echo "orphan copy"): \`dbt …\` refused — it would write its artifacts or its logs in another working copy:" \
+         "${BAD[@]}" \
+         "A copy writes in itself only, or outside every copy (a /tmp/… directory): another copy's target/ is read by that copy's tools as its own."
+}
+
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
-  local HOOKS_CHECK="" NEW
-  local -a SEL=() UNSEALED=()
+  local HOOKS_CHECK="" NEW E
+  local -a SEL=() UNSEALED=() STATEARGS=()
   shift
+  flux_guard
+  role_guard "$V" "$@"
+  line_h_guard "$V"
   JCMD="$(dbt_just_cmd "$V")"
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
   ENGINE="$(dbt_engine "$V")"
@@ -816,6 +1101,8 @@ run_dbt() {
     esac
     # the arguments the seal of global-v4's hook proof cannot see (refused there: hooks_v4_proof_ok)
     case "$A" in --vars|--vars=*|--profile|--profile=*) UNSEALED+=("${A%%=*}") ;; esac
+    # what brings another space's relations or state in (refused in the harmonized line, below)
+    case " $DBT_LINE_H_STATE_ARGS " in *" ${A%%=*} "*) STATEARGS+=("${A%%=*}") ;; esac
   done
 
   export_env "$V"
@@ -826,13 +1113,31 @@ run_dbt() {
   [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
     || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
               "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
+  # a copy that is not the main one: its artifacts and logs never in another copy (guest_paths_guard), resolved from
+  # where dbt runs (below: the project's folder, or the caller's folder inside it)
+  case "$PWD/" in "$PROJ/"*) guest_paths_guard "$PWD" "$@" ;; *) guest_paths_guard "$PROJ" "$@" ;; esac
+  # the harmonized line: nothing that copies another space's relations or reads its state, in any space — from the
+  # command line, an exported variable (DBT_LINE_H_STATE_ENV_RE) or a settings file (dbt_line_h_state_settings_problem)
+  if _dbt_is_line_h; then
+    for E in $(compgen -e | LC_ALL=C grep -E "$DBT_LINE_H_STATE_ENV_RE"); do STATEARGS+=("$E (exported)"); done
+    while IFS= read -r E; do [ -z "$E" ] || STATEARGS+=("$E"); done < <(dbt_line_h_state_settings_problem "$PROJ")
+    [ -z "${STATEARGS[*]-}" ] \
+      || refuse "flux H (the harmonized line): \`dbt $*\` refused — ${STATEARGS[*]}: clone, deferral, state comparison and service-backed" \
+                "dbt State bring another space's relations or state into the line (\`dbt clone --state <the ISO line's manifest>\` would copy" \
+                "ISO tables under $(dbt_v4_prefix)). Refused here — options, their variables (DBT_STATE, DBT_DEFER, DBT_ENGINE_*STATE*…)" \
+                "and the settings files that set them (~/.dbt/user_settings.yml, dbt_project.yml: flags, dbt-cloud; dbt_cloud.yml) — until a later change of the" \
+                "template opens them."
+  fi
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
     refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \
            "Read the macro first; to allow it, set DBT_ALLOW_RUN_OPERATION=1 in .devcontainer/dbt.conf."
   fi
 
-  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
+  # a copy that is not the main one, in the main copy's spaces: no hook, whatever dbt.conf approves (guest_hooks_guard)
+  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && guest_space "$V"; then
+    guest_hooks_guard "$V"
+  elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
     echo "· hooks: \`dbt $CMD_HOOKS\` allowed for $(hooks_compile_name "$V") (DBT_HOOKS_COMPILE_OK in dbt.conf)" >&2
   elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_v2_ok "$V"; then
     HOOKS_CHECK=1   # against the approved hooks, once the manifest is fresh (below)
@@ -880,8 +1185,10 @@ run_dbt() {
     BAD="$(printf '%s\n' "$OUT" | offenders "$V")"
     if [ -n "$BAD" ]; then
       echo "⛔ \`dbt $CMD_WRITE\` refused: $(printf '%s\n' "$BAD" | wc -l) selected node(s) would be written outside the sandbox" >&2
-      if dbt_is_v4 "$V"; then
-        echo "   (allowed for the v4 space: project $DBT_BQ_PROJECT, dataset $DBT_BQ_DATASET_PREFIX_V4 or ${DBT_BQ_DATASET_PREFIX_V4}_*):" >&2
+      if dbt_is_v4 "$V" && [ -n "${DBT_V4_FLUX:-}" ]; then
+        echo "   (allowed for the v4 space of flux $DBT_V4_FLUX: project $DBT_BQ_PROJECT, dataset $(dbt_v4_prefix) or $(dbt_v4_prefix)_* — never the main v4 space nor another flux's):" >&2
+      elif dbt_is_v4 "$V"; then
+        echo "   (allowed for the v4 space: project $DBT_BQ_PROJECT, dataset $DBT_BQ_DATASET_PREFIX_V4 or ${DBT_BQ_DATASET_PREFIX_V4}_* — never a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999>[_*], nor the harmonized line's, ${DBT_BQ_DATASET_PREFIX_V4}_H[_*]):" >&2
       else
         echo "   (allowed: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, dataset starting with $DBT_BQ_DATASET_PREFIX}${DBT_BQ_DATASET_PREFIX_V4:+, never $DBT_BQ_DATASET_PREFIX_V4 nor ${DBT_BQ_DATASET_PREFIX_V4}_* — the v4 space}):" >&2
       fi
@@ -959,7 +1266,14 @@ PY
 
 # auto — the engine (and the product) from the current directory
 run_auto() {
-  local REL N UP
+  local REL N UP L D A WSP CP INPROJ=""
+  # a directory of this workspace reached through a link (cd /tmp/lien, a link to v4/<product>/dbt): routed by the
+  # workspace's own paths — the same directory, entered under $WS (relative paths on the command line stay valid)
+  WSP="$(cd "$WS" 2>/dev/null && pwd -P)"; CP="$(pwd -P)"
+  case "$PWD/" in
+    "$WS/"*) ;;
+    *) case "$CP/" in "$WSP/"*) cd "$WS${CP#"$WSP"}" 2>/dev/null || die "cannot enter $WS${CP#"$WSP"}" ;; esac ;;
+  esac
   case "$PWD/" in
     "$WS/global/"*|"$WS/global-v4/"*)
       REL="${PWD#"$WS"/}"
@@ -982,8 +1296,57 @@ run_auto() {
     [ "$UP" = "$WS" ] && break
     UP="$(dirname "$UP")"
   done
-  # outside every project there is nothing to guard: plain dbt v2
-  # (`dbt --version`, `dbt system update`, `dbt login`…)
+  # outside the workspace, a dbt project of ANOTHER workspace of this kind (a flux's working copy, another fleet): the
+  # `dbt` function of this shell runs this workspace's guard, which does not check that one — and plain dbt v2 would
+  # bypass that workspace's own guard (its flux, its v4 space). It runs through its own guard. Both the path as typed
+  # and the real one (a link into that workspace) are walked.
+  for D in "$PWD" "$(pwd -P)"; do
+    UP="$D"; L=""
+    case "$UP/" in "$WS/"*|"$WSP/"*) UP="/" ;; esac
+    while [ "$UP" != "/" ] && [ -n "$UP" ]; do
+      [ -f "$UP/dbt_project.yml" ] && L="$UP" && INPROJ=1
+      if [ -n "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
+        die "${L}: a dbt project of another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')) — this shell's \`dbt\` guards $WS only, and plain dbt v2 would bypass that workspace's guard. Run it there: cd $UP && just v4|v2|… <product> …, or bash $UP/.devcontainer/dbt-run.sh auto … from the project's folder."
+      fi
+      # outside its dbt projects, another workspace of this kind still decides what writes the container's state from
+      # there (dbt login, init, system: its guard, below) — never this shell's guard on its behalf
+      if [ -z "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
+        case "${1:-}" in login|init|system)
+          die "\`dbt ${1}\` in another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')): this shell's \`dbt\` guards $WS only — that workspace's guard decides. Run it there: bash $UP/.devcontainer/dbt-run.sh auto ${1} …" ;;
+        esac
+      fi
+      UP="$(dirname "$UP")"
+    done
+  done
+  # From here on, plain dbt v2 — never on a project chosen from the command line or the environment: the guard routes
+  # by the current directory, and `dbt run --project-dir v4/<product>/dbt` typed at the root would run that project
+  # unguarded (no destination, NEVER_BUILD, hook, v4-space or flux check).
+  for A in "$@"; do
+    case "$A" in
+      --project-dir|--project-dir=*|--profiles-dir|--profiles-dir=*|--packages-install-path|--packages-install-path=*)
+        die "\`dbt … ${A%%=*}\` refused outside a project the guard knows: plain dbt v2 would run another project, profile or packages unguarded. cd into the project (v4/<product>/…), or: just v1|v2|v4 <product> … / just global|global-v4 …" ;;
+    esac
+  done
+  [ -z "${DBT_PROJECT_DIR:-}" ] \
+    || die "DBT_PROJECT_DIR is set ('$DBT_PROJECT_DIR'): plain dbt v2 would run that project unguarded — refused. unset DBT_PROJECT_DIR"
+  [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
+    || die "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): plain dbt v2 would load packages nobody checked — refused. unset DBT_PACKAGES_INSTALL_PATH"
+  # outside every dbt project there is nothing to guard, and nothing to run but what needs no project: an allowlist
+  # (`dbt --version`, `dbt system update`, `dbt login`, `dbt init`…). A project outside every workspace: plain dbt v2.
+  if [ -z "$INPROJ" ]; then
+    case "${1:-}" in
+      ""|--version|--help|-h|help|system|login|man|init) ;;
+      *) die "\`dbt ${1:-}\` outside every dbt project: plain dbt v2 runs only --version, help, system, login, man and init here. A dbt command runs from its project's folder (v4/<product>/…) or through just v1|v2|v4 <product> … / just global|global-v4 …" ;;
+    esac
+    # login, init and system write the container's state — ~/.dbt (user_settings.yml: `dbt login` offers « flags:
+    # manage_state: true », which every copy reads), the profile hub DBT_PROFILES_DIR names (the main copy's), the engine
+    # ~/.local/bin/dbt: the main copy's (_dbt_owns_container), never a copy that is not the main one (dbt_v4_role)
+    case "${1:-}" in login|init|system)
+      case "$(dbt_v4_role)" in flux|orphan|refused)
+        die "\`dbt ${1}\` refused in this copy ($(dbt_v4_role)${DBT_V4_FLUX:+ $DBT_V4_FLUX}): it writes the container's state (~/.dbt, the profile hub, the engine), which is the main copy's${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)} — run it there, knowingly: ~/.dbt/user_settings.yml is read by every copy." ;;
+      esac ;;
+    esac
+  fi
   ENGINE="$(dbt_engine v2)"
   [ -x "$ENGINE" ] || die "dbt v2 not installed ($ENGINE) — run: just setup"
   exec "$ENGINE" "$@"

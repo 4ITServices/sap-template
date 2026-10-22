@@ -253,7 +253,7 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
     [ -e "$D/$absent" ] && bad "FLEET: $absent ne devrait PAS exister" || pass "FLEET: pas de $absent"
   done
   for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh \
-                 .devcontainer/dbt.conf .devcontainer/products.conf \
+                 .devcontainer/dbt.conf .devcontainer/products.conf .devcontainer/git-push-garde-h.sh \
                  .devcontainer/features/google-cloud-cli/install.sh .ignore profiles/dbt.env \
                  global/dbt_project.yml global/packages.yml global/macros/generate_schema_name.sql \
                  global/.gitignore justfile CLAUDE.md README.md; do
@@ -276,6 +276,15 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
   grep -q 'dbt_workspace' "$D/.copier-answers.yml" && bad "FLEET: la variable calculée dbt_workspace est enregistrée" || pass "FLEET: dbt_workspace (calculée) absente des réponses"
   grep -q 'just product-add' "$D/justfile" && grep -q '^v1 product \*args:' "$D/justfile" && pass "FLEET: justfile de flotte (product-add, v1 <produit>)" || bad "FLEET: justfile de flotte inattendu"
   grep -q 'dbt-fleet' "$D/CLAUDE.md" && grep -q 'global/' "$D/CLAUDE.md" && pass "FLEET: CLAUDE.md de flotte" || bad "FLEET: CLAUDE.md inattendu"
+  grep -qxF '/.devcontainer/flux.conf' "$D/.gitignore" && grep -qxF '/profiles/v4-*.env' "$D/.gitignore" \
+    && pass "FLEET: .gitignore ignore la déclaration d'un flux et son environnement" || bad "FLEET: .gitignore n'ignore pas le flux"
+  grep -q 'A FLUX' "$D/.devcontainer/dbt.conf" && ! grep -q '^[[:space:]]*DBT_V4_FLUX=' "$D/.devcontainer/dbt.conf" \
+    && pass "FLEET: dbt.conf documente le flux sans en déclarer (jamais dans dbt.conf)" || bad "FLEET: dbt.conf et le flux"
+  grep -qx 'DBT_V4_MAIN_WS=""' "$D/.devcontainer/dbt.conf" && grep -q 'The MAIN working copy is NAMED' "$D/.devcontainer/dbt.conf" \
+    && pass "FLEET: dbt.conf documente la copie principale (DBT_V4_MAIN_WS, vide au rendu : à nommer avant toute v4)" || bad "FLEET: dbt.conf sans DBT_V4_MAIN_WS"
+  # shellcheck disable=SC2034  # DBT_WS : lu par le dbt.conf sourcé
+  ( set -eu; DBT_WS="$D"; . "$D/.devcontainer/dbt.conf"; [ -z "${DBT_V4_MAIN_WS-x}" ] ) \
+    && pass "FLEET: dbt.conf se source sous set -eu, DBT_V4_MAIN_WS vide" || bad "FLEET: dbt.conf ne se source pas proprement"
   sh_ok=1
   for f in "$D"/.devcontainer/*.sh; do bash -n "$f" 2>/dev/null || { bad "FLEET: erreur de syntaxe dans ${f#"$D"/}"; sh_ok=0; }; done
   [ "$sh_ok" -eq 1 ] && pass "FLEET: tous les scripts passent bash -n"
@@ -286,12 +295,14 @@ else
   bad "FLEET: copier a échoué"
 fi
 grep -q 'dbt_workspace' "$WORK/off/.copier-answers.yml" && bad "OFF: dbt_workspace enregistrée dans les réponses" || pass "OFF: dbt_workspace absente des réponses"
-for leak in .devcontainer/products.conf global; do
+for leak in .devcontainer/products.conf global .devcontainer/git-push-garde-h.sh; do
   [ -e "$WORK/dbt/$leak" ] && bad "DBT: $leak (flotte) ne devrait PAS exister en dbt-project" || pass "DBT: pas de $leak"
 done
+grep -qF 'flux' "$WORK/dbt/.gitignore" && bad "DBT: le flux (flotte) ne devrait pas être dans le .gitignore d'un projet seul" || pass "DBT: pas de flux dans le .gitignore d'un projet seul"
+grep -q 'DBT_V4_MAIN_WS' "$WORK/dbt/.devcontainer/dbt.conf" && bad "DBT: DBT_V4_MAIN_WS (flotte) ne devrait pas être dans le dbt.conf d'un projet seul" || pass "DBT: pas de DBT_V4_MAIN_WS dans le dbt.conf d'un projet seul"
 
 echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
-for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/dbt.conf \
+for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/git-push-garde-h.sh .devcontainer/dbt.conf \
             .devcontainer/features .ignore profiles; do
   [ -e "$WORK/off/$leak" ] && bad "OFF: $leak ne devrait PAS exister" || pass "OFF: pas de $leak"
 done

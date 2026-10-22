@@ -26,6 +26,45 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=1; }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else bad "$d"; fi; }
 refute() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; else pass "$d"; fi; }
 has()  { grep -qF -- "$2" <<<"$1"; }
+# mklock DIR [FILE] — le package-lock.yml que dbt v2 écrirait pour DIR/FILE (packages.yml par défaut), recalculé ici
+# indépendamment de la lib : sha1 des entrées déclarées en JSON compact, clés triées, une par ligne, lignes triées ; le nom
+# d'un paquet local est le `name:` de son dbt_project.yml, celui d'un autre la fin de son adresse
+mklock() {
+  python3 -I - "$1" "${2:-packages.yml}" <<'PY'
+import hashlib, json, os, re, sys
+d, f = sys.argv[1], sys.argv[2]
+ents, cur = [], None
+def val(v):
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        return [i.strip().strip('"') for i in v[1:-1].split(",")]
+    return v.strip('"')
+for l in open(os.path.join(d, f)):
+    l = re.sub(r"(^|\s)#.*$", "", l).rstrip()
+    m = re.match(r"^\s*-\s+(\w[\w-]*):\s*(.*)$", l)
+    if m:
+        cur = {m.group(1): val(m.group(2))}; ents.append(cur); continue
+    m = re.match(r"^\s+(\w[\w-]*):\s*(.*)$", l)
+    if m and cur is not None:
+        cur[m.group(1)] = val(m.group(2))
+h = hashlib.sha1("\n".join(sorted(json.dumps(e, sort_keys=True, separators=(",", ":")) for e in ents)).encode()).hexdigest()
+out = ["packages:"]
+for e in ents:
+    k = [i for i in ("package", "git", "local", "tarball", "private") if i in e][0]
+    if k == "local":
+        n = re.search(r"^name:\s*['\"]?(\w+)", open(os.path.join(d, e[k], "dbt_project.yml")).read(), re.M).group(1)
+    else:
+        n = e[k].rstrip("/").split("/")[-1].removesuffix(".git")
+    out += [f"- {k}: {e[k]}", f"  name: {n}"] + [f"  {x}: {e[x] if isinstance(e[x], str) else json.dumps(e[x])}" for x in e if x != k]
+out.append(f"sha1_hash: {h}")
+open(os.path.join(d, "package-lock.yml"), "w").write("\n".join(out) + "\n")
+PY
+}
+# JK FICHIER CLÉ — la valeur JSON d'une clé d'un settings.json ; CUTOK FICHIER — les extensions dbt y sont coupées (un profil
+# qu'aucun hub ne déclare, dbt Power User écarté)
+JK() { python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get(sys.argv[2])))' "$1" "$2" 2>/dev/null; }
+GP='"sap-template-guest-copy-no-dbt-extension"'
+CUTOK() { [ "$(JK "$1" dbt.profileName)" = "$GP" ] && [ "$(JK "$1" dbt.targetName)" = "$GP" ] && [ "$(JK "$1" dbt.allowListFolders)" = '[".vscode"]' ]; }
 
 # --- environnement factice ---------------------------------------------------
 REAL_USERBASE="$(python3 -m site --user-base 2>/dev/null)"
@@ -882,7 +921,7 @@ git init -q --bare -b main "$W/fleet-origin.git"
 FW="$W/fleet"
 git clone -q "$W/fleet-origin.git" "$FW" 2>/dev/null
 mkdir -p "$FW/.devcontainer" "$FW/profiles/env" "$FW/global/macros"
-for f in lib-dbt.sh dbt-run.sh dbt-doctor.sh; do cp "$SRC/"*"$f"* "$FW/.devcontainer/$f"; done
+for f in lib-dbt.sh dbt-run.sh dbt-doctor.sh git-push-garde-h.sh; do cp "$SRC/"*"$f"* "$FW/.devcontainer/$f"; done
 printf 'DBT_SEND_ANONYMOUS_USAGE_STATS=false\nFLEET_COMMON=1\n' > "$FW/profiles/dbt.env"
 printf 'BETA_ONLY=1\n' > "$FW/profiles/env/beta.env"
 printf '/v1/\n/v2/\n' > "$FW/.gitignore"
@@ -1104,6 +1143,8 @@ cat >> "$FW/.devcontainer/dbt.conf" <<'EOF'
 DBT_V4_PRODUCTS="delta alpha"
 DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"
 EOF
+# une flotte qui déclare une v4 nomme sa copie principale, par son chemin réel : ici FW
+echo "DBT_V4_MAIN_WS=\"$FW\"" >> "$FW/.devcontainer/dbt.conf"
 O="$(FRUN referent-add sigma nowhere)"; has "$O" "is not a git URL" && pass "referent-add : URL invalide refusée" || bad "referent-add URL ($O)"
 O="$(FRUN referent-add delta "$W/homes/rho.git")"; has "$O" "already declared in .devcontainer/products.conf" && pass "referent-add : nom d'un produit refusé" || bad "referent-add doublon produit ($O)"
 O="$(FRUN referent-add rho "$W/homes/rho.git" dbt)"
@@ -1160,10 +1201,14 @@ has "$O" "(re-pointed)" && pass "…et dit" || bad "lien reposé en silence"
 ln -sfn ../../../profiles/v4.env "$FW/v2/delta/dbt/.env"
 O="$(FRUN v2 delta parse)"; has "$O" "points to profiles/v4.env" && pass ".env de v2/delta vers v4.env : refusé" || bad ".env v2 ($O)"
 ln -sfn ../../../profiles/dbt.env "$FW/v2/delta/dbt/.env"
-for X in OTHER_V4 JDOEV4 "JDOE_V4;x" ""; do
+for X in OTHER_V4 JDOEV4 "JDOE_V4;x" "" JDOE_V4_D005 JDOE_D005 JDOE_V4_d005_X JDOE_V4_X_S001; do
   sed -i "s/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4=\"$X\"/" "$FW/.devcontainer/dbt.conf"
-  O="$(FRUN v4 delta parse)"; has "$O" "every v4 command is refused" && pass "DBT_BQ_DATASET_PREFIX_V4='$X' (pas JDOE_<x>) : v4 refusée" || bad "préfixe v4 '$X' accepté ($O)"
+  O="$(FRUN v4 delta parse)"; has "$O" "every v4 command is refused" && pass "DBT_BQ_DATASET_PREFIX_V4='$X' (pas JDOE_<x>, ou un segment à la forme d'un flux) : v4 refusée" || bad "préfixe v4 '$X' accepté ($O)"
 done
+# shellcheck disable=SC2034  # lues par _dbt_v4_prefix_ok, dans le même sous-shell
+PFXOK() { ( source "$FW/.devcontainer/lib-dbt.sh"; DBT_BQ_DATASET_PREFIX=JDOE; DBT_BQ_DATASET_PREFIX_V4="$1"; _dbt_v4_prefix_ok ); }
+PFXOK JDOE_V4 && PFXOK JDOE_V4_X && PFXOK JDOE_V4_DD05 && PFXOK JDOE_V4_D05 && PFXOK JDOE_V4_D0050 && ! PFXOK JDOE_V4_D005 \
+  && pass "_dbt_v4_prefix_ok : JDOE_V4, JDOE_V4_X, JDOE_V4_DD05, JDOE_V4_D05, JDOE_V4_D0050 acceptés (pas la forme d'un flux)" || bad "_dbt_v4_prefix_ok trop strict"
 sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"/' "$FW/.devcontainer/dbt.conf"
 
 echo "== v4 : hooks — une approbation de la v2 n'ouvre jamais la v4 =="
@@ -1172,6 +1217,7 @@ echo 'DBT_HOOKS_COMPILE_OK="delta"' >> "$FW/.devcontainer/dbt.conf"
 O="$(FRUN v2 delta compile)"; has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=delta : v2 compile accepté" || bad "v2 compile ($O)"
 O="$(FRUN v4 delta compile)"; has "$O" "hooks nobody has reviewed" && has "$O" "may name v4/delta" && pass "…v4 compile refusé, le nom à relire (v4/delta) est donné" || bad "v4 ouverte par l'approbation v2 ($O)"
 O="$(FRUN v4 delta check)"; has "$O" "hooks nobody has reviewed" && pass "…dbt check (v2.0.8) compte comme commande à hooks en v4" || bad "v4 check ($O)"
+O="$(FRUN v2 delta check)"; has "$O" "hooks nobody has reviewed" && ! has "$O" "ARGS=" && pass "…et en v2 aussi : DBT_HOOKS_COMPILE_OK n'ouvre que compile et show (check refusé)" || bad "v2 check sans contrôle des hooks ($O)"
 echo 'DBT_HOOKS_COMPILE_OK="v4/delta"' >> "$FW/.devcontainer/dbt.conf"
 O="$(FRUN v4 delta compile)"; has "$O" "has no seal of its own" && ! has "$O" "ARGS=compile" && pass "DBT_HOOKS_COMPILE_OK=v4/delta : v4 compile refusé (une v4/<produit> n'a pas de sceau)" || bad "v4 compile ($O)"
 O="$(FRUN v4 delta run -s a)"; has "$O" "hooks nobody has reviewed" && pass "…v4 run : toujours refusé" || bad "v4 run ($O)"
@@ -1302,6 +1348,7 @@ O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "�
 cp "$FW/global/dbt_project.yml" "$W/global-pj"; echo 'on-run-start: ["select 1"]' >> "$FW/global/dbt_project.yml"
 echo 'DBT_HOOKS_COMPILE_OK="global-v4 global"' >> "$FW/.devcontainer/dbt.conf"
 O="$(FRUN global compile)"; has "$O" "ARGS=compile" && has "$O" "allowed for global " && ! has "$O" "proof of its hooks" && pass "global/ (listé, avec hook) : compile accepté comme avant, sans sceau — la v4 seule en a un" || bad "global sous preuve v4 périmée ($O)"
+O="$(FRUN global check)"; has "$O" "hooks nobody has reviewed" && ! has "$O" "ARGS=" && pass "…global/ check (listé, avec hook) : refusé (check compte comme commande à hooks)" || bad "global check ($O)"
 O="$(FRUN global compile --vars '{"edr_cli_run": true}')"; has "$O" 'ARGS=compile --vars {"edr_cli_run": true}' && pass "…global/ compile --vars (comparer-prod.sh) : accepté comme avant" || bad "global compile --vars ($O)"
 cp "$W/global-pj" "$FW/global/dbt_project.yml"
 sed -i '$ d' "$G/macros/m.sql"; [ "$(SEAL)" = "$S0" ] && pass "macro remise : le même sceau" || bad "sceau après remise"
@@ -1354,6 +1401,1190 @@ O="$(life "$FW" start)"
 check "alpha publiée (dépôt origin) : v4/alpha/ suit origin/alpha/v4" test "$(git -C "$FW" rev-parse --abbrev-ref 'alpha/v4@{upstream}' 2>/dev/null)" = origin/alpha/v4
 check "…verrous de push toujours inchangés" test "$(git config --global --get-all url.DISABLED://.pushInsteadOf | sort)" = "$LOCKS_BEFORE"
 git config --global --unset-all url."file://$W/gh/".insteadOf
+
+echo "== flux : la déclaration (.devcontainer/flux.conf), lue du fichier seul =="
+# un flux = une copie de travail de la flotte dont la v4 écrit sous JDOE_V4_<FLUX>. Ici FW joue tour à tour la copie
+# principale (ASMAIN : DBT_V4_MAIN_WS = FW) et une copie de flux (ASFLUX : DBT_V4_MAIN_WS = MAINW, une copie principale
+# réduite à son dbt.conf, aux mêmes réglages partagés) ; les témoins à deux copies réelles viennent plus bas.
+FLUXF="$FW/.devcontainer/flux.conf"
+FLUX() { printf '%b' "$1" > "$FLUXF"; }
+NOFLUX() { chmod -R u+rwx "$FLUXF" 2>/dev/null; rm -rf "$FLUXF"; }
+MAINW="$W/copie-principale"; mkdir -p "$MAINW/.devcontainer"
+SETMAIN() { sed -i '/^DBT_V4_MAIN_WS=/d' "$FW/.devcontainer/dbt.conf"; echo "DBT_V4_MAIN_WS=\"$1\"" >> "$FW/.devcontainer/dbt.conf"; }
+ASMAIN() { SETMAIN "$FW"; }
+ASFLUX() { SETMAIN "$MAINW"; cp "$FW/.devcontainer/dbt.conf" "$MAINW/.devcontainer/dbt.conf"; }
+# ASH — FW joue la ligne harmonisée (flux H) : ses copies v4 sur les branches de la ligne, <p>/v4-h, ouvertes la première
+# fois dans les dépôts des produits depuis leur v4 publiée (l'ouverture documentée), suivies ici ; sa garde de push, le
+# just setup suivant la pose. UNH — retour : les copies v4 sur <p>/v4, la garde retirée (la lib ne la retire jamais :
+# c'est le témoin qui nettoie FW, qui joue tour à tour les deux rôles), plus de flux.conf.
+H4OPEN=0
+ASH() {
+  local N
+  ASFLUX; FLUX 'DBT_V4_FLUX=H\n'
+  if [ "$H4OPEN" = 0 ]; then
+    git -C "$W/homes/delta.git" branch -q v4-h v4; git -C "$W/homes/rho.git" branch -q v4-h v4
+    git -C "$W/fleet-origin.git" branch -q alpha/v4-h alpha/v4
+    for N in home-delta home-rho origin; do git -C "$FW" fetch -q "$N" 2>/dev/null; done
+    git -C "$FW" branch -q --track delta/v4-h home-delta/v4-h; git -C "$FW" branch -q --track rho/v4-h home-rho/v4-h
+    git -C "$FW" branch -q --track alpha/v4-h origin/alpha/v4-h
+    H4OPEN=1
+  fi
+  for N in delta rho alpha; do git -C "$FW/v4/$N" checkout -q "$N/v4-h"; done
+}
+UNH() { local N; for N in delta rho alpha; do git -C "$FW/v4/$N" checkout -q "$N/v4"; done; rm -f "$FW/.git/hooks/pre-push"; NOFLUX; }
+LIBF() { ( cd "$FW" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && "$@"' _ "$@" ) 2>&1; }
+cp "$FW/.gitignore" "$W/gitignore-avant-flux"
+printf '/.devcontainer/flux.conf\n/profiles/v4-*.env\n' >> "$FW/.gitignore"
+ASMAIN
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4 ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4.env" ] && [ "$(LIBF dbt_v4_role)" = main ] \
+  && pass "sans flux.conf, copie nommée par DBT_V4_MAIN_WS : la copie principale, l'espace v4 principal (JDOE_V4, profiles/v4.env)" || bad "sans flux ($(LIBF dbt_v4_prefix) $(LIBF dbt_v4_role))"
+O="$(DBT_V4_FLUX=D006 FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "DBT_V4_FLUX exporté par le shell : ignoré (le fichier seul déclare un flux)" || bad "flux pris de l'environnement ($O)"
+ASFLUX
+FLUX '# flux de D005\n\nDBT_V4_FLUX=D005\n'
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4_D005 ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4-D005.env" ] && [ "$(LIBF dbt_v4_role)" = flux ] \
+  && pass "flux.conf (commentaire, ligne vide, DBT_V4_FLUX=D005) : JDOE_V4_D005, profiles/v4-D005.env" || bad "flux D005 ($(LIBF dbt_v4_prefix))"
+O="$(DBT_V4_FLUX=D006 LIBF dbt_v4_prefix)"; [ "$O" = JDOE_V4_D005 ] && pass "…et un DBT_V4_FLUX exporté ne le change pas" || bad "flux exporté l'emporte ($O)"
+FLUX 'DBT_V4_FLUX=D005'
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4_D005 ] && pass "…la dernière ligne compte, même sans fin de ligne" || bad "dernière ligne sans LF ignorée ($(LIBF dbt_v4_prefix))"
+FLUX '# x \0377 y\nDBT_V4_FLUX=D005\n'
+[ "$(LC_ALL=C.UTF-8 LIBF dbt_v4_prefix)" = JDOE_V4_D005 ] && [ "$(LC_ALL=C LIBF dbt_v4_prefix)" = JDOE_V4_D005 ] \
+  && pass "…un octet non UTF-8 dans un commentaire : accepté sous C.UTF-8 comme sous C (lu octet par octet, comme le miroir Python)" || bad "commentaire non UTF-8 selon la locale ($(LC_ALL=C.UTF-8 LIBF dbt_v4_prefix))"
+# refusenv NOM CONTENU — une déclaration à laquelle on ne peut pas se fier : toute commande dbt refusée, v2 comprise
+refusenv() {
+  FLUX "$2"
+  O="$(FRUN v2 delta parse)"; local O4; O4="$(LC_ALL=C.UTF-8 FRUN v4 delta parse)"
+  if has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && has "$O4" "cannot be trusted" && ! has "$O4" "ARGS="; then
+    pass "flux.conf refusé ($1) : toute commande dbt refusée, v2 comprise"
+  else bad "flux.conf accepté : $1 ($O | $O4)"; fi
+}
+refusenv "minuscule d005"            'DBT_V4_FLUX=d005\n'
+refusenv "nom d'un paquet (DWH)"     'DBT_V4_FLUX=DWH\n'
+refusenv "DWH_REF"                   'DBT_V4_FLUX=DWH_REF\n'
+refusenv "deux chiffres"             'DBT_V4_FLUX=D05\n'
+refusenv "quatre chiffres"           'DBT_V4_FLUX=D0050\n'
+refusenv "lettre accentuée"          'DBT_V4_FLUX=É005\n'
+refusenv "entre guillemets"          'DBT_V4_FLUX="D005"\n'
+refusenv "export"                    'export DBT_V4_FLUX=D005\n'
+refusenv "espace en tête"            ' DBT_V4_FLUX=D005\n'
+refusenv "commentaire en fin"        'DBT_V4_FLUX=D005 # x\n'
+refusenv "CRLF"                      'DBT_V4_FLUX=D005\r\n'
+refusenv "deux déclarations"         'DBT_V4_FLUX=D005\nDBT_V4_FLUX=D006\n'
+refusenv "deux déclarations, la dernière sans fin de ligne" 'DBT_V4_FLUX=D005\nDBT_V4_FLUX=D006'
+refusenv "la même deux fois"         'DBT_V4_FLUX=D005\nDBT_V4_FLUX=D005\n'
+refusenv "une autre variable"        'DBT_V4_FLUX=D005\nDATASET_PREFIX=JDOE_V4\n'
+refusenv "fichier vide"              ''
+refusenv "commentaires seuls"        '# rien\n'
+refusenv "un octet NUL dans un commentaire" '# x \0000 y\nDBT_V4_FLUX=D005\n'
+refusenv "une ligne d'espace cadratin U+2003 (une espace sous C.UTF-8, pas sous C)" 'DBT_V4_FLUX=D005\n\0342\0200\0203\n'
+if [ "$(id -u)" != 0 ]; then
+  FLUX 'DBT_V4_FLUX=D005\n'; chmod 000 "$FLUXF"
+  O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "flux.conf refusé (illisible)" || bad "flux.conf illisible ($O)"
+  chmod 644 "$FLUXF"
+fi
+FLUX 'DBT_V4_FLUX=D005\n'; mv "$FLUXF" "$W/flux-cible.conf"; ln -s "$W/flux-cible.conf" "$FLUXF"
+O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "flux.conf refusé (un lien, même vers une déclaration valide)" || bad "flux.conf lien ($O)"
+NOFLUX; ln -s "$W/nulle-part.conf" "$FLUXF"
+O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "flux.conf refusé (un lien pendant : jamais lu comme « pas de flux »)" || bad "flux.conf lien pendant ($O)"
+ASMAIN; O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta run -s a)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "…ni dans la copie principale (pas de repli sur l'espace principal)" || bad "lien pendant dans la copie principale ($O)"
+ASFLUX
+NOFLUX; mkdir "$FLUXF"
+O="$(FRUN v4 delta parse)"; has "$O" "cannot be trusted" && pass "flux.conf refusé (un dossier)" || bad "flux.conf dossier ($O)"
+NOFLUX
+# dbt.conf (committé, partagé par toutes les copies) ne règle rien du flux
+# confflux LIGNE [VAR=VALEUR exportée par le shell]
+confflux() { local L="$1" E="${2:-}"
+  cp "$FW/.devcontainer/dbt.conf" "$W/dbtconf-flux"; echo "$L" >> "$FW/.devcontainer/dbt.conf"
+  O="$( [ -z "$E" ] || export "${E?}"; FRUN v4 delta parse)"
+  has "$O" "set in .devcontainer/dbt.conf" && ! has "$O" "ARGS=" && pass "dbt.conf qui pose $L${E:+ (et $E exporté)} : refusé, jamais un flux" || bad "dbt.conf $L ($O)"
+  cp "$W/dbtconf-flux" "$FW/.devcontainer/dbt.conf"; }
+confflux 'DBT_V4_FLUX="D005"'
+confflux 'DBT_V4_FLUX="D005"' DBT_V4_FLUX=D005
+confflux "DBT_V4_FLUX_FILE=\"$W/flux-cible.conf\""
+confflux "DBT_V4_FLUX_RE='.*'"
+confflux "_DBT_FLUX_LINE_RE='^DBT_V4_FLUX=(.*)\$'"
+confflux "_DBT_FLUX_BLANK_RE='.*'"
+echo 'DBT_V4_FLUX="D005"' >> "$FW/.devcontainer/dbt.conf"
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4 ] && pass "…et le flux qu'il poserait n'est le flux de personne (préfixe JDOE_V4, toutes les commandes refusées)" || bad "flux de dbt.conf retenu ($(LIBF dbt_v4_prefix))"
+sed -i '/^DBT_V4_FLUX=/d' "$FW/.devcontainer/dbt.conf"
+FLUX 'DBT_V4_FLUX=D005\n'
+cp "$W/gitignore-avant-flux" "$FW/.gitignore"
+O="$(FRUN v4 delta parse)"; has "$O" ".devcontainer/flux.conf is not ignored by git" && ! has "$O" "ARGS=" && pass "flux.conf non ignoré par git : refusé (git add -A le committerait)" || bad "flux non ignoré ($O)"
+O="$(life "$FW" start)"; has "$O" "WARNING: flux D005 — .devcontainer/flux.conf is not ignored by git" && pass "…et just setup le dit" || bad "setup muet sur un flux non ignoré ($(grep -i flux <<<"$O" | head -3))"
+printf '/.devcontainer/flux.conf\n' >> "$FW/.gitignore"
+O="$(FRUN v4 delta parse)"; has "$O" "profiles/v4-D005.env is not ignored by git" && pass "…profiles/v4-D005.env non ignoré : refusé aussi" || bad "env du flux non ignoré ($O)"
+printf '/profiles/v4-*.env\n' >> "$FW/.gitignore"
+git -C "$FW" add -f .devcontainer/flux.conf
+O="$(FRUN v4 delta parse)"; has "$O" ".devcontainer/flux.conf is tracked by git" && ! has "$O" "ARGS=" && pass "flux.conf suivi par git (git add -f) : refusé" || bad "flux suivi ($O)"
+O="$(life "$FW" start)"; has "$O" "WARNING: flux D005 — .devcontainer/flux.conf is tracked by git" && pass "…et just setup le dit" || bad "setup muet sur un flux suivi"
+git -C "$FW" rm -q --cached .devcontainer/flux.conf
+O="$(FLUX 'DBT_V4_FLUX=d005\n'; FRUN destinations delta)"; has "$O" "cannot be trusted" && ! has "$O" "== " && pass "déclaration refusée : just destinations refusé aussi" || bad "destinations sous une déclaration refusée ($O)"
+O="$(FLUX 'DBT_V4_FLUX=d005\n'; FRUN hooks-approve)"; has "$O" "cannot be trusted" && ! has "$O" "approved —" && pass "déclaration refusée : just hooks-approve refusé aussi" || bad "hooks-approve sous une déclaration refusée ($O)"
+FLUX 'DBT_V4_FLUX=D005\n'
+printf 'DBT_V4_FLUX=D005\n' > "$WS/.devcontainer/flux.conf"
+O="$(RUN v2 parse)"; has "$O" "a flux exists in a fleet only" && ! has "$O" "ARGS=" && pass "flux.conf dans un projet seul (pas de flotte) : refusé" || bad "flux hors flotte ($O)"
+O="$( (cd "$WS" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ .devcontainer/flux.conf in a single-product workspace" && pass "…et doctor le dit" || bad "doctor flux hors flotte ($(grep -A2 '\[flux' <<<"$O"))"
+rm -f "$WS/.devcontainer/flux.conf"
+
+echo "== flux : la copie principale est nommée (DBT_V4_MAIN_WS), jamais devinée de l'absence d'un fichier =="
+ASMAIN; FLUX 'DBT_V4_FLUX=D005\n'
+O="$(FRUN v4 delta parse)"; has "$O" "in the MAIN copy" && ! has "$O" "ARGS=" && pass "flux.conf dans la copie principale : refusé (la copie principale n'est jamais un flux)" || bad "flux dans la copie principale ($O)"
+NOFLUX
+# orphan NOM — FW n'est ni la copie principale ni un flux : aucune commande v4, v1/v2/global en lecture seulement
+orphan() {
+  [ "$(LIBF dbt_v4_role)" = orphan ] || { bad "orpheline ($1) : rôle $(LIBF dbt_v4_role)"; return; }
+  local O1 O2 O3 O4 O5
+  O1="$(FRUN v4 delta parse)"; O2="$(FRUN global-v4 parse)"; O3="$(STUB_LS_FILE="$W/ls-v2ok.jsonl" FRUN v2 delta run -s a)"
+  O4="$(FRUN v2 delta parse)"; O5="$(FRUN destinations delta)"
+  if has "$O1" "orphan copy" && ! has "$O1" "ARGS=" && has "$O2" "orphan copy" && ! has "$O2" "ARGS=" \
+     && has "$O3" "orphan copy" && ! has "$O3" "ARGS=" && has "$O4" "ARGS=parse" && has "$O5" "orphan copy"; then
+    pass "copie orpheline ($1) : v4 et global-v4 refusés, v2 run refusé, destinations refusé ; v2 parse accepté"
+  else bad "copie orpheline ($1) : $O1 | $O2 | $O3 | $O4 | $O5"; fi
+}
+SETMAIN "";           orphan "DBT_V4_MAIN_WS vide"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ ORPHAN copy — DBT_V4_MAIN_WS is empty" && pass "…doctor : copie orpheline, dite" || bad "doctor orpheline ($(grep -i orphan <<<"$O" | head -2))"
+O="$(FRUN hooks-approve)"; has "$O" "orphan copy" && pass "…hooks-approve refusé" || bad "hooks-approve orpheline ($O)"
+SETMAIN ".";          orphan "DBT_V4_MAIN_WS relatif (« . », qui se résoudrait en FW depuis FW)"
+SETMAIN "$W/ailleurs"; orphan "DBT_V4_MAIN_WS vers un dossier absent"
+SETMAIN "$MAINW";     orphan "DBT_V4_MAIN_WS vers une autre copie, et pas de flux.conf"
+ln -sfn "$FW" "$W/lien-fleet"; SETMAIN "$W/lien-fleet"; life "$FW" start >/dev/null
+O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4$' <<<"$O" && pass "DBT_V4_MAIN_WS par un lien vers FW : la copie principale (chemin réel)" || bad "DBT_V4_MAIN_WS par un lien ($O)"
+SETMAIN "$FW/"; [ "$(LIBF dbt_v4_role)" = main ] && pass "DBT_V4_MAIN_WS avec une barre finale : la copie principale" || bad "DBT_V4_MAIN_WS barre finale"
+rm -f "$W/lien-fleet"; ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'
+SETMAIN ""; O="$(FRUN v4 delta parse)"; has "$O" "names no main copy by an absolute path" && ! has "$O" "ARGS=" && pass "un flux sans copie principale nommée (DBT_V4_MAIN_WS vide) : toute commande refusée" || bad "flux sans DBT_V4_MAIN_WS ($O)"
+ASFLUX
+
+echo "== flux : just setup — profiles/v4-<FLUX>.env, les .env de la v4 et de global-v4 =="
+mkdir -p "$FW/global-v4"; printf 'name: fleet_global_v4\nprofile: "prof_global"\n' > "$FW/global-v4/dbt_project.yml"
+SUM4="$(sha256sum < "$FW/profiles/v4.env")"
+O="$(life "$FW" start)"
+check "profiles/v4-D005.env : DATASET_PREFIX=JDOE_V4_D005" grep -qx 'DATASET_PREFIX=JDOE_V4_D005' "$FW/profiles/v4-D005.env"
+check "…et sinon profiles/dbt.env à l'identique (généré)" diff <(tail -n +3 "$FW/profiles/v4-D005.env") <(sed 's/^DATASET_PREFIX=.*/DATASET_PREFIX=JDOE_V4_D005/' "$FW/profiles/dbt.env")
+[ "$(sha256sum < "$FW/profiles/v4.env")" = "$SUM4" ] && pass "…profiles/v4.env (l'espace principal, committé) inchangé" || bad "v4.env réécrit dans un flux"
+for P in v4/delta/dbt v4/rho/dbt global-v4; do
+  check ".env de $P -> profiles/v4-D005.env" test "$(readlink -f "$FW/$P/.env")" = "$(readlink -f "$FW/profiles/v4-D005.env")"
+done
+check ".env de v2/delta : toujours profiles/dbt.env" test "$(readlink -f "$FW/v2/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/dbt.env")"
+check "réglages de la fenêtre v4/delta : envFile du flux" python3 -c "import json; d=json.load(open('$FW/v4/delta/.vscode/settings.json')); assert d['python.envFile'].endswith('profiles/v4-D005.env')"
+check "git ne voit ni flux.conf ni profiles/v4-D005.env (ignorés)" test -z "$(git -C "$FW" status --porcelain --ignored=no -- .devcontainer/flux.conf profiles/v4-D005.env)"
+has "$O" "the container (engines, ~/.bashrc, global git settings) is the main copy's" && has "$O" "bashrc (\`dbt\`, DBT_PROFILES_DIR) is the main copy's" \
+  && pass "…et l'état du container (moteurs, ~/.bashrc, git global) laissé à la copie principale, dit" || bad "setup d'un flux et l'état du container ($(grep -iE 'container|bashrc' <<<"$O" | head -3))"
+
+echo "== flux : le garde-fou — la v4 et global-v4 sous JDOE_V4_D005 seulement, rien ailleurs =="
+O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "just v4 delta → DATASET_PREFIX=JDOE_V4_D005" || bad "v4 delta dans le flux ($O)"
+O="$(FRUN global-v4 parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "just global-v4 → DATASET_PREFIX=JDOE_V4_D005" || bad "global-v4 dans le flux ($O)"
+O="$(CWD="$FW/v4/delta/dbt" FRUN auto parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "\`dbt\` dans v4/delta/ du flux → même espace" || bad "auto v4 flux ($O)"
+O="$(DATASET_PREFIX=JDOE_V4 FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "…même avec DATASET_PREFIX=JDOE_V4 exporté par le shell" || bad "préfixe exporté dans le flux ($O)"
+for X in JDOE_V4_D005_DELTA__X JDOE_V4_D005 JDOE_V4_D005_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "flux : écriture v4 sous $X acceptée" || bad "flux : $X refusé ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4 JDOE_V4_D006_DELTA__X JDOE_V4_D006 JDOE_V4_D005X JDOE_V4_D0050_X JDOE_DELTA__X JDOE_V4_d005_delta__x jdoe_v4_D005_X JDOE_V4_d005; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "flux D005" && ! has "$O" "ARGS=" && pass "flux : écriture v4 sous $X refusée (l'espace principal, un autre flux, une borne, la v2, une autre casse)" || bad "flux : $X accepté ($O)"
+done
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "outside the sandbox" && ! has "$O" "ARGS=" && pass "flux : global-v4 sous l'espace principal refusé" || bad "global-v4 flux vers principal ($O)"
+FJ JDOE_V4_D005_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "all inside the sandbox" && pass "flux : global-v4 sous JDOE_V4_D005_* accepté" || bad "global-v4 flux ($O)"
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+# v1/v2/global dans un flux : une liste blanche (parse, ls, list, compile, show, deps), jamais une liste noire
+for C in "v2 delta run -s a" "v1 delta run -s a" "global run -s a" "v2 delta seed -s a" "v2 delta test" "v2 delta docs generate" \
+         "v2 delta run-operation m" "v2 delta source freshness" "v2 delta check" "global check" "v2 delta build -s a" "v2 delta snapshot" \
+         "v2 delta clone -s a" "v2 delta retry" "global build -s a" "v2 delta debug" "v2 delta clean" "v2 delta --log-level debug run -s a" \
+         "v2 delta compile -s run" "v2 delta" "global --quiet build -s a" "v1 delta test" "v1 delta check" "v2 delta frobnicate"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" DBT_ALLOW_RUN_OPERATION=1 FRUN $C)"
+  has "$O" "a flux writes only its v4 space" && ! has "$O" "ARGS=" && pass "flux : \`$C\` refusé (v1/v2/global : liste blanche)" || bad "flux : $C accepté ($O)"
+done
+for C in "v2 delta parse" "v2 delta compile" "v1 delta parse" "global parse" "v2 delta list" "v2 delta deps" "v2 delta show -s a" "v2 delta --quiet parse"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN $C)"; ! has "$O" "⛔" && { has "$O" "ARGS=" || has "$O" "JDOE_DELTA__X"; } && pass "flux : \`$C\` accepté (lecture)" || bad "flux : $C refusé ($O)"
+done
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta ls)"; has "$O" "JDOE_DELTA__X" && ! has "$O" "⛔" && pass "flux : \`v2 delta ls\` accepté (lecture)" || bad "flux : v2 ls refusé ($O)"
+O="$(FRUN v2 delta "compile show")"; has "$O" "a flux writes only its v4 space" && ! has "$O" "ARGS=" && pass "flux : un premier mot « compile show » (une espace) n'est pas une commande de la liste : refusé" || bad "flux : premier mot avec une espace ($O)"
+printf 'DATASET_PREFIX=JDOE_V4\n' > "$FW/profiles/env/delta.env"
+O="$(FRUN v4 delta parse)"; has "$O" "the v4 space is JDOE_V4_D005" && pass "flux : fichier d'env du produit qui repose JDOE_V4 → refusé" || bad "env produit dans le flux ($O)"
+rm -f "$FW/profiles/env/delta.env"
+ln -sfn ../../../profiles/v4.env "$FW/v4/delta/dbt/.env"
+O="$(FRUN v4 delta parse)"; has "$O" "does not point to profiles/v4-D005.env" && pass "flux : .env de v4/delta vers profiles/v4.env (l'espace principal) → refusé" || bad ".env v4 principal dans le flux ($O)"
+ln -sfn ../../../profiles/v4-D005.env "$FW/v4/delta/dbt/.env"
+ln -sfn ../../../profiles/v4-D005.env "$FW/v2/delta/dbt/.env"
+O="$(FRUN v2 delta parse)"; has "$O" "points to profiles/v4-D005.env" && pass "flux : .env de v2/delta vers profiles/v4-D005.env → refusé" || bad ".env v2 vers le flux ($O)"
+ln -sfn ../../../profiles/dbt.env "$FW/v2/delta/dbt/.env"
+cp "$FW/profiles/v4-D005.env" "$W/v4-D005.env"; sed -i 's/^DATASET_PREFIX=.*/DATASET_PREFIX=JDOE_V4/' "$FW/profiles/v4-D005.env"
+O="$(FRUN v4 delta parse)"; has "$O" "the v4 space is JDOE_V4_D005" && pass "flux : profiles/v4-D005.env retouché (JDOE_V4) → refusé" || bad "env du flux retouché ($O)"
+rm -f "$FW/profiles/v4-D005.env"
+O="$(FRUN v4 delta parse)"; has "$O" "profiles/v4-D005.env is missing" && pass "flux : profiles/v4-D005.env absent → refusé" || bad "env du flux absent ($O)"
+cp "$W/v4-D005.env" "$FW/profiles/v4-D005.env"
+O="$(FRUN hooks-approve)"; has "$O" "approve them there, never from a flux" && pass "flux : hooks-approve refusé (la liste approuvée est celle de la copie principale)" || bad "hooks-approve dans un flux ($O)"
+# le flux et sa copie principale partagent le bac à sable, les préfixes et les moteurs (lus dans le dbt.conf de la principale)
+mainconf() { local V="$1" X="$2"
+  cp "$MAINW/.devcontainer/dbt.conf" "$W/main-dbtconf"
+  sed -i "/^$V=/d" "$MAINW/.devcontainer/dbt.conf"; echo "$V=\"$X\"" >> "$MAINW/.devcontainer/dbt.conf"
+  O="$(FRUN v4 delta parse)"
+  has "$O" "$V differs from the main copy's" && ! has "$O" "ARGS=" && pass "flux : $V autre que celui de la copie principale ($X) → toute commande refusée" || bad "flux : $V différent ($O)"
+  cp "$W/main-dbtconf" "$MAINW/.devcontainer/dbt.conf"; }
+mainconf DBT_BQ_PROJECT autre-prj
+mainconf DBT_BQ_DATASET_PREFIX JDOEX
+mainconf DBT_BQ_DATASET_PREFIX_V4 JDOE_W4
+mainconf DBT_V1_PINS "dbt-core==1.10.9 dbt-bigquery==1.10.9"
+mainconf DBT_V2_VERSION 2.0.8
+mainconf DBT_V4_MAIN_WS "$W/autre"
+mv "$MAINW/.devcontainer/dbt.conf" "$W/main-dbtconf"
+O="$(FRUN v4 delta parse)"; has "$O" "has no .devcontainer/dbt.conf" && ! has "$O" "ARGS=" && pass "flux : la copie principale absente (pas de dbt.conf) → toute commande refusée" || bad "flux sans copie principale ($O)"
+mv "$W/main-dbtconf" "$MAINW/.devcontainer/dbt.conf"
+
+echo "== flux : les réglages du garde-fou (verrou 3) au moins aussi stricts que ceux de la copie principale =="
+# un flux qui vit longtemps (la ligne harmonisée) peut retarder sur sa copie principale : plus strict passe, plus
+# permissif refuse toute commande dbt — ex. une table que la copie principale a ajoutée depuis à DBT_SANDBOX_NEVER_BUILD
+# strict VAR PRINCIPAL FLUX refus|accepte — VAR vaut PRINCIPAL dans le dbt.conf de la copie principale (« - » : absent),
+# FLUX dans celui du flux
+strict() { local V="$1" M="$2" F="$3" E="$4" O
+  cp "$FW/.devcontainer/dbt.conf" "$W/strict-fw"; cp "$MAINW/.devcontainer/dbt.conf" "$W/strict-main"
+  sed -i "/^$V=/d" "$FW/.devcontainer/dbt.conf" "$MAINW/.devcontainer/dbt.conf"
+  [ "$M" = - ] || echo "$V=\"$M\"" >> "$MAINW/.devcontainer/dbt.conf"
+  echo "$V=\"$F\"" >> "$FW/.devcontainer/dbt.conf"
+  O="$(FRUN v4 delta parse)"
+  if [ "$E" = refus ]; then
+    has "$O" "cannot be trusted" && has "$O" "$V" && ! has "$O" "ARGS=" \
+      && pass "flux : $V « $F », copie principale « $M » — plus permissif : toute commande refusée" || bad "flux : $V « $F » / « $M » accepté ($O)"
+  else
+    grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "flux : $V « $F », copie principale « $M » — aussi strict, ou plus : accepté" || bad "flux : $V « $F » / « $M » refusé ($O)"
+  fi
+  cp "$W/strict-fw" "$FW/.devcontainer/dbt.conf"; cp "$W/strict-main" "$MAINW/.devcontainer/dbt.conf"; }
+strict DBT_SANDBOX_NEVER_BUILD "delta.a" "" refus
+strict DBT_SANDBOX_NEVER_BUILD "delta.a delta.b" "delta.b" refus
+strict DBT_SANDBOX_NEVER_BUILD "delta.a" "delta.b delta.a" accepte
+strict DBT_SANDBOX_NEVER_BUILD "" "delta.a" accepte
+strict DBT_HOOKS_COMPILE_OK "" "global-v4" refus
+strict DBT_HOOKS_COMPILE_OK - "global-v4" refus
+strict DBT_HOOKS_COMPILE_OK "global-v4" "global-v4 v4/delta" refus
+strict DBT_HOOKS_COMPILE_OK "global-v4 delta" "global-v4" accepte
+strict DBT_HOOKS_COMPILE_OK "global-v4" "" accepte
+for V in DBT_HOOKS_REVIEWED DBT_HOOKS_REVIEWED_V2 DBT_ALLOW_RUN_OPERATION; do
+  strict "$V" 0 1 refus; strict "$V" - 1 refus; strict "$V" 1 0 accepte; strict "$V" 1 1 accepte
+done
+cp "$MAINW/.devcontainer/dbt.conf" "$W/strict-main"; echo 'DBT_SANDBOX_NEVER_BUILD="delta.a"' >> "$MAINW/.devcontainer/dbt.conf"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "❌ flux D005: DBT_SANDBOX_NEVER_BUILD here lacks what the main copy's names ($MAINW: delta.a)" && pass "…et doctor le dit (la table que la copie principale ne construit jamais)" || bad "doctor : réglage plus permissif ($(grep -i 'NEVER_BUILD' <<<"$O"))"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta build -s a)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "…\`v4 delta build -s a\` refusé avant toute résolution" || bad "build sous un réglage plus permissif ($O)"
+cp "$W/strict-main" "$MAINW/.devcontainer/dbt.conf"
+
+echo "== flux : aucun hook dans les espaces de la copie principale (v1/v2/global), quoi qu'approuve dbt.conf =="
+# dbt v2 exécute les on-run-start au compile et au show. Dans un flux, ceux de v2/ ou de global/ écriraient l'espace de
+# la copie principale (DATASET_PREFIX=JDOE) : refusés, même listés dans DBT_HOOKS_COMPILE_OK, sous DBT_HOOKS_REVIEWED_V2
+# ou DBT_HOOKS_REVIEWED — les approbations de la copie principale, jamais celles d'une autre copie
+printf "{{ config(post_hook='select 1') }}\nselect 1\n" > "$FW/v2/delta/dbt/models/hooked.sql"
+cp "$FW/.devcontainer/dbt.conf" "$W/dbtconf-avant-hooks"
+printf 'x\ty\tz\n' > "$FW/.devcontainer/hooks.approved"
+printf 'DBT_HOOKS_COMPILE_OK="delta global"\nDBT_HOOKS_REVIEWED_V2=1\n' >> "$FW/.devcontainer/dbt.conf"
+ASFLUX
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+for C in "v2 delta compile" "v2 delta show -s a" "v2 delta --quiet compile -s a"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN $C)"
+  has "$O" "flux D005: \`dbt" && has "$O" "runs no hook outside its v4 space" && has "$O" "models/hooked.sql" && has "$O" "DATASET_PREFIX=JDOE)" && ! has "$O" "ARGS=" \
+    && pass "flux : \`$C\` refusé — le hook de delta écrirait l'espace de la copie principale (DBT_HOOKS_COMPILE_OK=delta, DBT_HOOKS_REVIEWED_V2=1 n'y font rien)" || bad "flux : $C sous hooks ($O)"
+done
+for C in "v2 delta parse" "v2 delta ls" "v2 delta deps"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN $C)"; ! has "$O" "⛔" && { has "$O" "ARGS=" || has "$O" "JDOE_DELTA__X"; } && pass "…\`$C\` accepté (aucun hook ne tourne)" || bad "flux : $C sous hooks refusé ($O)"
+done
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && ! has "$O" "⛔" && pass "flux : \`v2 beta compile\` accepté (beta ne déclare aucun hook)" || bad "flux : compile sans hook ($O)"
+O="$(FRUN v1 delta compile)"; has "$O" "ARGS=compile" && pass "flux : \`v1 delta compile\` accepté (dbt Core n'exécute aucun hook au compile)" || bad "flux : v1 compile ($O)"
+ln -sfn ../../v2/gamma/dbt "$FW/global/dbt_packages/gamma"   # global/ : ses deux paquets locaux installés (alpha, gamma)
+mklock "$FW/global"   # …et verrouillés (package-lock.yml, comme `deps` l'écrit)
+printf "{{ config(pre_hook='select 1') }}\nselect 1\n" > "$FW/v2/alpha/dbt/models/hooked_a.sql"
+O="$(FRUN global compile)"; has "$O" "runs no hook outside its v4 space" && has "$O" "dbt_packages/alpha/models/hooked_a.sql" && ! has "$O" "ARGS=" \
+  && pass "flux : \`global compile\` refusé — le hook d'un modèle d'un paquet local lié (alpha) est lu, DBT_HOOKS_COMPILE_OK=global n'y fait rien" || bad "flux : global compile sous hooks ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "-> refused in this copy, which is not the main one" && has "$O" "dbt_packages/alpha/models/hooked_a.sql" && pass "doctor (flux) : les hooks de v2/delta et de global/ refusés ici, quoi qu'approuve dbt.conf" || bad "doctor : hooks d'une copie de flux ($(grep -A1 'hooks in' <<<"$O" | head -6))"
+NOFLUX; ASMAIN
+O="$(FRUN v2 delta compile)"; has "$O" "ARGS=compile" && has "$O" "allowed for delta (DBT_HOOKS_COMPILE_OK" && pass "copie principale : \`v2 delta compile\` accepté sous DBT_HOOKS_COMPILE_OK=delta, comme avant" || bad "principale : v2 compile ($O)"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && pass "copie principale : \`global compile\` accepté sous DBT_HOOKS_COMPILE_OK=global, comme avant" || bad "principale : global compile ($O)"
+SETMAIN ""
+O="$(FRUN v2 delta compile)"; has "$O" "orphan copy: \`dbt compile\` refused under v2/delta/" && ! has "$O" "ARGS=" && pass "copie orpheline : \`v2 delta compile\` refusé (hooks), même sous DBT_HOOKS_COMPILE_OK=delta" || bad "orpheline : v2 compile sous hooks ($O)"
+ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'
+rm -f "$FW/v2/alpha/dbt/models/hooked_a.sql"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && pass "flux : sans ce hook, \`global compile\` accepté (paquets installés tels que verrouillés)" || bad "flux : global compile sans hook ($O)"
+# un paquet déclaré mais pas installé : dbt v2 l'installerait de lui-même au compile, et exécuterait ses hooks sans lecture
+rm -f "$FW/global/dbt_packages/gamma"
+O="$(FRUN global compile)"; has "$O" "flux D005" && has "$O" "not installed exactly as locked" && has "$O" "gamma (package-lock.yml): not in dbt_packages/" && ! has "$O" "ARGS=" \
+  && pass "flux : un paquet local de global/ déclaré, pas installé (gamma) : \`global compile\` refusé (dbt v2 l'installerait et lancerait ses hooks)" || bad "flux : paquet manquant ($O)"
+ln -sfn ../../v2/gamma/dbt "$FW/global/dbt_packages/gamma"
+# GUEST LIBELLÉ MOTIF — `v2 beta compile` de la copie de flux, sur ce que la ligne d'avant a posé dans v2/beta : refusé, MOTIF dit
+GUEST() { O="$(FRUN v2 beta compile)"; if has "$O" "not installed exactly as locked" && has "$O" "$2" && ! has "$O" "ARGS="; then pass "flux, \`v2 beta compile\` refusé : $1"; else bad "flux, \`v2 beta compile\` accepté ou mal dit : $1 ($O)"; fi; }
+BP="$FW/v2/beta"; mkdir -p "$BP/dbt_packages/x"
+printf 'packages:\n  - package: acme/x\n    version: 1.0.0\n' > "$BP/packages.yml"; mklock "$BP"
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && pass "flux : \`v2 beta compile\`, acme/x déclaré, verrouillé (sha1_hash recalculé par le témoin), installé : accepté" || bad "flux : paquets tels que verrouillés refusés ($O)"
+rmdir "$BP/dbt_packages/x"; mkdir -p "$BP/dbt_packages/autre"
+GUEST "un paquet installé sur un, mais pas celui que verrouille package-lock.yml (x)" "x (package-lock.yml): not in dbt_packages/"
+rmdir "$BP/dbt_packages/autre"; mkdir -p "$BP/dbt_packages/x"
+rm -f "$BP/package-lock.yml"; GUEST "des paquets déclarés, aucun package-lock.yml" "there is no package-lock.yml"
+# les trois formes du contrôle : version d'abord ; liste en ligne ; verrou périmé (un autre paquet déclaré depuis deps)
+printf 'packages:\n  - version: 1.0.0\n    package: acme/x\n' > "$BP/packages.yml"; rm -rf "$BP/dbt_packages"
+GUEST "« - version: … » avant « package: », rien d'installé, pas de verrou" "there is no package-lock.yml"
+mkdir -p "$BP/dbt_packages/x"; mklock "$BP"
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && pass "…la même entrée (version d'abord), verrouillée et installée : accepté (lue, pas devinée)" || bad "flux : entrée version d'abord, verrouillée ($O)"
+printf 'packages: [{package: acme/x, version: 1.0.0}]\n' > "$BP/packages.yml"
+GUEST "packages: en liste sur une ligne ([{…}])" "packages given otherwise than as a block list"
+printf 'packages:\n  - package: acme/nouveau\n' > "$BP/packages.yml"; mkdir -p "$BP/dbt_packages/ancien"
+printf 'packages:\n- package: acme/ancien\n  name: ancien\nsha1_hash: 0\n' > "$BP/package-lock.yml"
+GUEST "un verrou périmé (ancien, verrouillé et installé ; nouveau, déclaré depuis)" "package-lock.yml does not lock what packages.yml declares"
+O="$(FRUN v2 beta compile)"; has "$O" "package acme/nouveau: declared in packages.yml, not locked in package-lock.yml" && pass "…et le paquet déclaré absent du verrou est nommé" || bad "flux : paquet déclaré hors du verrou non nommé ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "v2 beta: compile/show refused in this copy — its packages are not installed exactly as locked: package-lock.yml does not lock" \
+  && pass "…doctor (flux) : dit" || bad "doctor, paquets d'une copie invitée ($(grep 'v2 beta' <<<"$O" | head -3))"
+rm -rf "$BP/dbt_packages/ancien"
+# packages.yml retouché après deps (une autre version) : le verrou garde les mêmes noms, son sha1_hash ne colle plus
+printf 'packages:\n  - package: acme/x\n    version: 1.0.0\n' > "$BP/packages.yml"; mklock "$BP"; sed -i 's/1\.0\.0/1.1.0/' "$BP/packages.yml"
+GUEST "packages.yml retouché après deps (version 1.1.0, le verrou dit 1.0.0)" "package-lock.yml does not lock what packages.yml declares"
+# un verrou dont le sha1_hash colle mais qui ne verrouille pas une entrée déclarée (retouché à la main)
+printf 'packages:\n  - package: acme/x\n  - package: acme/y\n' > "$BP/packages.yml"; mklock "$BP"; mkdir -p "$BP/dbt_packages/y"
+python3 -I -c 'import sys,re; p=sys.argv[1]; s=open(p).read(); open(p,"w").write(re.sub(r"- package: acme/y\n  name: y\n", "", s))' "$BP/package-lock.yml"
+GUEST "un verrou au bon sha1_hash, sans l'entrée acme/y" "package acme/y: declared in packages.yml, not locked in package-lock.yml"
+rm -rf "$BP/dbt_packages/y"
+printf 'packages:\n  - version: 1.0.0\n' > "$BP/packages.yml"
+GUEST "une entrée sans package/git/local/tarball/private" "an entry with no package/git/local/tarball/private key"
+printf 'packages:\n  - package: acme/x\n    foo: bar\n' > "$BP/packages.yml"; mklock "$BP"
+GUEST "une clé que le lecteur ne connaît pas (foo)" "a key it does not read (foo)"
+printf 'packages:\n  - package: acme/x\n    version: &v 1.0.0\n' > "$BP/packages.yml"
+GUEST "une ancre (&v)" "a value it does not read (&v 1.0.0)"
+printf 'packages:\n  - package: acme/x\n  \tversion: 1.0.0\n' > "$BP/packages.yml"
+GUEST "une tabulation" "a tab"
+printf -- '---\npackages:\n  - package: acme/x\n' > "$BP/packages.yml"
+GUEST "un marqueur de document (---)" "a document marker"
+printf 'packages:\n{%% if true %%}\n  - package: acme/x\n{%% endif %%}\n' > "$BP/packages.yml"
+GUEST "un bloc {% … %} (dbt le rend, le lecteur non)" "a top-level line it does not read"
+printf 'packages:\n  - package: acme/x\n' > "$BP/packages.yml"; mklock "$BP"; printf 'packages:\n  - package: acme/x\n' > "$BP/dependencies.yml"
+GUEST "packages.yml et dependencies.yml déclarent tous deux des paquets" "packages.yml and dependencies.yml both declare packages"
+rm -f "$BP/dependencies.yml"
+printf 'packages:\n  - package: acme/x\n    version: 1.0.0\n    version: 1.1.0\n' > "$BP/packages.yml"
+GUEST "une clé deux fois (version)" "a key it does not read (version)"
+printf 'packages:\n  - package:\n    version: 1.0.0\n' > "$BP/packages.yml"
+GUEST "une valeur vide (package:)" "a key it does not read (package)"
+printf 'packages:\n  - package: "acme/x\n' > "$BP/packages.yml"
+GUEST "un guillemet non refermé" "a quoted value it does not read"
+printf 'packages:\n  - git: https://git.example.com/x.git\n    warn-unpinned: peut-être\n' > "$BP/packages.yml"
+GUEST "warn-unpinned ni true ni false" "warn-unpinned is not true or false"
+printf 'packages:\n  - package: acme/\377x\n' > "$BP/packages.yml"
+GUEST "un packages.yml qui n'est pas en UTF-8" "packages.yml: not UTF-8"
+printf 'packages:\n  - package: acme/x\n    version: [">=1.0.0", "<2.0.0"]\n' > "$BP/packages.yml"; mklock "$BP"
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && pass "flux : une version en liste ([\">=1.0.0\", \"<2.0.0\"]), verrouillée et installée : accepté (lue)" || bad "flux : liste de versions ($O)"
+rm -f "$BP/packages.yml"; mkdir "$BP/packages.yml"
+GUEST "un packages.yml illisible (un dossier) : le lecteur échoue, refusé" "its packages cannot be read"
+rmdir "$BP/packages.yml"
+# une URL git à jeton CI ({{ … }} dans la valeur, comme les produits d'une vraie flotte) : lue comme du texte, verrouillée telle quelle
+printf "packages:\n  - git: \"https://{{ ('t:' ~ env_var('CI_JOB_TOKEN', '') ~ '@') if env_var('CI_JOB_TOKEN', '') }}git.example.com/x.git\"\n    revision: \"main\"\n" > "$BP/packages.yml"; mklock "$BP"
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && pass "flux : une URL git à {{ jeton CI }} verrouillée telle quelle et installée : accepté (dbt verrouille le texte non rendu)" || bad "flux : URL git à jeton ($O)"
+rm -rf "$BP/packages.yml" "$BP/package-lock.yml" "$BP/dependencies.yml" "$BP/dbt_packages"
+ln -sfn ../../v2/nulle-part "$FW/global/dbt_packages/fantome"
+O="$(FRUN global compile)"; has "$O" "dbt_packages/fantome (a link to no directory" && ! has "$O" "ARGS=" && pass "flux : un paquet local lié à rien : \`global compile\` refusé (ses hooks ne se lisent pas)" || bad "flux : lien pendant ($O)"
+rm -f "$FW/global/dbt_packages/fantome"
+mv "$FW/global/dbt_packages" "$W/global-pkgs"; mkdir "$FW/global/dbt_packages"
+O="$(FRUN global compile)"; has "$O" "flux D005" && has "$O" "packages are not installed:" && has "$O" "their hooks cannot be checked" && ! has "$O" "ARGS=" && pass "flux : paquets de global/ non installés : \`global compile\` refusé (leurs hooks ne se lisent pas)" || bad "flux : paquets non installés ($O)"
+rmdir "$FW/global/dbt_packages"; mv "$W/global-pkgs" "$FW/global/dbt_packages"
+printf 'DBT_HOOKS_REVIEWED=1\n' >> "$FW/.devcontainer/dbt.conf"; ASFLUX
+O="$(FRUN v2 delta compile)"; has "$O" "runs no hook outside its v4 space" && ! has "$O" "ARGS=" && pass "flux : \`v2 delta compile\` refusé même sous DBT_HOOKS_REVIEWED=1" || bad "flux : REVIEWED=1 ouvre les hooks ($O)"
+cp "$W/dbtconf-avant-hooks" "$FW/.devcontainer/dbt.conf"; ASFLUX
+rm -f "$FW/.devcontainer/hooks.approved" "$FW/v2/delta/dbt/models/hooked.sql"
+
+echo "== flux : un nom de flux qui se lirait comme un paquet de l'espace v4 =="
+mkdir -p "$FW/global-v4/dbt_packages/d005_utils"
+O="$(FRUN v4 delta parse)"; has "$O" "flux D005 reads as a package of the v4 space (d005_utils)" && ! has "$O" "ARGS=" && pass "paquet d005_utils dans global-v4 : le flux D005 est refusé" || bad "collision nom de paquet ($O)"
+O="$(life "$FW" start)"; has "$O" "WARNING: flux D005 — flux D005 reads as a package" && pass "…et just setup le dit" || bad "setup muet sur un nom de paquet ($(grep -i flux <<<"$O" | head -3))"
+rmdir "$FW/global-v4/dbt_packages/d005_utils"; mkdir -p "$FW/global-v4/dbt_packages/d005"
+O="$(FRUN v4 delta parse)"; has "$O" "reads as a package of the v4 space (d005)" && ! has "$O" "ARGS=" && pass "paquet nommé exactement d005 : le flux D005 est refusé" || bad "paquet homonyme exact ($O)"
+rmdir "$FW/global-v4/dbt_packages/d005"; mkdir -p "$FW/global-v4/dbt_packages/d0050"
+O="$(FRUN v4 delta parse)"; has "$O" "PFX=JDOE_V4_D005" && pass "…d0050 ne se lit pas comme D005 (borne « _ ») : accepté" || bad "borne du nom de paquet ($O)"
+rmdir "$FW/global-v4/dbt_packages/d0050"; rmdir "$FW/global-v4/dbt_packages" 2>/dev/null
+life "$FW" start >/dev/null
+
+echo "== flux : la copie principale n'écrit jamais l'espace d'un flux =="
+NOFLUX; ASMAIN; life "$FW" start >/dev/null
+for X in JDOE_V4_D005_DELTA__X JDOE_V4_D005 JDOE_V4_s001_x JDOE_V4_Z999 jdoe_v4_DELTA__X JDOE_v4_DELTA__X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "never a flux's" && ! has "$O" "ARGS=" && pass "principal : écriture v4 sous $X refusée (l'espace d'un flux, ou une autre casse du préfixe)" || bad "principal : $X accepté ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4_DWH_X JDOE_V4_D05_X JDOE_V4_D0050_X JDOE_V4_DD005 JDOE_V4_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && pass "principal : écriture v4 sous $X acceptée (pas la forme d'un flux)" || bad "principal : $X refusé ($O)"
+done
+for X in JDOE_V4_D005_X jdoe_v4_x JDOE_v4; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "never JDOE_V4" && pass "v2 sous $X : refusé (l'espace v4, flux compris, en toute casse)" || bad "v2 vers $X ($O)"
+done
+ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null; NOFLUX; ASMAIN
+O="$(life "$FW" start)"
+check "flux retiré, la copie redevenue principale (DBT_V4_MAIN_WS), just setup : .env de v4/delta -> profiles/v4.env de nouveau" test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+check "…et global-v4/.env aussi" test "$(readlink -f "$FW/global-v4/.env")" = "$(readlink -f "$FW/profiles/v4.env")"
+ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null; NOFLUX
+O="$(life "$FW" start)"
+has "$O" "ORPHAN" && has "$O" "this copy WAS flux D005" && pass "flux.conf effacé d'une copie de flux, just setup : copie orpheline, l'ancien flux nommé — jamais la copie principale" || bad "flux effacé, setup ($(grep -iE 'orphan|flux' <<<"$O" | head -4))"
+check "…plus de .env dans v4/delta (aucun espace v4 lu par l'extension)" test ! -e "$FW/v4/delta/dbt/.env" -a ! -L "$FW/v4/delta/dbt/.env"
+check "…ni dans global-v4/" test ! -e "$FW/global-v4/.env" -a ! -L "$FW/global-v4/.env"
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "…et l'écriture sous l'espace principal JDOE_V4 refusée" || bad "ex-flux vers l'espace principal ($O)"
+ASMAIN; life "$FW" start >/dev/null
+
+echo "== la ligne harmonisée : le flux H (JDOE_V4_H) — elle n'écrit que là, et la ligne ISO (la copie principale) jamais là =="
+ASH; O="$(life "$FW" start)"
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4_H ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4-H.env" ] && [ "$(LIBF dbt_v4_role)" = flux ] \
+  && grep -qx 'DATASET_PREFIX=JDOE_V4_H' "$FW/profiles/v4-H.env" && test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4-H.env")" \
+  && pass "flux.conf DBT_V4_FLUX=H, la ligne harmonisée : JDOE_V4_H, profiles/v4-H.env, le .env de v4/delta y pointe" || bad "flux H ($(LIBF dbt_v4_prefix) $(LIBF dbt_v4_role))"
+has "$O" "flux H: the HARMONIZED line" && pass "…et just setup le dit" || bad "setup muet sur la ligne harmonisée ($(grep -i flux <<<"$O" | head -3))"
+has "$O" "flux H, in git: its v4 worktrees follow <product>/v4-h" && has "$O" "push guard of the harmonized line installed: $FW/.git/hooks/pre-push" && ! has "$O" "separated from the ISO line in BigQuery only" \
+  && pass "…et qu'elle est séparée de la ligne ISO dans git aussi (ses branches v4-h, sa garde de push posée)" || bad "setup muet sur git et la ligne harmonisée ($(grep -i 'flux H\|push guard' <<<"$O" | head -3))"
+O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "just v4 delta (ligne harmonisée) → DATASET_PREFIX=JDOE_V4_H" || bad "v4 delta sous H ($O)"
+for X in JDOE_V4_H_DELTA__X JDOE_V4_H JDOE_V4_H_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "ligne harmonisée : écriture v4 sous $X acceptée" || bad "ligne harmonisée : $X refusé ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4 JDOE_V4_D005_DELTA__X JDOE_V4_HR_X JDOE_V4_HDELTA__X JDOE_V4_h_delta__x jdoe_v4_H_X JDOE_DELTA__X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "flux H" && ! has "$O" "ARGS=" && pass "ligne harmonisée : écriture v4 sous $X refusée (la ligne ISO, un flux, une borne, une autre casse, la v2)" || bad "ligne harmonisée : $X accepté ($O)"
+done
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "outside the sandbox" && ! has "$O" "ARGS=" && pass "ligne harmonisée : global-v4 sous l'espace de la ligne ISO (JDOE_V4_*) refusé" || bad "global-v4 H vers ISO ($O)"
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "a flux writes only its v4 space" && ! has "$O" "ARGS=" \
+  && pass "ligne harmonisée : \`v2 delta run\` refusé (la v2 est commune aux deux lignes : la copie principale seule y écrit)" || bad "v2 run sous H ($O)"
+O="$(FRUN v2 delta parse)"; has "$O" "ARGS=parse" && pass "…\`v2 delta parse\` accepté (lecture)" || bad "v2 parse sous H ($O)"
+# un paquet de l'espace v4 qui se lirait comme H : refusé ; hr, non (borne « _ »)
+mkdir -p "$FW/global-v4/dbt_packages/h_utils"
+O="$(FRUN v4 delta parse)"; has "$O" "flux H reads as a package of the v4 space (h_utils)" && ! has "$O" "ARGS=" && pass "paquet h_utils dans global-v4 : la ligne harmonisée refusée (ses datasets seraient les siens)" || bad "collision H ($O)"
+rmdir "$FW/global-v4/dbt_packages/h_utils"; mkdir -p "$FW/global-v4/dbt_packages/hr"
+O="$(FRUN v4 delta parse)"; has "$O" "PFX=JDOE_V4_H" && pass "…un paquet hr ne se lit pas comme H : accepté" || bad "borne H, paquet ($O)"
+rmdir "$FW/global-v4/dbt_packages/hr"; rmdir "$FW/global-v4/dbt_packages" 2>/dev/null
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ this copy is flux H; the main copy is $MAINW" && has "$O" "flux H is the HARMONIZED line" && has "$O" "✅ profiles/v4-H.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_H" \
+  && pass "doctor : la ligne harmonisée (flux H), sa copie principale, son environnement" || bad "doctor H ($(grep -iE 'flux|this copy' <<<"$O"))"
+has "$O" "flux H, in git: its v4 copies follow <product>/v4-h" && has "$O" "✅ flux H: its push guard runs on every push ($FW/.git/hooks/pre-push)" \
+  && has "$O" "✅ v4/delta/ on branch delta/v4-h" && has "$O" "[lock — .devcontainer/products-h.lock]" && ! has "$O" "separated in BigQuery only" && ! has "$O" "❌ v4/" \
+  && pass "doctor : la ligne harmonisée dans git — ses copies v4 sur <p>/v4-h, sa garde de push, son verrou products-h.lock" || bad "doctor H et git ($(grep -iE 'git|v4-h|push guard|lock' <<<"$O" | head -6))"
+printf 'VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau 0123456789abcdef0123\n' > "$W/verdict-h.md"
+[ "$(LIBF dbt_hooks_v4_verdict_line abc H)" = "VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau abc" ] \
+  && LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 H >/dev/null && ! LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 >/dev/null \
+  && ! LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 D005 >/dev/null \
+  && pass "verdict de la ligne harmonisée (« … FLUX H : … ») : valable pour H, ni pour la copie principale ni pour un autre flux" || bad "verdict H"
+# la déclaration : H seul, en capitale
+refusenv "minuscule h"                'DBT_V4_FLUX=h\n'
+refusenv "H suivi d'un chiffre"       'DBT_V4_FLUX=H1\n'
+refusenv "HH"                         'DBT_V4_FLUX=HH\n'
+refusenv "H_"                         'DBT_V4_FLUX=H_\n'
+refusenv "une autre lettre seule (G)" 'DBT_V4_FLUX=G\n'
+# la ligne harmonisée effacée (git clean -X) : orpheline, jamais la ligne ISO — et elle dit qu'elle était H
+FLUX 'DBT_V4_FLUX=H\n'; life "$FW" start >/dev/null; NOFLUX
+[ -f "$FW/profiles/v4-D005.env" ] && mv "$FW/profiles/v4-D005.env" "$W/v4-D005.env.cote"
+O="$(life "$FW" start)"
+has "$O" "ORPHAN" && has "$O" "this copy WAS flux H" && pass "flux.conf effacé de la ligne harmonisée, just setup : copie orpheline, « this copy WAS flux H » — jamais la ligne ISO" || bad "ex-ligne H ($(grep -iE 'orphan|flux' <<<"$O" | head -4))"
+[ -f "$W/v4-D005.env.cote" ] && mv "$W/v4-D005.env.cote" "$FW/profiles/v4-D005.env"
+# la ligne ISO : la copie principale n'écrit jamais l'espace de la ligne harmonisée
+UNH; ASMAIN; life "$FW" start >/dev/null
+for X in JDOE_V4_H_DELTA__X JDOE_V4_H JDOE_V4_h_delta__x JDOE_V4_h; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "nor the harmonized line's" && ! has "$O" "ARGS=" && pass "ligne ISO (copie principale) : écriture v4 sous $X refusée (l'espace de la ligne harmonisée, toute casse)" || bad "ligne ISO : $X accepté ($O)"
+done
+for X in JDOE_V4_HR_X JDOE_V4_HDELTA__X JDOE_V4_DELTA__H JDOE_V4_DELTA__H_X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && pass "ligne ISO : écriture v4 sous $X acceptée (pas l'espace de la ligne harmonisée)" || bad "ligne ISO : $X refusé ($O)"
+done
+FJ JDOE_V4_H_X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "never JDOE_V4" && pass "v2 sous JDOE_V4_H_X : refusé (l'espace v4, ligne harmonisée comprise)" || bad "v2 vers H ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "and the harmonized line's, JDOE_V4_H / JDOE_V4_H_*, are never written from here" && pass "doctor : la copie principale dit qu'elle n'écrit jamais l'espace de la ligne harmonisée" || bad "doctor ISO et H ($(grep -i 'no flux' <<<"$O"))"
+sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4_H"/' "$FW/.devcontainer/dbt.conf"
+O="$(FRUN v4 delta parse)"; has "$O" "every v4 command is refused" && pass "DBT_BQ_DATASET_PREFIX_V4='JDOE_V4_H' (l'espace de la ligne harmonisée pris pour l'espace principal) : v4 refusée" || bad "préfixe v4 JDOE_V4_H accepté ($O)"
+sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"/' "$FW/.devcontainer/dbt.conf"
+PFXOK JDOE_V4_HR && PFXOK JDOE_V4_HD005 && ! PFXOK JDOE_H_V4 && ! PFXOK JDOE_V4_h \
+  && pass "_dbt_v4_prefix_ok : un segment H (toute casse) refusé ; HR, HD005 acceptés" || bad "_dbt_v4_prefix_ok et H"
+
+echo "== flux : destinations dans un flux =="
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__JDOE_RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
+printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_DELTA__RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v2.jsonl"
+cp "$W/stubs/dbt-cwd" "$DBT_V1_VENV/bin/dbt"; cp "$W/stubs/dbt-cwd" "$DBT_BIN_DIR/dbt"
+ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null
+O="$(FRUN destinations delta)"
+has "$O" "[delta] v2 vs v4: 0 node(s) written elsewhere" && pass "destinations delta (flux) : v2 vs v4, préfixe du flux ignoré" || bad "v2 vs v4 flux ($O)"
+has "$O" "[delta] v4: every node in the v4 space (sandbox-prj, JDOE_V4_D005 / JDOE_V4_D005_*, flux D005)" && pass "…tout nœud de la v4 dans l'espace du flux" || bad "espace du flux ($O)"
+printf '%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
+O="$(FRUN destinations delta)"; has "$O" "1 node(s) OUTSIDE the v4 space (JDOE_V4_D005_*, flux D005)" && pass "…un nœud sous l'espace principal : hors de l'espace du flux" || bad "hors espace flux ($O)"
+cp "$STUB_DBT" "$DBT_V1_VENV/bin/dbt"; cp "$STUB_DBT" "$DBT_BIN_DIR/dbt"
+
+echo "== flux : la preuve des hooks de global-v4 vaut pour un flux, et pour lui seul =="
+G="$FW/global-v4"; mkdir -p "$G/macros" "$G/dbt_packages" "$FW/docs"
+printf 'name: fleet_global_v4\nprofile: "prof_global"\non-run-start: ["select 1"]\n' > "$G/dbt_project.yml"
+printf 'packages:\n  - local: ../v4/delta/dbt\n' > "$G/packages.yml"
+printf 'packages:\n- local: ../v4/delta/dbt\n  name: delta\nsha1_hash: 0\n' > "$G/package-lock.yml"
+ln -sfn ../../v4/delta/dbt "$G/dbt_packages/delta"
+printf 'DBT_HOOKS_COMPILE_OK="global-v4"\nDBT_HOOKS_V4_PROOF="docs/hooks-v4.md"\n' >> "$FW/.devcontainer/dbt.conf"
+ASFLUX   # la copie principale aux mêmes réglages (un flux ne peut que les resserrer)
+# VLINEAT FICHIER SCEAU [FLUX] — une ligne de verdict dans FICHIER ; VLINE SCEAU [FLUX] — dans la preuve que CETTE copie
+# lit (dbt_hooks_v4_proof_path : docs/hooks-v4.md pour la copie principale, docs/hooks-v4-<FLUX>.md pour un flux)
+VLINEAT() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${3:+ FLUX $3}" "$2" > "$FW/$1"; }
+VLINE() { VLINEAT "$(LIBF dbt_hooks_v4_proof_path)" "$@"; }
+NOFLUX; SM="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D005\n'; S5="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D006\n'; S6="$(SEAL)"
+FLUX 'DBT_V4_FLUX=D005\n'
+[[ "$S5" =~ ^[0-9a-f]{20}$ ]] && [ "$S5" != "$SM" ] && [ "$S5" != "$S6" ] && pass "sceau : un par flux (principal $SM, D005 $S5, D006 $S6)" || bad "sceaux ($SM $S5 $S6)"
+[ "$(LIBF dbt_hooks_v4_verdict_line abc D005)" = "VERDICT HOOKS GLOBAL-V4 FLUX D005 : PREUVE OK ; TÉMOINS OK ; sceau abc" ] && pass "ligne de verdict d'un flux : « VERDICT HOOKS GLOBAL-V4 FLUX D005 : … »" || bad "ligne de verdict ($(LIBF dbt_hooks_v4_verdict_line abc D005))"
+[ "$(LIBF dbt_hooks_v4_proof_path)" = docs/hooks-v4-D005.md ] && pass "flux D005 : sa preuve est un fichier à lui, docs/hooks-v4-D005.md (DBT_HOOKS_V4_PROOF, -D005 avant l'extension)" || bad "chemin de la preuve du flux ($(LIBF dbt_hooks_v4_proof_path))"
+# shellcheck disable=SC2034  # lues par dbt_hooks_v4_proof_path, dans le même sous-shell
+PP() { ( source "$FW/.devcontainer/lib-dbt.sh"; DBT_HOOKS_V4_PROOF="$1"; DBT_V4_FLUX="$2"; dbt_hooks_v4_proof_path ); }
+[ "$(PP docs/flotte/HOOKS_V4.md H)" = docs/flotte/HOOKS_V4-H.md ] && [ "$(PP a.b/preuve D005)" = a.b/preuve-D005 ] && [ "$(PP x.y.md D005)" = x.y-D005.md ] \
+  && [ "$(PP .preuve H)" = .preuve-H ] && [ "$(PP docs/p.md '')" = docs/p.md ] && [ -z "$(PP '' H)" ] \
+  && pass "dbt_hooks_v4_proof_path : -<FLUX> avant l'extension du dernier composant (un point dans un dossier ne compte pas) ; sans flux, DBT_HOOKS_V4_PROOF ; vide, vide" || bad "dbt_hooks_v4_proof_path ($(PP a.b/preuve D005) $(PP x.y.md D005) $(PP .preuve H))"
+VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $S5, docs/hooks-v4-D005.md, flux D005" && pass "flux D005, preuve du flux D005 (son fichier) : compile accepté, et dit pourquoi" || bad "preuve du flux ($O)"
+VLINE "$S5"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict sans « FLUX D005 » (celui de la copie principale), même au sceau du flux : refusé" || bad "verdict principal dans le flux ($O)"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la copie principale : refusée dans le flux" || bad "preuve principale dans le flux ($O)"
+VLINE "$S5" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict d'un autre flux (D006) au sceau de D005 : refusé" || bad "verdict d'un autre flux ($O)"
+VLINE "$S6" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D006 : refusée dans D005" || bad "preuve d'un autre flux ($O)"
+# chaque copie lit SA preuve : la bonne ligne du flux, mais dans le fichier de la copie principale, ne vaut rien ici ;
+# et les deux preuves tiennent ensemble dans un même arbre (le jour où la branche du flux revient sur main)
+rm -f "$FW/docs/hooks-v4-D005.md"; VLINEAT docs/hooks-v4.md "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && has "$O" "docs/hooks-v4-D005.md" && ! has "$O" "ARGS=compile" \
+  && pass "…la ligne du flux D005 au bon sceau, mais dans le fichier de la copie principale (docs/hooks-v4.md) : refusée, et son fichier nommé" || bad "preuve du flux dans le fichier principal ($O)"
+VLINEAT docs/hooks-v4.md "$SM"; VLINE "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "…la preuve de la copie principale et celle du flux, chacune dans son fichier : le flux compile sous la sienne" || bad "deux preuves, le flux ($O)"
+cp "$FW/profiles/v4.env" "$W/v4-env-sauve"; echo "ELEMENTARY=1" >> "$FW/profiles/v4.env"
+[ "$(SEAL)" = "$S5" ] && pass "sceau du flux : indépendant de profiles/v4.env (l'environnement principal, que le flux ne lit pas)" || bad "sceau du flux et v4.env"
+cp "$W/v4-env-sauve" "$FW/profiles/v4.env"
+echo "ELEMENTARY=1" >> "$FW/profiles/v4-D005.env"
+O="$(FRUN global-v4 compile)"; [ "$(SEAL)" != "$S5" ] && has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…profiles/v4-D005.env retouché : sceau changé, compile refusé" || bad "env du flux hors du sceau ($O)"
+cp "$W/v4-D005.env" "$FW/profiles/v4-D005.env"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (seal $S5, docs/hooks-v4-D005.md, flux D005)" && pass "doctor : preuve du flux valable (son fichier), dite" || bad "doctor preuve flux ($(grep global-v4 <<<"$O"))"
+has "$O" "✅ flux D005 (.devcontainer/flux.conf)" && has "$O" "✅ profiles/v4-D005.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_D005" && pass "doctor : le flux, son environnement" || bad "doctor flux ($(grep -i flux <<<"$O"))"
+has "$O" "✅ this copy is flux D005; the main copy is $MAINW" && pass "doctor : la copie de flux et sa copie principale, dites" || bad "doctor rôle flux ($(grep -i 'this copy' <<<"$O"))"
+has "$O" "git is shared: this copy's worktrees follow the products' branches the main copy follows" && ! has "$O" "flux H, in git" \
+  && pass "doctor (flux D005) : git partagé avec la copie principale, dit ; pas l'alerte de la ligne harmonisée" || bad "doctor flux et git ($(grep -i 'git' <<<"$O" | head -3))"
+has "$O" "✅ v4/delta/: .env -> profiles/v4-D005.env" && has "$O" "✅ global-v4/.env -> profiles/v4-D005.env" && pass "doctor : .env de la v4 et de global-v4 sur l'environnement du flux" || bad "doctor .env flux ($(grep '\.env' <<<"$O"))"
+ASH; life "$FW" start >/dev/null; SH="$(SEAL)"
+[[ "$SH" =~ ^[0-9a-f]{20}$ ]] && [ "$SH" != "$SM" ] && [ "$SH" != "$S5" ] && [ "$SH" != "$S6" ] && pass "sceau de la ligne harmonisée (flux H) : le sien ($SH)" || bad "sceau H ($SH)"
+VLINE "$SH" H; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SH, docs/hooks-v4-H.md, flux H" && pass "ligne harmonisée, sa preuve (VERDICT … FLUX H) : compile de global-v4 accepté" || bad "preuve H ($O)"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la ligne ISO (la copie principale) : refusée dans la ligne harmonisée" || bad "preuve ISO sous H ($O)"
+VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D005 : refusée dans la ligne harmonisée" || bad "preuve D005 sous H ($O)"
+UNH; FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null
+NOFLUX; ASMAIN; life "$FW" start >/dev/null
+O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SM, docs/hooks-v4.md)" && pass "flux retiré : la copie principale compile sous SA preuve (docs/hooks-v4.md), restée là pendant le flux" || bad "deux preuves, la principale ($O)"
+VLINEAT docs/hooks-v4.md "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D005 recopiée dans son fichier : refusée" || bad "preuve du flux hors du flux ($O)"
+[ "$(SEAL)" = "$SM" ] && pass "…et le sceau principal est celui d'avant le flux" || bad "sceau principal changé"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "…sa propre preuve : compile accepté" || bad "preuve principale ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ no flux (.devcontainer/flux.conf absent)" && has "$O" "✅ this copy is the MAIN one" && pass "doctor : copie principale, pas de flux, dit" || bad "doctor sans flux ($(grep -iE 'flux|this copy' <<<"$O"))"
+ASFLUX
+FLUX 'DBT_V4_FLUX=d005\n'; [ -z "$(SEAL)" ] && pass "flux.conf invalide : pas de sceau" || bad "sceau sous un flux invalide"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ flux: .devcontainer/flux.conf is not a regular file holding one line" && pass "doctor : déclaration refusée, signalée" || bad "doctor flux invalide ($(grep -i flux <<<"$O"))"
+O="$(life "$FW" start)"
+check "déclaration refusée, just setup : plus de .env dans v4/delta (aucun espace v4 lu par l'extension)" test ! -e "$FW/v4/delta/dbt/.env" -a ! -L "$FW/v4/delta/dbt/.env"
+check "…ni dans global-v4/" test ! -e "$FW/global-v4/.env" -a ! -L "$FW/global-v4/.env"
+has "$O" "WARNING: flux" && pass "…et dit" || bad "retrait silencieux"
+VLINE "$SM" D005
+LIBF dbt_hooks_v4_verdict "$FW/docs/hooks-v4.md" "$SM" D005 >/dev/null && ! LIBF dbt_hooks_v4_verdict "$FW/docs/hooks-v4.md" "$SM" 'D00.' >/dev/null \
+  && pass "dbt_hooks_v4_verdict : un nom de flux mal formé (D00., un motif qui couvrirait D005) ne vaut rien" || bad "verdict flux mal formé"
+NOFLUX; ASMAIN; life "$FW" start >/dev/null
+sed -i -e '/^DBT_HOOKS_COMPILE_OK=/d' -e '/^DBT_HOOKS_V4_PROOF=/d' "$FW/.devcontainer/dbt.conf"
+rm -rf "$FW/docs" "$FW/global-v4"
+
+echo "== flux : \`dbt\` dans la copie de travail d'un autre espace (un flux), et hors de tout projet =="
+AW="$W/copie-flux"; mkdir -p "$AW/.devcontainer" "$AW/v4/delta/dbt/models"
+cp "$FW/.devcontainer/dbt-run.sh" "$FW/.devcontainer/lib-dbt.sh" "$AW/.devcontainer/"; printf 'DBT_V4_FLUX=D007\n' > "$AW/.devcontainer/flux.conf"
+printf 'name: delta\n' > "$AW/v4/delta/dbt/dbt_project.yml"
+O="$(CWD="$AW/v4/delta/dbt/models" FRUN auto run -s a)"; has "$O" "a dbt project of another workspace ($AW, a flux)" && ! has "$O" "ARGS=" && pass "\`dbt\` dans le projet d'une copie de flux : refusé, jamais dbt v2 brut" || bad "copie de flux lancée en brut ($O)"
+ln -sfn "$AW/v4/delta/dbt" "$W/lien-aw"
+O="$(CWD="$W/lien-aw" FRUN auto run -s a)"; has "$O" "a dbt project of another workspace" && ! has "$O" "ARGS=" && pass "…atteint par un lien depuis ailleurs : refusé aussi (chemin réel)" || bad "lien vers une copie de flux ($O)"
+rm -f "$W/lien-aw"
+O="$(CWD="$AW" FRUN auto --version)"; has "$O" "dbt 2.0.0" && pass "…à la racine de cette copie, hors de tout projet : dbt --version, comme avant" || bad "auto racine d'une copie ($O)"
+mkdir -p "$W/libre/m"; printf 'name: libre\n' > "$W/libre/dbt_project.yml"
+O="$(CWD="$W/libre/m" FRUN auto parse)"; has "$O" "ARGS=parse" && pass "un projet dbt hors de tout espace de travail : inchangé (dbt v2 nu)" || bad "projet libre ($O)"
+O="$(CWD="$W/libre/m" FRUN auto run --project-dir "$FW/v4/delta/dbt")"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "…mais jamais avec --project-dir (un projet du coordinateur choisi d'ailleurs)" || bad "projet libre --project-dir ($O)"
+# hors de tout projet : une liste blanche, et jamais un projet choisi par la ligne de commande ou l'environnement
+O="$(CWD="$FW" FRUN auto run --project-dir v4/delta/dbt -s a)"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "racine : dbt run --project-dir v4/delta/dbt → refusé" || bad "racine --project-dir ($O)"
+O="$(CWD="$FW" FRUN auto build --project-dir=v2/delta/dbt)"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "racine : dbt build --project-dir=v2/delta/dbt → refusé" || bad "racine --project-dir= ($O)"
+O="$(CWD="$FW" FRUN auto parse --profiles-dir /x)"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "racine : --profiles-dir → refusé" || bad "racine --profiles-dir ($O)"
+O="$(CWD="$FW" FRUN auto deps --packages-install-path /x)"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "racine : --packages-install-path → refusé" || bad "racine --packages-install-path ($O)"
+O="$(CWD="$FW" DBT_PROJECT_DIR="$FW/v4/delta/dbt" FRUN auto run)"; has "$O" "DBT_PROJECT_DIR is set" && ! has "$O" "ARGS=" && pass "racine : DBT_PROJECT_DIR=v4/delta/dbt dbt run → refusé" || bad "racine DBT_PROJECT_DIR ($O)"
+O="$(CWD="$FW" DBT_PACKAGES_INSTALL_PATH=/x FRUN auto --version)"; has "$O" "DBT_PACKAGES_INSTALL_PATH is set" && ! has "$O" "ARGS=" && pass "racine : DBT_PACKAGES_INSTALL_PATH → refusé" || bad "racine DBT_PACKAGES_INSTALL_PATH ($O)"
+mkdir -p "$W/ailleurs-vide"
+O="$(CWD="$W/ailleurs-vide" FRUN auto run --project-dir "$FW/v4/delta/dbt")"; has "$O" "refused outside a project the guard knows" && ! has "$O" "ARGS=" && pass "hors de l'espace : dbt run --project-dir \$FW/v4/delta/dbt → refusé" || bad "ailleurs --project-dir ($O)"
+O="$(CWD="$FW" FRUN auto run -s a)"; has "$O" "outside every dbt project" && ! has "$O" "ARGS=" && pass "racine, hors de tout projet : dbt run → refusé (liste blanche)" || bad "racine run ($O)"
+O="$(CWD="$W/ailleurs-vide" FRUN auto --log-level debug run)"; has "$O" "outside every dbt project" && ! has "$O" "ARGS=" && pass "ailleurs, hors de tout projet : dbt --log-level debug run → refusé" || bad "ailleurs run ($O)"
+O="$(CWD="$FW" FRUN auto system update)"; has "$O" "ARGS=system update" && pass "racine : dbt system update → dbt v2 nu (liste blanche)" || bad "racine system ($O)"
+rmdir "$W/ailleurs-vide"
+# un dossier de l'espace de travail atteint par un lien : aiguillé par son chemin réel
+ln -sfn "$FW/v4/delta/dbt" "$W/lien-v4"
+O="$(CWD="$W/lien-v4" FRUN auto parse)"; grep -q 'PFX=JDOE_V4$' <<<"$O" && has "$O" "CWD=$FW/v4/delta/dbt" && pass "\`dbt\` dans un lien vers v4/delta/dbt : le garde-fou de la v4 (chemin réel)" || bad "lien vers la v4 ($O)"
+O="$(CWD="$W/lien-v4" FRUN auto run)"; has "$O" "without a selection" && pass "…\`dbt run\` y passe par le garde-fou" || bad "lien vers la v4, run ($O)"
+rm -f "$W/lien-v4"
+rm -rf "$AW" "$W/libre"
+
+echo "== flux : deux copies réelles — le just setup d'un flux ne touche pas à l'état du container =="
+ASMAIN; NOFLUX; printf '/.devcontainer/flux.conf\n/profiles/v4-*.env\n' >> "$FW/.gitignore"
+git config --global url."file://$W/gh/".insteadOf "https://github.com/"   # epsilon : son dépôt reste joignable, sans réseau
+life "$FW" start >/dev/null
+BASHRC0="$(sha256sum < "$HOME/.bashrc")"; GC0="$(git config --global --list | grep -v '^safe\.directory=' | sort)"
+NUV0="$(grep -c '^uv ' "$STUB_LOG")"; NI0="$(grep -c '^installer' "$STUB_LOG")"
+CF="$W/copie-flux-reelle"; git clone -q "$W/fleet-origin.git" "$CF" 2>/dev/null
+mkdir -p "$CF/.devcontainer" "$CF/profiles"
+for f in dbt.conf products.conf referents.conf lib-dbt.sh dbt-run.sh dbt-doctor.sh; do [ -f "$FW/.devcontainer/$f" ] && cp "$FW/.devcontainer/$f" "$CF/.devcontainer/"; done
+cp -a "$FW/profiles/." "$CF/profiles/"; rm -f "$CF/profiles/v4-"*.env; cp "$FW/.gitignore" "$CF/.gitignore"
+printf 'DBT_V4_FLUX=D007\n' > "$CF/.devcontainer/flux.conf"
+CRUN() { ( cd "${CWD:-$CF}" && bash "$CF/.devcontainer/dbt-run.sh" "$@" ) 2>&1; }
+LIBC() { ( cd "$CF" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && "$@"' _ "$@" ) 2>&1; }
+O="$(life "$CF" start)"
+[ "$(LIBC dbt_v4_role)" = flux ] && test "$(readlink -f "$CF/v4/delta/dbt/.env")" = "$(readlink -f "$CF/profiles/v4-D007.env")" \
+  && pass "copie de flux réelle (un clone, flux D007) : préparée — v4/delta, son .env sur profiles/v4-D007.env" || bad "copie de flux réelle ($(LIBC dbt_v4_role); $(tail -5 <<<"$O"))"
+[ "$(JK "$CF/v4/delta/.vscode/settings.json" dbt.flag.defer)" = null ] && [ ! -e "$CF/h.code-workspace" ] \
+  && pass "…un flux <A999> : ni drapeaux de report dans ses réglages v4, ni h.code-workspace (la ligne H seule)" || bad "flux D007 et réglages de la ligne H ($(JK "$CF/v4/delta/.vscode/settings.json" dbt.flag.defer))"
+[ "$(sha256sum < "$HOME/.bashrc")" = "$BASHRC0" ] && pass "…~/.bashrc inchangé (\`dbt\` et DBT_PROFILES_DIR visent toujours la copie principale)" || bad "réécriture de ~/.bashrc par le flux ($(grep -E '^export DBT_PROFILES_DIR|^dbt\(\)' "$HOME/.bashrc"))"
+[ "$(git config --global --list | grep -v '^safe\.directory=' | sort)" = "$GC0" ] && pass "…git config --global inchangé (safe.directory à part : ajouté pour ses worktrees)" || bad "git global réécrit par le flux ($(diff <(printf '%s\n' "$GC0") <(git config --global --list | grep -v '^safe\.directory=' | sort)))"
+[ "$(grep -c '^uv ' "$STUB_LOG")" = "$NUV0" ] && [ "$(grep -c '^installer' "$STUB_LOG")" = "$NI0" ] && pass "…aucun moteur installé ni reconstruit (uv, installeur dbt v2)" || bad "moteurs touchés par le flux"
+O="$( (cd "$FW/v2/delta/dbt" && bash -c 'source "$HOME/.bashrc" >/dev/null 2>&1; dbt parse') 2>&1)"; has "$O" "ARGS=parse" && has "$O" "CWD=$FW/v2/delta/dbt" && pass "…\`dbt parse\` tapé dans la copie principale, nouveau terminal : toujours son garde-fou" || bad "dbt de la copie principale après le flux ($O)"
+FJ JDOE_V4_D007_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" CRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "PFX=JDOE_V4_D007" && pass "…sa v4 écrit sous JDOE_V4_D007_*" || bad "flux réel, v4 sous son espace ($O)"
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" CRUN v4 delta run -s a)"; has "$O" "outside the sandbox" && ! has "$O" "ARGS=" && pass "…jamais sous l'espace principal JDOE_V4" || bad "flux réel vers l'espace principal ($O)"
+O="$( (cd "$CF" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ this copy is flux D007; the main copy is $FW" && pass "…doctor : la copie de flux et sa copie principale" || bad "doctor copie de flux ($(grep -i 'this copy' <<<"$O"))"
+# une épingle de moteur autre que celle de la copie principale : jamais installée, et toute commande refusée
+sed -i 's/^DBT_V1_PINS=.*/DBT_V1_PINS="dbt-core==1.10.9 dbt-bigquery==1.10.9"/' "$CF/.devcontainer/dbt.conf"
+O="$(life "$CF" start)"
+[ "$(grep -c '^uv ' "$STUB_LOG")" = "$NUV0" ] && has "$O" "never rebuilt from here" && pass "épingle dbt Core du flux autre que celle de la copie principale : venv commun jamais reconstruit, dit" || bad "épingle du flux ($(grep -iE 'pins|dbt Core' <<<"$O" | head -3))"
+O="$(CRUN v4 delta parse)"; has "$O" "DBT_V1_PINS differs from the main copy's" && ! has "$O" "ARGS=" && pass "…et toute commande dbt de la copie de flux refusée" || bad "épingle du flux, commande ($O)"
+O="$( (cd "$CF" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_engines "$PWD"') 2>&1)"
+[ "$(grep -c '^uv ' "$STUB_LOG")" = "$NUV0" ] && [ "$(grep -c '^installer' "$STUB_LOG")" = "$NI0" ] && has "$O" "never from this copy" && pass "…dbt_engines (onCreateCommand) de la copie de flux : aucun moteur installé" || bad "dbt_engines de la copie de flux ($O)"
+cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"
+# un flux dont le dbt.conf ne nomme aucune copie principale : refusé, et jamais propriétaire du container
+sed -i 's/^DBT_V4_MAIN_WS=.*/DBT_V4_MAIN_WS=""/' "$CF/.devcontainer/dbt.conf"
+O="$(life "$CF" start)"
+[ "$(sha256sum < "$HOME/.bashrc")" = "$BASHRC0" ] && [ "$(grep -c '^uv ' "$STUB_LOG")" = "$NUV0" ] && has "$O" "is the main copy's" \
+  && pass "copie de flux sans copie principale nommée (DBT_V4_MAIN_WS vide) : ~/.bashrc et moteurs laissés quand même" || bad "flux sans DBT_V4_MAIN_WS propriétaire du container ($(grep -E '^export DBT_PROFILES_DIR' "$HOME/.bashrc"))"
+O="$(CRUN v4 delta parse)"; has "$O" "names no main copy by an absolute path" && ! has "$O" "ARGS=" && pass "…et toute commande dbt y est refusée" || bad "flux sans DBT_V4_MAIN_WS, commande ($O)"
+cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"
+mv "$HOME/.bigqueryrc" "$W/bigqueryrc-sauve"; echo 'DBT_UPSTREAM_PUSH_LOCK=0' >> "$CF/.devcontainer/dbt.conf"
+life "$CF" start >/dev/null
+[ ! -e "$HOME/.bigqueryrc" ] && pass "…~/.bigqueryrc absent : jamais créé par la copie de flux" || bad "création de ~/.bigqueryrc par le flux"
+[ "$(git -C "$CF" config --get remote.up-alpha.pushurl)" = DISABLED ] && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans la copie de flux : son remote up-alpha reste verrouillé (pushurl DISABLED)" || bad "flux qui déverrouille son remote ($(git -C "$CF" config --get remote.up-alpha.pushurl))"
+mv "$W/bigqueryrc-sauve" "$HOME/.bigqueryrc"; cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"
+# les réglages git globaux : la copie de flux n'ajoute que des verrous — les trois couches du verrou 4 comprises —, ne
+# réécrit ni HTTPS→SSH ni le reste de core.sshCommand (les clés épinglées de la copie principale), ne remplace jamais la
+# garde installée, ne lève rien
+GSET() { ( cd "$1" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_upstream_urls() { echo "git@git.invalid:grp/x.git"; } && dbt_git_setup' ) 2>&1; }
+# GSETC CFG COPIE [EVAL] — dbt_git_setup de COPIE sur la configuration globale CFG (une upstream ssh, git.invalid) ; EVAL
+# après dbt_load_conf (un réglage du dbt.conf de la copie)
+GSETC() { ( cd "$2" && GIT_CONFIG_GLOBAL="$1" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && eval "$1" && _dbt_upstream_urls() { echo "git@git.invalid:grp/x.git"; } && dbt_git_setup' _ "${3:-:}" ) 2>&1; }
+GC() { GIT_CONFIG_GLOBAL="$1" git config --global "${@:2}"; }
+KEY="git.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAkeyforteststestsaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+echo "$KEY" > "$CF/.devcontainer/upstream_known_hosts"; echo "$KEY" > "$FW/.devcontainer/upstream_known_hosts"
+cp "$SRC/"*"git-ssh-garde.sh"* "$CF/.devcontainer/git-ssh-garde.sh"
+KHM="$W/autre/.devcontainer/upstream_known_hosts"; GQ="$(printf '%q' "$GI")"; GV="$W/verrou4-invite"; mkdir -p "$GV"
+cp "$GI" "$GV/garde.principale"
+# (a) aucune garde encore : posée devant les clés épinglées de la copie principale, jamais celles du flux
+: > "$GV/s1.cfg"; GC "$GV/s1.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""
+O="$(GSETC "$GV/s1.cfg" "$CF")"
+[ "$(GC "$GV/s1.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && [ -z "$(GC "$GV/s1.cfg" --get url.git@git.invalid:.insteadOf)" ] \
+  && [ "$(GC "$GV/s1.cfg" --get-all url.DISABLED://.pushInsteadOf | grep -c 'git\.invalid')" = 13 ] && has "$O" "ADDED by this copy" \
+  && pass "copie de flux, hôte SSH : verrou 4 ajouté (13 préfixes, la garde ssh devant les clés épinglées de la copie principale) ; HTTPS→SSH laissé à la copie principale" \
+  || bad "git global de la copie de flux ($(GC "$GV/s1.cfg" --get core.sshCommand) | $O)"
+! GC "$GV/s1.cfg" --get core.sshCommand | grep -qF "$CF/" && pass "…core.sshCommand ne nomme aucun chemin de la copie de flux" || bad "core.sshCommand nomme la copie de flux ($(GC "$GV/s1.cfg" --get core.sshCommand))"
+# (a) la garde couvre déjà l'hôte : core.sshCommand laissé octet pour octet
+SCM="bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\""
+: > "$GV/s2.cfg"; GC "$GV/s2.cfg" core.sshCommand "$SCM"; O="$(GSETC "$GV/s2.cfg" "$CF")"
+[ "$(GC "$GV/s2.cfg" --get core.sshCommand)" = "$SCM" ] && has "$O" "left as it is" \
+  && pass "…la garde de la copie principale couvre l'hôte : core.sshCommand laissé octet pour octet" || bad "garde de la principale réécrite par le flux ($(GC "$GV/s2.cfg" --get core.sshCommand))"
+# (a) la garde d'un autre hôte : l'hôte ajouté à --hosts=, le reste gardé
+: > "$GV/s3.cfg"; GC "$GV/s3.cfg" core.sshCommand "bash $GQ --hosts=autre.invalid -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s3.cfg" "$CF" >/dev/null
+[ "$(GC "$GV/s3.cfg" --get core.sshCommand)" = "bash $GQ --hosts=autre.invalid,git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && pass "…une garde sur un autre hôte : git.invalid ajouté à --hosts=, autre.invalid et les clés de la principale gardés" || bad "hôtes de la garde ($(GC "$GV/s3.cfg" --get core.sshCommand))"
+# (a) DBT_UPSTREAM_PUSH_LOCK=0 dans le dbt.conf du flux : la garde n'est jamais retirée
+: > "$GV/s5.cfg"; GC "$GV/s5.cfg" core.sshCommand "$SCM"; O="$(GSETC "$GV/s5.cfg" "$CF" 'DBT_UPSTREAM_PUSH_LOCK=0')"
+[ "$(GC "$GV/s5.cfg" --get core.sshCommand)" = "$SCM" ] && [ "$(GC "$GV/s5.cfg" --get-all url.DISABLED://.pushInsteadOf | grep -c 'git\.invalid')" = 13 ] && has "$O" "never lifts a lock" \
+  && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans le flux : la garde ssh et les 13 préfixes restent, et c'est dit" || bad "flux qui retire la garde ($(GC "$GV/s5.cfg" --get core.sshCommand) | $O)"
+# (a) la garde installée est celle de la copie principale : jamais remplacée depuis le flux ; absente, posée
+echo "# la copie installée par la copie principale" >> "$GI"; G0="$(sha256sum < "$GI")"
+: > "$GV/s4.cfg"; GC "$GV/s4.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s4.cfg" "$CF" >/dev/null
+[ "$(sha256sum < "$GI")" = "$G0" ] && [ "$(GC "$GV/s4.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && pass "…la garde installée (~/.local/libexec), autre que celle du flux : jamais remplacée depuis le flux" || bad "garde installée remplacée par le flux"
+rm -f "$GI"; : > "$GV/s4b.cfg"; GSETC "$GV/s4b.cfg" "$CF" >/dev/null
+cmp -s "$GI" "$CF/.devcontainer/git-ssh-garde.sh" && [ "$(GC "$GV/s4b.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid" ] \
+  && pass "…aucune garde installée, aucun core.sshCommand : la garde posée, sans clés épinglées du flux" || bad "garde absente ($(GC "$GV/s4b.cfg" --get core.sshCommand))"
+cp "$GV/garde.principale" "$GI"
+# (b) selon l'état du container, jamais selon le dbt.conf du flux
+: > "$GV/s6.cfg"; GC "$GV/s6.cfg" url.git@git.invalid:.insteadOf "https://git.invalid/"; GSETC "$GV/s6.cfg" "$CF" 'DBT_UPSTREAM_HTTPS_TO_SSH=0' >/dev/null
+[ "$(GC "$GV/s6.cfg" --get-all http.https://git.invalid.proxy | tail -1)" = "http://127.0.0.1:9" ] \
+  && [ "$(GC "$GV/s6.cfg" --get-all credential.https://git.invalid.helper | tail -1)" = "$(LIBC _dbt_https_quitter git.invalid)" ] \
+  && [ "$(GC "$GV/s6.cfg" --get url.git@git.invalid:.insteadOf)" = "https://git.invalid/" ] \
+  && pass "…le container lit https://git.invalid par ssh, le flux dit DBT_UPSTREAM_HTTPS_TO_SSH=0 : proxy mort et quitteur ajoutés quand même, HTTPS→SSH laissé" || bad "couche (b) du flux selon son dbt.conf"
+: > "$GV/s7.cfg"; GC "$GV/s7.cfg" --add http.https://git.invalid.proxy "http://127.0.0.1:9"; GSETC "$GV/s7.cfg" "$CF" >/dev/null
+[ "$(GC "$GV/s7.cfg" --get-all http.https://git.invalid.proxy | tail -1)" = "http://127.0.0.1:9" ] && [ -z "$(GC "$GV/s7.cfg" --get url.git@git.invalid:.insteadOf)" ] \
+  && pass "…le container lit git.invalid par https : la couche https laissée telle quelle (le proxy mort posé avant n'est pas retiré)" || bad "flux qui lève la couche https"
+# témoin : la copie principale, elle, réécrit core.sshCommand avec SES clés épinglées
+: > "$GV/s8.cfg"; GC "$GV/s8.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s8.cfg" "$FW" >/dev/null
+has "$(GC "$GV/s8.cfg" --get core.sshCommand)" "UserKnownHostsFile=$FW/.devcontainer/upstream_known_hosts" && pass "…la copie principale, elle, le réécrit (le témoin voit une réécriture)" || bad "copie principale et core.sshCommand ($(GC "$GV/s8.cfg" --get core.sshCommand))"
+# et sur la configuration globale du container (HOME factice, remise telle quelle ensuite) : le flux n'y lève rien
+cp "$HOME/.gitconfig" "$GV/gitconfig.avant"
+for P in "git@git.invalid:" "ssh://git@git.invalid/" "https://git.invalid/"; do git config --global --fixed-value --unset-all url.DISABLED://.pushInsteadOf "$P" 2>/dev/null; done
+echo 'DBT_UPSTREAM_PUSH_LOCK=0' >> "$CF/.devcontainer/dbt.conf"
+O="$(GSET "$CF")"; git config --global --get-all url.DISABLED://.pushInsteadOf | grep -qxF "git@git.invalid:" && has "$O" "never lifts a lock" && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans la copie de flux : le verrou n'est jamais levé, et c'est dit" || bad "flux qui lève un verrou ($O)"
+cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"; cp "$GV/gitconfig.avant" "$HOME/.gitconfig"
+rm -f "$FW/.devcontainer/upstream_known_hosts" "$CF/.devcontainer/upstream_known_hosts" "$CF/.devcontainer/git-ssh-garde.sh"
+# un nettoyage ordinaire efface flux.conf (ignoré) : la copie devient orpheline, jamais la copie principale
+git -C "$CF" clean -fdXq
+[ ! -e "$CF/.devcontainer/flux.conf" ] && [ ! -e "$CF/profiles/v4-D007.env" ] && [ -d "$CF/v4/delta/dbt" ] \
+  && pass "git clean -fdX dans la copie de flux : flux.conf et profiles/v4-D007.env effacés, worktrees intacts" || bad "git clean -fdX ($(ls "$CF/.devcontainer"))"
+O="$(life "$CF" start)"
+[ "$(LIBC dbt_v4_role)" = orphan ] && has "$O" "this copy WAS flux D007" && pass "…just setup : copie orpheline, l'ancien flux nommé — jamais la copie principale" || bad "setup après git clean ($(LIBC dbt_v4_role); $(grep -iE 'orphan|flux' <<<"$O" | head -3))"
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" CRUN v4 delta run -s a)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "…écriture v4 sous l'espace principal JDOE_V4 refusée" || bad "ex-flux vers l'espace principal ($O)"
+O="$(CRUN v4 delta parse)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "…toute commande v4 refusée (parse compris)" || bad "orpheline, v4 parse ($O)"
+O="$(STUB_LS_FILE="$W/ls-v2ok.jsonl" CRUN v2 delta build -s a)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "…v2 build refusé (l'espace de la copie principale)" || bad "orpheline, v2 build ($O)"
+O="$(CRUN v2 delta parse)"; has "$O" "ARGS=parse" && pass "…v2 parse accepté (lecture)" || bad "orpheline, v2 parse ($O)"
+check "…plus de .env dans sa v4/delta" test ! -e "$CF/v4/delta/dbt/.env" -a ! -L "$CF/v4/delta/dbt/.env"
+CUTOK "$CF/v4/delta/.vscode/settings.json" && CUTOK "$CF/v2/delta/.vscode/settings.json" && CUTOK "$CF/v1/alpha/.vscode/settings.json" \
+  && pass "…extensions dbt coupées partout (v1, v2, v4 : aucun espace à elle)" || bad "orpheline, extensions non coupées ($(JK "$CF/v4/delta/.vscode/settings.json" dbt.profileName))"
+[ "$(sha256sum < "$HOME/.bashrc")" = "$BASHRC0" ] && pass "…~/.bashrc toujours celui de la copie principale" || bad "réécriture de ~/.bashrc par l'orpheline"
+O="$( (cd "$CF" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ ORPHAN copy — this copy is $(cd "$CF" && pwd -P), the main copy is DBT_V4_MAIN_WS=\"$FW\"" && pass "…doctor : copie orpheline, dite" || bad "doctor orpheline réelle ($(grep -i orphan <<<"$O" | head -2))"
+# un clone neuf sans flux.conf : une copie orpheline, pas une deuxième copie principale
+CG="$W/clone-neuf"; git clone -q "$W/fleet-origin.git" "$CG" 2>/dev/null; mkdir -p "$CG/.devcontainer" "$CG/profiles"
+for f in dbt.conf products.conf referents.conf lib-dbt.sh dbt-run.sh dbt-doctor.sh; do [ -f "$FW/.devcontainer/$f" ] && cp "$FW/.devcontainer/$f" "$CG/.devcontainer/"; done
+cp -a "$FW/profiles/." "$CG/profiles/"; rm -f "$CG/profiles/v4-"*.env; cp "$FW/.gitignore" "$CG/.gitignore"
+OCG="$(life "$CG" start)"
+O="$( (cd "$CG" && bash .devcontainer/dbt-run.sh v4 delta parse) 2>&1)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "clone neuf sans flux.conf : copie orpheline, aucune commande v4" || bad "clone neuf ($O)"
+[ ! -e "$CG/v4" ] && [ -d "$CG/v2/delta" ] && has "$OCG" "v4/delta/: not created — this copy has no v4 space (orphan)" && has "$OCG" "BEFORE its first just setup" \
+  && pass "…aucune copie v4 ouverte (sur la branche ISO, sans garde de push, elle pousserait vers v4) ; v1/v2 oui ; dit (flux.conf AVANT le premier just setup)" || bad "orpheline et copies v4 ($(ls "$CG/v4" 2>/dev/null) $(grep -i 'v4/delta' <<<"$OCG"))"
+O="$( (cd "$CG" && bash .devcontainer/dbt-run.sh product-add omega "$W/fleet-up/delta.git") 2>&1)"; has "$O" "orphan copy: just product-add refused — only the main copy" && ! grep -q '^omega' "$CG/.devcontainer/products.conf" \
+  && pass "…just product-add refusé dans une copie orpheline (products.conf inchangé)" || bad "orpheline, product-add ($O)"
+O="$( (cd "$CG" && bash .devcontainer/dbt-run.sh auto init) 2>&1)"; has "$O" "\`dbt init\` refused in this copy (orphan)" && ! has "$O" "ARGS=" && pass "…\`dbt init\` refusé (il écrit l'état du container)" || bad "orpheline, dbt init ($O)"
+O="$( (cd "$CG" && bash .devcontainer/dbt-run.sh v2 delta parse --target-path "$FW/v2/delta/dbt/target") 2>&1)"; has "$O" "in another working copy" && ! has "$O" "ARGS=" \
+  && pass "…\`v2 delta parse --target-path <copie principale>/…\` refusé (ses artefacts chez une autre copie)" || bad "orpheline, --target-path ($O)"
+O="$( (cd "$CG" && bash .devcontainer/dbt-run.sh upstream-pull delta) 2>&1)"; has "$O" "NOT pushed — a copy that is not the main one refreshes no mirror" && ! has "$O" "→ mirror on home-delta: upstream-main" \
+  && pass "…just upstream-pull : l'origine lue, le miroir jamais poussé (une orpheline n'a aucune garde de push)" || bad "orpheline, upstream-pull ($O)"
+[ "$(sha256sum < "$HOME/.bashrc")" = "$BASHRC0" ] && pass "…et son just setup laisse ~/.bashrc à la copie principale" || bad "réécriture de ~/.bashrc par un clone neuf"
+echo "== la ligne harmonisée dans git : une copie réelle (un clone, flux H) — ses branches v4-h, sa garde de push, son verrou =="
+# une copie de la ligne H suit <p>/v4-h (v4-h là où vivent les branches du produit, ouverte LÀ depuis la v4 publiée),
+# refuse une copie v4/<p> qui n'est pas sur <p>/v4-h, ne pousse jamais vers v1, v2, v4 (garde pre-push), écrit
+# products-h.lock, refuse clone, --state, --defer, --manage-state. rho : sa v4-h pas encore ouverte (retirée de son dépôt)
+git -C "$W/homes/rho.git" branch -q -D v4-h
+CH="$W/copie-ligne-h"; git clone -q "$W/fleet-origin.git" "$CH" 2>/dev/null
+mkdir -p "$CH/.devcontainer" "$CH/profiles" "$CH/global-v4"
+for f in dbt.conf products.conf referents.conf lib-dbt.sh dbt-run.sh dbt-doctor.sh git-push-garde-h.sh; do [ -f "$FW/.devcontainer/$f" ] && cp "$FW/.devcontainer/$f" "$CH/.devcontainer/"; done
+cp -a "$FW/profiles/." "$CH/profiles/"; rm -f "$CH/profiles/v4-"*.env; cp "$FW/.gitignore" "$CH/.gitignore"
+printf 'name: fleet_global_v4\nprofile: "prof_global"\n' > "$CH/global-v4/dbt_project.yml"
+printf 'DBT_V4_FLUX=H\n' > "$CH/.devcontainer/flux.conf"
+HRUN() { ( cd "${CWD:-$CH}" && bash "$CH/.devcontainer/dbt-run.sh" "$@" ) 2>&1; }
+LIBH() { ( cd "$CH" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && "$@"' _ "$@" ) 2>&1; }
+HK="$CH/.git/hooks/pre-push"; GSRC="$CH/.devcontainer/git-push-garde-h.sh"
+BASHRCH="$(sha256sum < "$HOME/.bashrc")"; GCH="$(git config --global --list | grep -v '^safe\.directory=' | sort)"
+V4D0="$(git -C "$W/homes/delta.git" rev-parse v4)"
+O="$(life "$CH" start)"
+[ "$(LIBH dbt_v4_role)" = flux ] && [ -x "$HK" ] && cmp -s "$HK" "$GSRC" && has "$O" "push guard of the harmonized line installed: $HK" \
+  && pass "copie H réelle (un clone, flux H) : just setup pose sa garde de push, octet pour octet ($HK)" || bad "garde de push de la ligne H ($(grep -i 'push guard\|flux H' <<<"$O" | head -3))"
+[ "$(git -C "$CH/v4/delta" symbolic-ref -q --short HEAD 2>/dev/null)" = delta/v4-h ] && [ "$(git -C "$CH" rev-parse --abbrev-ref 'delta/v4-h@{upstream}' 2>/dev/null)" = home-delta/v4-h ] \
+  && pass "…v4/delta/ sur delta/v4-h, qui suit home-delta/v4-h (la branche de la ligne, dans le dépôt du produit)" || bad "v4/delta de la ligne H ($(git -C "$CH/v4/delta" rev-parse --abbrev-ref HEAD 2>/dev/null))"
+[ "$(git -C "$CH/v4/alpha" symbolic-ref -q --short HEAD 2>/dev/null)" = alpha/v4-h ] && [ "$(git -C "$CH" rev-parse --abbrev-ref 'alpha/v4-h@{upstream}' 2>/dev/null)" = origin/alpha/v4-h ] \
+  && pass "…v4/alpha/ (branches sur origin) sur alpha/v4-h, qui suit origin/alpha/v4-h" || bad "v4/alpha de la ligne H ($(git -C "$CH" rev-parse --abbrev-ref 'alpha/v4-h@{upstream}' 2>/dev/null))"
+refute "…aucune branche locale de la ligne ISO (delta/v4, alpha/v4) dans la copie H" bash -c 'git -C "$1" show-ref --verify -q refs/heads/delta/v4 || git -C "$1" show-ref --verify -q refs/heads/alpha/v4' _ "$CH"
+has "$O" "v4/rho/: the harmonized line's v4-h is not opened yet in $W/homes/rho.git — it starts from the published v4:" && has "$O" "git push home-rho home-rho/v4:refs/heads/v4-h, then: just setup" \
+  && [ ! -e "$CH/v4/rho" ] && pass "rho (v4-h pas encore ouverte) : dit, avec l'ouverture depuis la v4 publiée — rien créé ici" || bad "v4-h non ouverte ($(grep -i rho <<<"$O" | head -3))"
+[ "$(sha256sum < "$HOME/.bashrc")" = "$BASHRCH" ] && [ "$(git config --global --list | grep -v '^safe\.directory=' | sort)" = "$GCH" ] \
+  && pass "…~/.bashrc et git config --global inchangés (la garde de push est dans le dépôt de la copie H, jamais dans le container)" || bad "copie H et état du container"
+check "la copie principale n'a aucune garde de push (rien ne change pour elle)" test ! -e "$FW/.git/hooks/pre-push"
+check "…ni une copie de flux D007 (devenue orpheline)" test ! -e "$CF/.git/hooks/pre-push"
+# l'ouverture de la v4-h de rho : depuis la v4 publiée, et seulement là
+O="$(git -C "$CH" push home-rho HEAD:refs/heads/v4-h 2>&1)"; RC=$?
+[ "$RC" != 0 ] && has "$O" "push refused by the harmonized line's push guard" && has "$O" "not at the published v4" && ! git -C "$W/homes/rho.git" rev-parse -q --verify refs/heads/v4-h >/dev/null \
+  && pass "créer v4-h de rho depuis un autre commit que sa v4 publiée : refusé par la garde (rien créé)" || bad "création de v4-h hors v4 ($RC $O)"
+O="$(git -C "$CH" push home-rho home-rho/v4:refs/heads/v4-h 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/homes/rho.git" rev-parse v4-h)" = "$(git -C "$W/homes/rho.git" rev-parse v4)" ] \
+  && pass "…git push home-rho home-rho/v4:refs/heads/v4-h (l'ouverture documentée) : accepté" || bad "ouverture de v4-h ($RC $O)"
+O="$(life "$CH" start)"
+[ "$(git -C "$CH/v4/rho" symbolic-ref -q --short HEAD 2>/dev/null)" = rho/v4-h ] && [ "$(git -C "$CH" rev-parse --abbrev-ref 'rho/v4-h@{upstream}' 2>/dev/null)" = home-rho/v4-h ] \
+  && pass "…just setup : v4/rho/ sur rho/v4-h, qui suit home-rho/v4-h" || bad "v4/rho après ouverture ($(grep rho <<<"$O" | head -3))"
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "just v4 delta (copie H) : accepté, sous JDOE_V4_H" || bad "v4 delta dans la copie H ($O)"
+O="$(HRUN global-v4 parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "just global-v4 (copie H) : accepté, ses copies v4 sur leurs branches de ligne" || bad "global-v4 dans la copie H ($O)"
+# la garde de push
+( cd "$CH/v4/delta" && echo "-- H001" >> dbt/models/m_delta.sql && git commit -q -am "H001 : une convergence" )
+O="$(git -C "$CH/v4/delta" push 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/homes/delta.git" rev-parse v4-h)" = "$(git -C "$CH/v4/delta" rev-parse HEAD)" ] && [ "$(git -C "$W/homes/delta.git" rev-parse v4)" = "$V4D0" ] \
+  && pass "git push depuis v4/delta/ de la copie H : la convergence arrive sur v4-h du dépôt du produit, v4 (la ligne ISO) inchangée" || bad "push de la ligne H ($RC $O)"
+# hrefuse LIBELLÉ DOSSIER ARGS… — un git push depuis DOSSIER que la garde doit refuser (--dry-run : la garde joue aussi)
+hrefuse() { local L="$1" D="$2" RC; shift 2; O="$(git -C "$D" push "$@" 2>&1)"; RC=$?
+  if [ "$RC" != 0 ] && has "$O" "push refused by the harmonized line's push guard"; then pass "copie H, push refusé : $L"; else bad "copie H, push accepté : $L (rc=$RC, $O)"; fi; }
+# hmsg LIBELLÉ MESSAGE DOSSIER ARGS… — un git push que la garde refuse, avec CE motif
+hmsg() { local L="$1" M="$2" D="$3" RC; shift 3; O="$(git -C "$D" push "$@" 2>&1)"; RC=$?
+  if [ "$RC" != 0 ] && has "$O" "push refused by the harmonized line's push guard" && has "$O" "$M"; then pass "copie H, push refusé : $L"; else bad "copie H, push accepté ou autre motif : $L (rc=$RC, $O)"; fi; }
+hmsg "HEAD:v4 vers le dépôt du produit (la v4 de la ligne ISO)" "a branch of the ISO line or of the generations both lines share" "$CH/v4/delta" home-delta HEAD:v4
+hmsg "HEAD:refs/heads/v4" "a branch of the ISO line or of the generations both lines share" "$CH/v4/delta" home-delta HEAD:refs/heads/v4
+hmsg "vers l'URL du dépôt plutôt que le remote" "a branch of the ISO line or of the generations both lines share" "$CH/v4/delta" "$W/homes/delta.git" HEAD:v4
+hmsg "HEAD:v2 (la v2, commune aux deux lignes)" "a branch of the ISO line or of the generations both lines share" "$CH/v4/delta" --dry-run home-delta HEAD:v2
+hmsg "HEAD:v1" "a branch of the ISO line or of the generations both lines share" "$CH/v4/delta" --dry-run home-delta HEAD:v1
+( cd "$CH/v2/delta" && echo "-- local" >> dbt/models/m_delta.sql && git commit -q -am "v2, depuis la copie H" )
+hmsg "depuis v2/delta/, sa propre branche v2 (git push)" "a branch of the ISO line or of the generations both lines share" "$CH/v2/delta" --dry-run
+git -C "$CH/v2/delta" reset -q --hard HEAD~1
+for V in v1 v2; do   # alpha : ses branches vivent sur origin (alpha/v1, alpha/v2)
+  ( cd "$CH/$V/alpha" && echo "-- local" >> dbt/models/m_alpha.sql && git commit -q -am "$V, depuis la copie H" )
+  hmsg "depuis $V/alpha/, sa branche alpha/$V sur origin (git push)" "a branch of the ISO line or of the generations both lines share" "$CH/$V/alpha" --dry-run
+  git -C "$CH/$V/alpha" reset -q --hard HEAD~1
+done
+hmsg "supprimer v4 (la ligne ISO)" "a branch of the ISO line or of the generations both lines share" "$CH" --dry-run --delete home-delta v4
+hrefuse "supprimer v4-h" "$CH" --dry-run --delete home-delta v4-h
+hrefuse "réécrire v4-h (push forcé, pas une avance rapide)" "$CH/v4/delta" --dry-run -f home-delta HEAD~1:v4-h
+hrefuse "créer une autre branche x/v4-h (pas depuis une v4 publiée)" "$CH/v4/delta" --dry-run home-delta HEAD:refs/heads/x/v4-h
+# une redescente (« Redescente: Dnnn ») sur v4-h hors de la v4 publiée : refusée. Cas : committer-redescente.sh lancé
+# dans la copie H — il lit la branche dans la lib (v4-h), et les preuves dans /tmp/redescentes-v4/, commun au container
+( cd "$CH/v4/delta" && echo "-- D999" >> dbt/models/m_delta.sql && git commit -q -am "D999 : une redescente" -m "Redescente: D999" )
+hrefuse "un commit « Redescente: D999 » vers v4-h, absent de la v4 publiée (committer-redescente.sh dans la copie H : HEAD:v4-h)" "$CH/v4/delta" home-delta HEAD:v4-h
+hrefuse "…le même vers l'URL du dépôt (aucune v4 publiée à comparer)" "$CH/v4/delta" "$W/homes/delta.git" HEAD:v4-h
+git -C "$CH/v4/delta" reset -q --hard HEAD~1
+( cd "$CH/v4/delta" && echo "-- H002" >> dbt/models/m_delta.sql && git commit -q -am "H002 : une convergence" -m "Convergence: H002" -m "un texte qui cite la redescente D016 sans en être une" )
+O="$(git -C "$CH/v4/delta" push 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/homes/delta.git" rev-parse v4-h)" = "$(git -C "$CH/v4/delta" rev-parse HEAD)" ] \
+  && pass "…une convergence (« Convergence: H002 », un texte qui nomme une redescente sans la ligne « Redescente: ») : poussée" || bad "convergence refusée ($RC $O)"
+# la même redescente committée sur v4 par la ligne ISO, reçue par une fusion de v4 dans v4-h : acceptée
+git clone -q -b v4 "$W/homes/delta.git" "$W/delta-iso-side" 2>/dev/null
+( cd "$W/delta-iso-side" && echo "select 7" > dbt/models/iso_d999.sql && git add -A && git commit -q -m "D999 : une redescente" -m "Redescente: D999" && git push -q origin v4 ) 2>/dev/null
+git -C "$CH" fetch -q home-delta
+( cd "$CH/v4/delta" && git merge -q --no-edit home-delta/v4 )
+O="$(git -C "$CH/v4/delta" push 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/homes/delta.git" rev-parse v4-h)" = "$(git -C "$CH/v4/delta" rev-parse HEAD)" ] \
+  && pass "…la même redescente committée sur v4 (la ligne ISO), reçue par une fusion de v4 dans v4-h : poussée (elle est dans la v4 publiée)" || bad "fusion de v4 dans v4-h refusée ($RC $O)"
+( cd "$CH/v4/alpha" && echo "-- H001" >> dbt/models/m_alpha.sql && git commit -q -am "H001 alpha" )
+hmsg "alpha/v4 sur origin (un produit dont les branches vivent ici)" "a branch of the ISO line or of the generations both lines share" "$CH/v4/alpha" origin HEAD:alpha/v4
+O="$(git -C "$CH/v4/alpha" push 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/fleet-origin.git" rev-parse alpha/v4-h)" = "$(git -C "$CH/v4/alpha" rev-parse HEAD)" ] && [ "$(git -C "$W/fleet-origin.git" rev-parse alpha/v4)" != "$(git -C "$CH/v4/alpha" rev-parse HEAD)" ] \
+  && pass "…git push depuis v4/alpha/ : sur origin/alpha/v4-h, alpha/v4 inchangée" || bad "push alpha de la ligne H ($RC $O)"
+O="$(git -C "$CH" push origin HEAD~1:refs/heads/ligne-h 2>&1)"; RC=$?
+[ "$RC" = 0 ] && pass "…une branche du coordinateur (ligne-h sur origin), créée : laissée à git" || bad "push d'une branche du coordinateur ($RC $O)"
+O="$(git -C "$CH" push origin HEAD:refs/heads/ligne-h 2>&1)"; RC=$?
+[ "$RC" = 0 ] && [ "$(git -C "$W/fleet-origin.git" rev-parse ligne-h)" = "$(git -C "$CH" rev-parse HEAD)" ] && pass "…avancée (une avance rapide) : laissée à git" || bad "avance rapide de ligne-h ($RC $O)"
+hmsg "ligne-h réécrite (push forcé, pas une avance rapide)" "not a fast-forward" "$CH" --dry-run -f origin HEAD~1:refs/heads/ligne-h
+hmsg "ligne-h supprimée" "deleting a branch" "$CH" --dry-run --delete origin ligne-h
+git -C "$W/fleet-origin.git" branch -q -D ligne-h 2>/dev/null
+# le miroir upstream-<br>, commun aux deux lignes : ni réécrit ni supprimé depuis la copie H ; une autre génération : jamais
+XO="$(git -C "$CH" commit-tree -m "hors de l'histoire du miroir" "$(git -C "$CH" mktree </dev/null)")"
+hmsg "upstream-main (le miroir) réécrit par un commit hors de son histoire (push forcé)" "not a fast-forward" "$CH" --dry-run -f home-delta "$XO:refs/heads/upstream-main"
+hmsg "upstream-main (le miroir) supprimé" "deleting a branch" "$CH" --dry-run --delete home-delta upstream-main
+hmsg "v3 (une génération ouverte côté produit : un changement de structure)" "another generation" "$CH/v4/delta" --dry-run home-delta HEAD:refs/heads/v3
+hmsg "v5 créée (une autre génération)" "another generation" "$CH/v4/delta" --dry-run home-delta HEAD:refs/heads/v5
+hmsg "x/v3 créée sur origin" "another generation" "$CH/v4/delta" --dry-run origin HEAD:refs/heads/x/v3
+# la branche de la copie principale — main, master, la branche par défaut du remote : jamais poussée depuis la copie H
+# (products-h.lock, le pont de global-v4-h, les entrées h/ y arriveraient dans la ligne ISO). Un commit de plus d'abord :
+# un push sans rien à envoyer (« Everything up-to-date ») ne lance aucun hook
+( cd "$CH" && git checkout -q -b essai-main && git commit -q --allow-empty -m "un fichier de la ligne H (products-h.lock)" )
+hrefuse "main sur origin (la branche du coordinateur de la ligne ISO)" "$CH" --dry-run origin HEAD:refs/heads/main
+hrefuse "master sur origin" "$CH" --dry-run origin HEAD:refs/heads/master
+hrefuse "main vers l'URL du dépôt d'un produit (aucune branche par défaut connue : refs/remotes/<URL>/HEAD n'existe pas)" "$CH/v4/delta" --dry-run "$W/homes/delta.git" HEAD:refs/heads/main
+git -C "$CH" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/tronc
+hrefuse "la branche par défaut d'origin (refs/remotes/origin/HEAD → tronc)" "$CH" --dry-run origin HEAD:refs/heads/tronc
+git -C "$CH" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+O="$(HRUN sync delta)"; grep -q "NOTE: branches in home-delta not followed here: v3\$" <<<"$O" \
+  && pass "just sync delta (copie H) : la v4 de la ligne ISO connue (pas « non suivie »), v3 toujours nommée" || bad "sync H, branches non suivies ($O)"
+UM0="$(git -C "$W/homes/delta.git" rev-parse upstream-main)"
+O="$(HRUN upstream-pull delta)"; has "$O" "NOT pushed — a copy that is not the main one refreshes no mirror" && ! has "$O" "→ mirror on home-delta: upstream-main" && [ "$(git -C "$W/homes/delta.git" rev-parse upstream-main)" = "$UM0" ] \
+  && pass "just upstream-pull delta (copie H) : l'origine lue, le miroir (commun aux deux lignes) jamais poussé d'ici" || bad "upstream-pull de la copie H ($O)"
+# ce que seule la copie principale fait : déclarer un produit ou un référent, créer son dépôt, publier ses branches
+CONF0="$(cat "$CH/.devcontainer/products.conf" "$CH/.devcontainer/referents.conf" | sha256sum)"
+for C in "product-add omega $W/fleet-up/delta.git" "referent-add ref-omega $W/homes/rho.git dbt" "product-new omega $W/fleet-up/delta.git"; do
+  # shellcheck disable=SC2086
+  O="$(HRUN $C)"; has "$O" "flux H: just ${C%% *} refused — only the main copy ($FW) declares a product or a referent" \
+    && pass "copie H : just ${C%% *} refusé (un dépôt temporaire pousse hors de la garde : la copie principale seule)" || bad "copie H : just ${C%% *} accepté ($O)"
+done
+[ "$(cat "$CH/.devcontainer/products.conf" "$CH/.devcontainer/referents.conf" | sha256sum)" = "$CONF0" ] && [ ! -e "$W/gh/acme/fl-omega.git" ] \
+  && pass "…products.conf et referents.conf inchangés, aucun dépôt créé" || bad "copie H : déclaration écrite ou dépôt créé"
+# dbt login, init, system : l'état du container (~/.dbt, le hub, le moteur) — la copie principale seule
+for C in login "system update" init; do
+  # shellcheck disable=SC2086
+  O="$( (cd "$CH" && bash .devcontainer/dbt-run.sh auto $C) 2>&1)"; has "$O" "refused in this copy (flux H)" && ! has "$O" "ARGS=" \
+    && pass "copie H : \`dbt $C\` refusé (il écrit l'état du container, celui de la copie principale)" || bad "copie H : \`dbt $C\` accepté ($O)"
+done
+O="$( (cd "$CH" && bash .devcontainer/dbt-run.sh auto --version) 2>&1)"; has "$O" "dbt 2." && pass "…\`dbt --version\` accepté" || bad "copie H : dbt --version ($O)"
+O="$( (cd "$CH" && bash "$FW/.devcontainer/dbt-run.sh" auto login) 2>&1)"; has "$O" "in another workspace ($CH, a flux)" && ! has "$O" "ARGS=" \
+  && pass "…\`dbt login\` tapé dans la copie H avec le garde-fou de la copie principale (la fonction \`dbt\` du container) : renvoyé au sien" || bad "dbt login depuis la copie H par la principale ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-run.sh auto login) 2>&1)"; has "$O" "ARGS=login" && pass "copie principale : \`dbt login\` accepté, comme avant" || bad "principale, dbt login ($O)"
+# --target-path, --log-path et leurs variables : jamais dans une autre copie (ses outils liraient ce manifeste comme le leur)
+ln -sfn "$FW/v4/delta/dbt" "$W/lien-vers-principale"
+for C in "--target-path $FW/v4/delta/dbt/target" "--target-path=$FW/v4/delta/dbt/target" "--log-path $FW/logs" \
+         "--target-path ../../../../fleet/v4/delta/dbt/target" "--target-path $W/lien-vers-principale/target"; do
+  # shellcheck disable=SC2086
+  O="$(HRUN v4 delta compile $C)"; has "$O" "flux H: \`dbt …\` refused — it would write its artifacts or its logs in another working copy" && ! has "$O" "ARGS=" \
+    && pass "copie H : \`v4 delta compile $C\` refusé" || bad "copie H : \`v4 delta compile $C\` accepté ($O)"
+done
+for E in "DBT_TARGET_PATH=$FW/v4/delta/dbt/target" "DBT_LOG_PATH=$FW/logs" "DBT_DOCS_TARGET_PATH=$FW/x"; do
+  O="$(env "$E" bash -c 'cd "$1" && bash .devcontainer/dbt-run.sh v4 delta parse' _ "$CH" 2>&1)"
+  has "$O" "in another working copy" && has "$O" "${E%%=*} " && ! has "$O" "ARGS=" && pass "copie H : ${E%%=*} exporté vers la copie principale — refusé" || bad "copie H : ${E%%=*} accepté ($O)"
+done
+O="$(HRUN v4 delta compile --target-path "$W/hors-copies/target")"; has "$O" "ARGS=compile --target-path $W/hors-copies/target" && pass "…hors de toute copie (/tmp/…, comme les outils de la flotte) : accepté" || bad "copie H : --target-path hors copies ($O)"
+O="$(HRUN v4 delta compile --target-path target-h)"; has "$O" "ARGS=compile --target-path target-h" && pass "…dans la copie elle-même : accepté" || bad "copie H : --target-path dans la copie ($O)"
+O="$(FRUN v4 delta parse --target-path "$CH/v4/delta/dbt/target")"; has "$O" "ARGS=parse --target-path" && pass "copie principale : --target-path, comme avant (la garde ne joue que dans une copie invitée)" || bad "principale, --target-path ($O)"
+rm -f "$W/lien-vers-principale"
+# une copie v4/<p> qui n'est pas sur <p>/v4-h : refusée
+git clone -q -b v4-h "$W/homes/delta.git" "$W/delta-h-side" 2>/dev/null
+( cd "$W/delta-h-side" && echo "select 9" > dbt/models/h_side.sql && git add -A && git commit -q -m "côté produit, sur v4-h" && git push -q origin v4-h ) 2>/dev/null
+git -C "$CH/v4/delta" checkout -q -b delta/v4 home-delta/v4
+O="$(HRUN v4 delta parse)"; has "$O" "v4/delta/ is on delta/v4, not on delta/v4-h" && ! has "$O" "ARGS=" && pass "v4/delta/ remise sur delta/v4 (la branche de la ligne ISO) : just v4 delta refusé" || bad "copie H sur v4 ($O)"
+O="$(HRUN global-v4 parse)"; has "$O" "refused under global-v4/" && has "$O" "v4/delta/ is on delta/v4" && ! has "$O" "ARGS=" && pass "…just global-v4 refusé (il assemble cette copie)" || bad "global-v4 avec une copie sur v4 ($O)"
+O="$(HRUN destinations delta)"; has "$O" "v4/delta/ is on delta/v4" && ! has "$O" "== " && pass "…just destinations delta refusé" || bad "destinations avec une copie sur v4 ($O)"
+O="$(HRUN destinations global-v4)"; has "$O" "v4/delta/ is on delta/v4" && ! has "$O" "== " && pass "…just destinations global-v4 refusé" || bad "destinations global-v4 avec une copie sur v4 ($O)"
+O="$(HRUN v2 delta parse)"; has "$O" "ARGS=parse" && pass "…just v2 delta parse accepté (la v2 ne lit aucune copie v4)" || bad "v2 parse sous une copie v4 sur v4 ($O)"
+O="$(life "$CH" start)"; has "$O" "WARNING: [delta] v4/delta/ is on delta/v4, not on delta/v4-h" && [ "$(git -C "$CH/v4/delta" symbolic-ref --short HEAD)" = delta/v4 ] \
+  && pass "…just setup le dit, sans rien basculer" || bad "setup, copie H sur v4 ($(grep -i 'delta/v4' <<<"$O" | head -3))"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ v4/delta/ is on 'delta/v4', not on its branch delta/v4-h" && pass "…doctor : dit comme un problème" || bad "doctor, copie H sur v4 ($(grep 'v4/delta' <<<"$O" | head -3))"
+O="$(HRUN lock)"; has "$O" "products-h.lock NOT written" && has "$O" "is not on delta/v4-h" && pass "…just lock refusé (products-h.lock non écrit)" || bad "lock, copie H sur v4 ($O)"
+C0="$(git -C "$CH/v4/delta" rev-parse HEAD)"
+O="$(HRUN sync delta)"; [ "$(git -C "$CH/v4/delta" rev-parse HEAD)" = "$C0" ] && has "$O" "v4/delta/: not on delta/v4-h (delta/v4) — NOT synced" \
+  && pass "…just sync : la copie sur delta/v4 jamais avancée vers home-delta/v4-h (le commit reçu ne passe pas sur la branche ISO)" || bad "sync, copie H sur v4 ($O)"
+git -C "$CH/v4/rho" checkout -q -b rho/v4 home-rho/v4; git -C "$CH" branch -q -D rho/v4-h
+O="$(life "$CH" start)"; [ "$(git -C "$CH" rev-parse --abbrev-ref 'rho/v4-h@{upstream}' 2>/dev/null)" = home-rho/v4-h ] && [ "$(git -C "$CH/v4/rho" symbolic-ref --short HEAD)" = rho/v4 ] \
+  && has "$O" "v4/rho/ is on rho/v4, not on rho/v4-h: the harmonized line works on its own branch (home-rho/v4-h), never on the ISO line's — git -C v4/rho checkout rho/v4-h" \
+  && git -C "$CH/v4/rho" checkout -q rho/v4-h \
+  && pass "v4/rho/ sur rho/v4 sans branche locale rho/v4-h (une copie faite avant flux.conf) : just setup crée rho/v4-h (suivant home-rho/v4-h) sans basculer la copie, et le conseil (git checkout rho/v4-h) marche" || bad "branche de ligne non recréée ($(grep -i 'rho' <<<"$O" | head -3))"
+git -C "$CH/v4/rho" checkout -q rho/v4-h 2>/dev/null; git -C "$CH" branch -q -D rho/v4
+git -C "$CH/v4/delta" checkout -q delta/v4-h; git -C "$CH" branch -q -D delta/v4
+O="$(HRUN sync delta)"; has "$O" "delta/v4-h: fast-forwarded 1 commit(s) from home-delta/v4-h" && has "$O" "côté produit, sur v4-h" && pass "…de retour sur delta/v4-h : avancée, le commit reçu affiché" || bad "sync H sur v4-h ($O)"
+( cd "$CH/v4/delta" && git checkout -q --detach && echo "-- hors ligne" >> dbt/models/m_delta.sql && git commit -q -am "hors de la ligne" )
+O="$(HRUN v4 delta parse)"; has "$O" "is detached at" && has "$O" "outside delta/v4-h's history" && ! has "$O" "ARGS=" && pass "v4/delta/ détachée sur un commit hors de l'histoire de delta/v4-h : refusée" || bad "copie H détachée hors ligne ($O)"
+git -C "$CH/v4/delta" checkout -q --detach delta/v4-h~1
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…détachée dans l'histoire de delta/v4-h (un rejeu, lock-checkout) : acceptée" || bad "copie H détachée dans la ligne ($O)"
+O="$(HRUN sync delta)"; has "$O" "not on delta/v4-h (detached) — NOT synced" && [ "$(git -C "$CH/v4/delta" rev-parse HEAD)" = "$(git -C "$CH" rev-parse delta/v4-h~1)" ] && pass "…et just sync ne la bouge pas" || bad "sync d'une copie H détachée ($O)"
+git -C "$CH/v4/delta" checkout -q delta/v4-h
+git -C "$CH" branch -q -u home-delta/v4 delta/v4-h
+O="$(HRUN v4 delta parse)"; has "$O" "delta/v4-h tracks home-delta/v4, not home-delta/v4-h" && ! has "$O" "ARGS=" && pass "delta/v4-h qui suivrait home-delta/v4 (son git push irait sur la ligne ISO) : refusé" || bad "copie H, suivi sur v4 ($O)"
+git -C "$CH" branch -q -u home-delta/v4-h delta/v4-h
+# le verrou de la ligne H : products-h.lock, jamais products.lock
+cp "$LOCKF" "$CH/.devcontainer/products.lock"; SUML="$(sha256sum < "$CH/.devcontainer/products.lock")"
+O="$(HRUN lock)"; HLOCK="$CH/.devcontainer/products-h.lock"
+has "$O" "products-h.lock written" && [ "$(sha256sum < "$CH/.devcontainer/products.lock")" = "$SUML" ] && head -1 "$HLOCK" | grep -q '^# products-h.lock — the lock of the HARMONIZED line' \
+  && pass "just lock (copie H) : products-h.lock écrit ; products.lock (celui de la ligne ISO) inchangé, octet pour octet" || bad "lock de la ligne H ($O)"
+grep -qE "^delta +v4 +$(git -C "$CH" rev-parse delta/v4-h)  $W/homes/delta.git#v4-h$" "$HLOCK" && grep -qE "^alpha +v4 +$(git -C "$CH" rev-parse alpha/v4-h)  origin#alpha/v4-h$" "$HLOCK" \
+  && grep -qE "^rho +v4 +$(git -C "$CH" rev-parse rho/v4-h)  $W/homes/rho.git#v4-h$" "$HLOCK" && grep -qE "^delta +v2 +$(git -C "$CH" rev-parse delta/v2)  " "$HLOCK" \
+  && pass "…ses lignes v4 : les commits v4-h (dépôt#v4-h, origin#alpha/v4-h) ; v1 et v2 comme partout" || bad "lignes de products-h.lock ($(grep ' v4 ' "$HLOCK"))"
+O="$(HRUN lock-status)"; has "$O" "v4/delta/" && has "$O" "= lock" && ! has "$O" "since the lock" && pass "…lock-status lit products-h.lock" || bad "lock-status de la ligne H ($O)"
+cp "$HLOCK" "$W/hlock-sauve"; sed -i '/^rho /d' "$HLOCK"
+O="$(HRUN lock-status)"; has "$O" "not in products-h.lock — just lock" && ! has "$O" "products.lock" && pass "…une copie absente de products-h.lock : « not in products-h.lock » (jamais products.lock)" || bad "lock-status, absent du verrou ($O)"
+mv "$HLOCK" "$W/hlock-vide"; O="$( (cd "$CH" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && dbt_use_product delta && dbt_lock_describe v2') 2>&1)"
+[ "$O" = "no products-h.lock yet" ] && pass "…sans verrou : « no products-h.lock yet »" || bad "dbt_lock_describe sans verrou ($O)"
+cp "$W/hlock-sauve" "$HLOCK"; rm -f "$W/hlock-vide" "$W/hlock-sauve"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "[lock — .devcontainer/products-h.lock]" && has "$O" "the harmonized line's lock: products-h.lock, never products.lock" && has "$O" "✅ flux H: its push guard runs on every push ($HK)" \
+  && has "$O" "delta/v4-h contains home-delta/v4, the ISO line's" && pass "doctor (copie H) : son verrou, sa garde de push, sa v4-h au-dessus de la v4 de la ligne ISO" || bad "doctor de la copie H ($(grep -iE 'lock|push guard|v4-h' <<<"$O" | head -8))"
+# clone, --state, --defer, --manage-state : refusés dans la ligne H, dans tous ses espaces, et leurs variables
+for C in "v4 delta clone -s a" "v4 delta build -s a --defer --state x" "v4 delta compile --state=x" "v4 delta parse --defer" "v4 delta ls --defer-state x" \
+         "v4 delta ls --favor-state" "global-v4 ls --manage-state" "v2 delta ls --state x" "v4 delta ls -s clone"; do
+  # shellcheck disable=SC2086
+  O="$(HRUN $C)"; has "$O" "flux H (the harmonized line):" && has "$O" "until a later" && ! has "$O" "ARGS=" \
+    && pass "copie H : \`$C\` refusé (clone, report, état d'un autre espace)" || bad "copie H : \`$C\` accepté ($O)"
+done
+for E in DBT_STATE=x DBT_DEFER=true DBT_DEFER_STATE=x DBT_FAVOR_STATE=true DBT_ENGINE_MANAGE_STATE=1 DBT_ENGINE_STATE_HOME=x DBT_CLOUD_DEFER_ENV_ID=1 DBT_CLOUD_DEFER_JOB_ID=1; do
+  O="$(env "$E" bash -c 'cd "$1" && bash .devcontainer/dbt-run.sh v4 delta parse' _ "$CH" 2>&1)"
+  has "$O" "${E%%=*} (exported)" && ! has "$O" "ARGS=" && pass "copie H : $E exporté — refusé" || bad "copie H : $E exporté accepté ($O)"
+done
+O="$(HRUN v4 delta parse --no-defer)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…--no-defer (qui l'éteint) : accepté" || bad "copie H : --no-defer ($O)"
+O="$(FRUN v4 delta parse --state x --defer)"; has "$O" "ARGS=parse --state x --defer" && pass "copie principale : \`v4 delta parse --state x --defer\` accepté, comme avant (la garde ne joue que dans la ligne H)" || bad "principale et --state ($O)"
+# la garde de push elle-même : absente, modifiée, d'un autre, non exécutable, ou contournée par core.hooksPath — toute commande dbt refusée
+hguard() { local L="$1" A; O="$(HRUN v4 delta parse)"; A="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+  if has "$O" "cannot be trusted" && has "$O" "${2:-push guard}" && ! has "$O" "ARGS=" && grep -q "❌ flux H: .*${2:-push guard}" <<<"$A"; then pass "garde de push $L : toute commande dbt de la copie H refusée, doctor le dit"
+  else bad "garde de push $L : $O"; fi; }
+rm -f "$HK"; hguard "retirée"
+O="$(life "$CH" start)"; cmp -s "$HK" "$GSRC" && [ -x "$HK" ] && pass "…just setup la repose" || bad "garde non reposée ($O)"
+echo "# retouche" >> "$HK"; hguard "retouchée (marque gardée)"
+life "$CH" start >/dev/null; cmp -s "$HK" "$GSRC" && pass "…just setup la remplace (elle porte la marque de la garde)" || bad "garde retouchée non remplacée"
+chmod -x "$HK"; hguard "non exécutable"
+life "$CH" start >/dev/null; [ -x "$HK" ] && cmp -s "$HK" "$GSRC" && pass "…just setup la rend exécutable" || bad "garde non exécutable laissée"
+printf '#!/bin/sh\nexit 0\n' > "$HK"; chmod 755 "$HK"; hguard "remplacée par un autre hook"
+O="$(life "$CH" start)"; has "$O" "is another pre-push hook (neither the push guard nor git-lfs's own): left as it is" && grep -qx 'exit 0' "$HK" && pass "…just setup ne touche jamais le hook d'un autre (dit)" || bad "hook d'un autre écrasé ($O)"
+rm -f "$HK"; chmod +x "$GSRC"; ln -s "$GSRC" "$HK"; hguard "par un lien (vers le fichier suivi : un git checkout la changerait)"
+O="$(life "$CH" start)"; [ -L "$HK" ] && has "$O" "is another pre-push hook" && pass "…just setup ne remplace pas un lien (dit)" || bad "lien de garde remplacé ($O)"
+rm -f "$HK"; chmod -x "$GSRC"; life "$CH" start >/dev/null
+git -C "$CH" config core.hooksPath "$W/ailleurs-hooks"; hguard "contournée (core.hooksPath de la copie)" "core.hooksPath"
+git -C "$CH" config --unset core.hooksPath
+git -C "$CH" config extensions.worktreeConfig true; git -C "$CH/v4/delta" config --worktree core.hooksPath "$W/ailleurs-hooks"
+hguard "contournée dans une seule copie (core.hooksPath de v4/delta, extensions.worktreeConfig)" "core.hooksPath"
+git -C "$CH/v4/delta" config --worktree --unset core.hooksPath; git -C "$CH" config --unset extensions.worktreeConfig
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…garde reposée, core.hooksPath retiré : accepté de nouveau" || bad "copie H après la garde ($O)"
+# une copie v4/<p> qui n'est pas un worktree de la copie (un dossier copié) : refusée
+mv "$CH/v4/delta" "$W/delta-wt-sauve"; mkdir -p "$CH/v4/delta"; cp -R "$W/delta-wt-sauve/dbt" "$CH/v4/delta/"
+O="$(HRUN v4 delta parse)"; has "$O" "v4/delta/ is there but is not a worktree of this copy" && ! has "$O" "ARGS=" \
+  && pass "v4/delta/ remplacée par une copie de son dossier dbt/ (pas un worktree : sa branche est inconnue) : just v4 delta refusé" || bad "copie H, dossier copié ($O)"
+O="$(HRUN global-v4 parse)"; has "$O" "v4/delta/ is there but is not a worktree of this copy" && ! has "$O" "ARGS=" && pass "…just global-v4 refusé aussi" || bad "copie H, dossier copié, global-v4 ($O)"
+rm -rf "$CH/v4/delta"
+git clone -q -b v4 "$W/homes/delta.git" "$CH/v4/delta" 2>/dev/null; git -C "$CH/v4/delta" checkout -q -b delta/v4-h origin/v4
+O="$(HRUN v4 delta parse)"; has "$O" "v4/delta/ is the root of another git repository" && ! has "$O" "ARGS=" \
+  && pass "v4/delta/ remplacée par un clone du produit, sur une branche nommée delta/v4-h qui suit origin/v4 (son push irait vers v4, sans garde) : refusée" || bad "copie H, autre dépôt ($O)"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ v4/delta/ is the root of another git repository" && pass "…doctor : dit" || bad "doctor, autre dépôt ($(grep 'v4/delta' <<<"$O" | head -3))"
+rm -rf "$CH/v4/delta"; mv "$W/delta-wt-sauve" "$CH/v4/delta"
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…le worktree remis : accepté" || bad "copie H, worktree remis ($O)"
+# clone, state, --run-cache-mode, --task-cache-url ; les variables, par leur forme (DBT_…STATE…, …DEFER…, …_CACHE…) ;
+# les fichiers de réglages qui les posent sans un mot de la ligne de commande
+for C in "v4 delta state explain" "v4 delta build -s a --run-cache-mode read" "v4 delta build -s a --task-cache-url=redis://x"; do
+  # shellcheck disable=SC2086
+  O="$(HRUN $C)"; has "$O" "flux H (the harmonized line):" && has "$O" "until a later" && ! has "$O" "ARGS=" \
+    && pass "copie H : \`$C\` refusé (dbt State : sa commande, son cache)" || bad "copie H : \`$C\` accepté ($O)"
+done
+for E in DBT_ENGINE_DEFER_TO_STATE=1 DBT_ENGINE_FAVOR_STATE_MODE=1 DBT_ENGINE_ARTIFACT_STATE_PATH=x DBT_ENGINE_STATE_API_URL=x \
+         DBT_CLOUD_STATE_ORG_ID=1 DBT_TASK_CACHE_URL=x DBT_BUILD_CACHE_MODE=x DBT_RUN_CACHE_MODE=x DBT_DEFER=; do
+  O="$(env "$E" bash -c 'cd "$1" && bash .devcontainer/dbt-run.sh v4 delta parse' _ "$CH" 2>&1)"
+  has "$O" "${E%%=*} (exported)" && ! has "$O" "ARGS=" && pass "copie H : $E exporté — refusé (par sa forme)" || bad "copie H : $E exporté accepté ($O)"
+done
+O="$(env DBT_STATEMENT_X=1 bash -c 'cd "$1" && bash .devcontainer/dbt-run.sh v4 delta parse' _ "$CH" 2>&1)"
+has "$O" "DBT_STATEMENT_X (exported)" && pass "…DBT_STATEMENT_X aussi (la forme se lit sans borne : un faux positif plutôt qu'un oubli)" || bad "copie H : DBT_STATEMENT_X ($O)"
+mkdir -p "$HOME/.dbt"
+for U in 'flags:\n  manage_state: true\n|flags: manage_state' 'flags: {defer: true}\n|flags: defer' 'state:\n  api_url: x\n|sets state' 'flags:\n  Manage-State: true\n|flags: manage_state' \
+         'flags: &f\n  x: 1\n|flags: a form not read' 'flags:\n  <<: *f\n|a merge key, an anchor or an alias' 'flags:\n\tdefer: true\n|a tab: a form not read' \
+         '? flags\n: {defer: true}\n|a complex key (?)' 'flags:\n  ? defer\n  : true\n|a complex key (?)' '{flags: {defer: true}}\n|a top-level line that is no plain key' \
+         '--- {flags: {defer: true}}\n|a top-level line that is no plain key' '"fl\\x61gs": {defer: true}\n|a key written with an escape' \
+         'flags:\n  "d\\x65fer": true\n|flags: a key written with an escape' 'dbt-cloud:\n  defer-env-id: 1\n|sets dbt_cloud'; do
+  printf -- "${U%%|*}" > "$HOME/.dbt/user_settings.yml"
+  O="$(HRUN v4 delta parse)"; has "$O" ".dbt/user_settings.yml" && has "$O" "${U#*|}" && ! has "$O" "ARGS=" \
+    && pass "copie H : ~/.dbt/user_settings.yml « $(printf -- "${U%%|*}" | paste -sd' ' -) » (commun au container) — refusé" || bad "copie H : user_settings.yml ${U%%|*} accepté ($O)"
+done
+printf -- '---\nflags:\n  send_anonymous_usage_stats: false\n...\n' > "$HOME/.dbt/user_settings.yml"
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…« --- » et « ... » seuls sur leur ligne (début et fin de document) : lus, acceptés" || bad "copie H : marqueurs de document ($O)"
+printf 'context:\n  defer-env-id: 1\n' > "$HOME/.dbt/dbt_cloud.yml"
+O="$(HRUN v4 delta parse)"; has "$O" ".dbt/dbt_cloud.yml: dbt Cloud's settings" && ! has "$O" "ARGS=" && pass "copie H : ~/.dbt/dbt_cloud.yml (dbt v2 le lit : defer-env-id) — refusé" || bad "copie H : ~/.dbt/dbt_cloud.yml accepté ($O)"
+rm -f "$HOME/.dbt/dbt_cloud.yml"; printf 'project-id: 1\n' > "$CH/v4/delta/dbt/dbt_cloud.yml"
+O="$(HRUN v4 delta parse)"; has "$O" "v4/delta/dbt/dbt_cloud.yml: dbt Cloud's settings" && ! has "$O" "ARGS=" && pass "…un dbt_cloud.yml dans le projet (./dbt_cloud.yml) — refusé" || bad "copie H : dbt_cloud.yml du projet accepté ($O)"
+rm -f "$CH/v4/delta/dbt/dbt_cloud.yml"
+O="$(FRUN v4 delta parse)"; has "$O" "ARGS=parse" && pass "copie principale : rien de cela n'y change rien (témoin)" || bad "principale, dbt_cloud ($O)"
+printf 'flags:\n  manage_state: true\n' > "$HOME/.dbt/user_settings.yml"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ flux H: ~/.dbt/user_settings.yml (every copy of the container reads it) sets flags: manage_state" \
+  && pass "…doctor (copie H) : dit" || bad "doctor, user_settings.yml ($(grep -i user_settings <<<"$O"))"
+O="$(FRUN v4 delta parse)"; has "$O" "ARGS=parse" && pass "copie principale : le même ~/.dbt/user_settings.yml, \`v4 delta parse\` accepté comme avant (la garde ne joue que dans la ligne H)" || bad "principale et user_settings.yml ($O)"
+printf 'models:\n  x:\n    +column_types:\n      state: string\nflags:  # mes réglages\n  send_anonymous_usage_stats: false\n' > "$HOME/.dbt/user_settings.yml"
+O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…un « state: » hors de flags (une colonne), un commentaire après « flags: » : ni l'un ni l'autre n'est un réglage d'état, accepté" || bad "copie H : state: hors de flags ($O)"
+rm -f "$HOME/.dbt/user_settings.yml"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ flux H: ~/.dbt/user_settings.yml turns no dbt State" && pass "…sans lui, le doctor le dit aussi" || bad "doctor sans user_settings.yml"
+printf 'flags:\n  favor-state: true\n' >> "$CH/v4/delta/dbt/dbt_project.yml"
+O="$(HRUN v4 delta parse)"; has "$O" "v4/delta/dbt/dbt_project.yml sets flags: favor_state" && ! has "$O" "ARGS=" && pass "copie H : le dbt_project.yml du projet pose favor-state — refusé" || bad "copie H : dbt_project.yml à favor-state ($O)"
+git -C "$CH/v4/delta" checkout -q -- dbt/dbt_project.yml
+printf 'flags:\n  manage_state: true\n' >> "$CH/v4/delta/dbt/dbt_project.yml"
+printf 'packages:\n  - local: ../v4/delta/dbt\n' > "$CH/global-v4/packages.yml"
+O="$(HRUN global-v4 parse)"; has "$O" "v4/delta/dbt/dbt_project.yml sets flags: manage_state" && ! has "$O" "ARGS=" && pass "…celui d'un paquet local que global-v4 déclare (packages.yml) — refusé" || bad "copie H : paquet local déclaré ($O)"
+rm -f "$CH/global-v4/packages.yml"; mkdir -p "$CH/global-v4/dbt_packages"; ln -s ../../v4/delta/dbt "$CH/global-v4/dbt_packages/delta"
+O="$(HRUN global-v4 parse)"; has "$O" "global-v4/dbt_packages/delta/dbt_project.yml sets flags: manage_state" && ! has "$O" "ARGS=" && pass "…celui d'un paquet local que global-v4 lie (dbt_packages/) — refusé" || bad "copie H : paquet local lié ($O)"
+rm -rf "$CH/global-v4/dbt_packages"; git -C "$CH/v4/delta" checkout -q -- dbt/dbt_project.yml
+O="$(HRUN global-v4 parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…réglages retirés : accepté" || bad "copie H, réglages retirés ($O)"
+# l'extension dbt de la copie H : coupée là où elle calculerait dans l'espace de la copie principale (v1/, v2/, global/)
+CUTOK "$CH/v1/alpha/.vscode/settings.json" && CUTOK "$CH/v2/delta/.vscode/settings.json" && CUTOK "$CH/global/.vscode/settings.json" \
+  && pass "copie H : les extensions dbt coupées dans v1/alpha, v2/delta et global/ (un profil qu'aucun hub ne déclare ; dbt Power User écarté)" \
+  || bad "copie H, extensions non coupées ($(JK "$CH/v2/delta/.vscode/settings.json" dbt.profileName) $(JK "$CH/global/.vscode/settings.json" dbt.profileName))"
+[ "$(JK "$CH/v4/delta/.vscode/settings.json" dbt.profileName)" = null ] && [ "$(JK "$CH/global-v4/.vscode/settings.json" dbt.profileName)" = null ] \
+  && pass "…pas dans v4/delta ni global-v4/ (l'espace de la ligne H : leur .env vise profiles/v4-H.env)" || bad "copie H, v4 coupée ($(JK "$CH/v4/delta/.vscode/settings.json" dbt.profileName))"
+NOREP() { [ "$(JK "$1" dbt.flag.defer)" = false ] && [ "$(JK "$1" dbt.flag.noDefer)" = true ] && [ "$(JK "$1" dbt.flag.state)" = '""' ]; }
+NOREP "$CH/v4/delta/.vscode/settings.json" && NOREP "$CH/v4/rho/.vscode/settings.json" && NOREP "$CH/global-v4/.vscode/settings.json" \
+  && pass "…le report de l'extension éteint dans v4/delta, v4/rho et global-v4/ (dbt.flag.defer false, noDefer true, state vide : elle passe --defer par défaut)" || bad "copie H, report de l'extension ($(JK "$CH/v4/delta/.vscode/settings.json" dbt.flag.defer) $(JK "$CH/global-v4/.vscode/settings.json" dbt.flag.noDefer))"
+[ "$(JK "$CH/v2/delta/.vscode/settings.json" dbt.flag.defer)" = null ] && [ "$(JK "$FW/v4/delta/.vscode/settings.json" dbt.flag.defer)" = null ] && [ ! -e "$FW/global-v4/.vscode" ] && [ ! -e "$FW/h.code-workspace" ] \
+  && pass "…ni hors de l'espace v4 de la ligne H, ni dans la copie principale (ses réglages octet pour octet comme avant)" || bad "drapeaux de report hors de la ligne H"
+HWS="$CH/h.code-workspace"
+python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); f=[x["path"] for x in d["folders"]]; s=d["settings"]; assert sorted(f)==["global-v4","v4/alpha","v4/delta","v4/rho"], f; assert s["dbt.flag.defer"] is False and s["dbt.flag.noDefer"] is True and s["dbt.flag.state"]=="" and s["dbt.allowListFolders"]==[".vscode"], s' "$HWS" \
+  && git -C "$CH" check-ignore -q h.code-workspace \
+  && pass "h.code-workspace (copie H) : généré, ignoré par git, ses dossiers v4/alpha, v4/delta, v4/rho, global-v4 seulement (ni v1, ni v2, ni global/), le report éteint" || bad "h.code-workspace ($(cat "$HWS" 2>&1 | head -20))"
+[ "$(JK "$FW/v2/delta/.vscode/settings.json" dbt.profileName)" = null ] && [ ! -e "$FW/global/.vscode" ] \
+  && pass "…ni dans la copie principale (ses réglages octet pour octet comme avant)" || bad "copie principale coupée"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ v2/delta/: the dbt extensions are cut in a window opened on it" && has "$O" "✅ global/: the dbt extensions are cut in a window opened on it" \
+  && has "$O" "a VS Code window opened on this copy's ROOT reads the tracked root settings" && pass "…doctor (copie H) : les coupures, et la fenêtre ouverte à la racine (non coupée : dit)" || bad "doctor, coupures ($(grep -i 'extensions\|ROOT' <<<"$O" | head -5))"
+printf '{}\n' > "$CH/v2/delta/.vscode/settings.json"
+O="$(life "$CH" start)"; has "$O" "v2/delta/.vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there" && grep -qx '{}' "$CH/v2/delta/.vscode/settings.json" \
+  && pass "…un settings.json à soi (sans la marque) dans v2/delta : jamais réécrit, dit" || bad "settings.json à soi ($(grep -i 'yours' <<<"$O"))"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ v2/delta/: the dbt extensions are NOT cut in a window opened on it" && pass "…doctor : dit comme un problème" || bad "doctor, settings.json à soi"
+rm -f "$CH/v2/delta/.vscode/settings.json"; life "$CH" start >/dev/null; CUTOK "$CH/v2/delta/.vscode/settings.json" && pass "…retiré : just setup le régénère, coupé" || bad "settings.json non régénéré"
+printf '{}\n' > "$CH/global/.vscode/settings.json"
+O="$(life "$CH" start)"; has "$O" "global/.vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there" && grep -qx '{}' "$CH/global/.vscode/settings.json" \
+  && pass "…de même dans global/ : jamais réécrit, dit" || bad "global/ settings.json à soi ($(grep -i 'yours' <<<"$O"))"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ global/: the dbt extensions are NOT cut in a window opened on it" && pass "…doctor : dit comme un problème" || bad "doctor, global/ à soi"
+rm -f "$CH/global/.vscode/settings.json"; life "$CH" start >/dev/null; CUTOK "$CH/global/.vscode/settings.json" && pass "…retiré : just setup le régénère, coupé" || bad "global/ settings.json non régénéré"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ v4/delta/: the dbt extension's deferral is off in a window opened on it" && has "$O" "✅ global-v4/: the dbt extension's deferral is off" && has "$O" "✅ flux H: h.code-workspace (generated): open it" \
+  && ! has "$O" "sets the dbt extension's deferral" && pass "doctor (copie H) : le report éteint dans v4/ et global-v4/, h.code-workspace à ouvrir plutôt que la racine" || bad "doctor, report et h.code-workspace ($(grep -iE 'deferral|code-workspace' <<<"$O" | head -5))"
+mkdir -p "$CH/.vscode"; printf '{\n  "dbt.flag.state": "%s/v4/delta/dbt/target"\n}\n' "$FW" > "$CH/.vscode/settings.json"
+mkdir -p "$HOME/.vscode-server/data/Machine"; printf '{ "dbt.environmentVariables": { "DBT_STATE": "x" } }\n' > "$HOME/.vscode-server/data/Machine/settings.json"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "❌ flux H: .vscode/settings.json sets the dbt extension's deferral, state or environment" && has "$O" "Machine/settings.json sets the dbt extension's deferral, state or environment" \
+  && pass "…un dbt.flag.state dans les réglages de la racine, un dbt.environmentVariables dans ceux de la machine : dits comme des problèmes" || bad "doctor, réglages de portée plus large ($(grep -i 'sets the dbt extension' <<<"$O"))"
+rm -f "$CH/.vscode/settings.json" "$HOME/.vscode-server/data/Machine/settings.json"
+printf '{}\n' > "$CH/v4/delta/.vscode/settings.json"
+O="$(life "$CH" start)"; has "$O" "v4/delta/.vscode/settings.json, yours (no generated marker), leaves the dbt extension's deferral on" && grep -qx '{}' "$CH/v4/delta/.vscode/settings.json" \
+  && pass "…un settings.json à soi dans v4/delta : jamais réécrit, dit" || bad "settings.json à soi, report ($(grep -i 'deferral' <<<"$O"))"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ v4/delta/: the dbt extension's deferral is NOT off" && pass "…doctor : dit comme un problème" || bad "doctor, settings.json à soi, report"
+rm -f "$CH/v4/delta/.vscode/settings.json"; life "$CH" start >/dev/null; NOREP "$CH/v4/delta/.vscode/settings.json" && pass "…retiré : just setup le régénère, report éteint" || bad "settings.json v4 non régénéré"
+cp "$CH/profiles/profiles.yml" "$W/profiles-ch"; printf 'sap-template-guest-copy-no-dbt-extension:\n  target: dev\n' >> "$CH/profiles/profiles.yml"
+O="$( (cd "$CH" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ profiles/profiles.yml declares 'sap-template-guest-copy-no-dbt-extension'" && pass "…un hub qui déclarerait ce profil (la coupure ne tiendrait plus) : doctor le dit" || bad "doctor, hub et profil de coupure"
+cp "$W/profiles-ch" "$CH/profiles/profiles.yml"
+# une déclaration refusée : coupées partout (aucun espace dont quelqu'un réponde)
+printf 'DBT_V4_FLUX=h\n' > "$CH/.devcontainer/flux.conf"; life "$CH" start >/dev/null
+[ ! -e "$CH/h.code-workspace" ] && pass "flux.conf refusé : h.code-workspace (généré) retiré" || bad "h.code-workspace laissé sous une déclaration refusée"
+O="$(HRUN product-add omega "$W/fleet-up/delta.git")"; has "$O" "flux declaration refused: just product-add refused" && pass "…just product-add refusé sous une déclaration refusée" || bad "déclaration refusée, product-add ($O)"
+CUTOK "$CH/v4/delta/.vscode/settings.json" && CUTOK "$CH/global-v4/.vscode/settings.json" && pass "flux.conf refusé (DBT_V4_FLUX=h) : extensions coupées partout, v4/delta et global-v4/ compris" || bad "déclaration refusée, coupures ($(JK "$CH/v4/delta/.vscode/settings.json" dbt.profileName))"
+O="$(HRUN lock)"; has "$O" "cannot be trusted" && ! has "$O" "written" && pass "…et just lock refusé (aucun verrou écrit d'une déclaration refusée)" || bad "lock sous déclaration refusée ($O)"
+printf 'DBT_V4_FLUX=H\n' > "$CH/.devcontainer/flux.conf"; life "$CH" start >/dev/null
+[ "$(JK "$CH/v4/delta/.vscode/settings.json" dbt.profileName)" = null ] && [ "$(JK "$CH/global-v4/.vscode/settings.json" dbt.profileName)" = null ] && NOREP "$CH/global-v4/.vscode/settings.json" && [ -f "$CH/h.code-workspace" ] \
+  && pass "…flux H remis : v4/delta et global-v4/ de nouveau ouverts à l'extension (report éteint), h.code-workspace reposé" || bad "flux H remis, coupures"
+# la copie ex-H (flux.conf effacé : orpheline) n'écrit ni ne rejoue le verrou de la ligne ISO
+mv "$CH/.devcontainer/flux.conf" "$W/flux-h-sauve"; SUML="$(sha256sum < "$CH/.devcontainer/products.lock")"
+O="$(HRUN lock beta)"; [ "$(LIBH dbt_v4_role)" = orphan ] && has "$O" "orphan copy: just lock" && [ "$(sha256sum < "$CH/.devcontainer/products.lock")" = "$SUML" ] \
+  && pass "copie ex-H (flux.conf effacé : orpheline) : just lock beta refusé, products.lock (celui de la ligne ISO) inchangé" || bad "ex-H, lock ($(LIBH dbt_v4_role) $O)"
+O="$(HRUN lock-checkout)"; has "$O" "orphan copy: just lock-checkout" && pass "…just lock-checkout refusé aussi" || bad "ex-H, lock-checkout ($O)"
+hrefuse "…et main depuis l'ex-H (sa garde reste posée)" "$CH" --dry-run origin essai-main:refs/heads/main
+mv "$W/flux-h-sauve" "$CH/.devcontainer/flux.conf"; life "$CH" start >/dev/null
+# git-lfs : son propre hook pre-push (posé par git lfs install, et à chaque clone d'un dépôt qui suit des fichiers en LFS,
+# comme le coordinateur) — la garde prend sa place et le lance : les objets LFS partent avec leurs commits
+if command -v git-lfs >/dev/null 2>&1; then
+  rm -f "$HK"; ( cd "$CH" && git lfs install --local >/dev/null 2>&1 )
+  O="$(HRUN v4 delta parse)"; has "$O" "its push guard is not installed" && ! has "$O" "ARGS=" && pass "git-lfs : son hook pre-push à la place de la garde — toute commande dbt refusée" || bad "git-lfs à la place de la garde ($O)"
+  O="$(life "$CH" start)"
+  cmp -s "$HK" "$GSRC" && [ -x "$HK" ] && has "$O" "git-lfs's own pre-push hook found at $HK: the push guard takes its place and runs it" \
+    && pass "…just setup : la garde prend la place du hook de git-lfs, octet pour octet (elle le lance)" || bad "git-lfs : hook non repris ($O)"
+  O="$(HRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "…les commandes dbt de la copie H passent de nouveau" || bad "git-lfs : copie H refusée ($O)"
+  ( cd "$CH" && git checkout -q -b essai-lfs && git lfs track '*.csv' >/dev/null && echo "a,b" > preuve.csv && git add .gitattributes preuve.csv && git commit -q -m "une preuve en LFS" )
+  OID="$(git -C "$CH" lfs ls-files -l 2>/dev/null | awk '{print $1}' | head -1)"
+  O="$(git -C "$CH" push origin essai-lfs 2>&1)"; RC=$?
+  [ "$RC" = 0 ] && [ -n "$OID" ] && [ -f "$W/fleet-origin.git/lfs/objects/${OID:0:2}/${OID:2:2}/$OID" ] \
+    && pass "…git push d'un commit à fichier LFS (preuve.csv) : la garde l'accepte et lance git lfs pre-push — l'objet LFS arrive" || bad "git-lfs : objet LFS non poussé ($RC $OID $O)"
+  hrefuse "…et la garde joue toujours : main refusé" "$CH" --dry-run origin essai-main:refs/heads/main
+  hmsg "…supprimer essai-lfs (une branche de travail) : jamais d'ici" "deleting a branch" "$CH" --dry-run --delete origin essai-lfs
+  git -C "$W/fleet-origin.git" branch -q -D essai-lfs; git -C "$CH" checkout -q main; git -C "$CH" branch -q -D essai-lfs
+  NL="$W/sans-lfs"; mkdir -p "$NL"; for T in git cat grep head; do ln -sf "$(command -v "$T")" "$NL/$T"; done
+  O="$(cd "$CH" && printf '' | PATH="$NL" "$HK" origin x 2>&1)"; RC=$?
+  [ "$RC" = 2 ] && has "$O" "configured for Git LFS but 'git-lfs' was not found on your path" \
+    && pass "…sans git-lfs sur le PATH, dans un dépôt configuré pour lui : refusé (code 2), comme le ferait son propre hook" || bad "garde sans git-lfs ($RC $O)"
+  O="$(cd "$CH" && git lfs install --local 2>&1)"; cmp -s "$HK" "$GSRC" && pass "…git lfs install --local ensuite : la garde reste en place (« Hook already exists » : attendu)" || bad "git lfs install a remplacé la garde ($O)"
+else
+  bad "git-lfs absent : la garde de la ligne H et le hook de git-lfs ne sont pas éprouvés (prérequis de ce test)"
+fi
+# _dbt_flux_git_problem : un flux est un clone, le dépôt de son propre dossier, que la copie principale ne partage pas
+GITP() { ( cd "$1" && bash -c 'source "$1/.devcontainer/lib-dbt.sh"; DBT_WS="$2"; DBT_V4_MAIN_WS="$3"; _dbt_flux_git_problem' _ "$CH" "$1" "$2" ) 2>&1; }
+R="$W/autre-depot"; git init -q -b main "$R"; git -C "$R" commit -q --allow-empty -m x; git -C "$R" worktree add -q "$W/autre-wt" 2>/dev/null
+O="$(GITP "$W/autre-wt" "$FW")"; has "$O" "not the .git directory of its own folder" && ! has "$O" "shares its git repository" \
+  && pass "un flux qui serait le worktree d'un autre dépôt (pas celui de la copie principale) : refusé, son dépôt n'est pas le sien" || bad "flux worktree d'un autre dépôt ($O)"
+git clone -q "$R" "$W/clone-x" 2>/dev/null; git -C "$W/clone-x" worktree add -q -b pwt "$W/principale-wt" 2>/dev/null
+O="$(GITP "$W/clone-x" "$W/principale-wt")"; has "$O" "shares its git repository" && ! has "$O" "not the .git directory" \
+  && pass "…un clone dont la copie principale serait un worktree : refusé, il partage son dépôt avec elle" || bad "flux qui partage son dépôt ($O)"
+O="$(GITP "$CH" "$FW")"; [ -z "$O" ] && pass "…un vrai clone (la copie H) : rien à redire" || bad "copie H, dépôt ($O)"
+rm -rf "$R" "$W/autre-wt" "$W/clone-x" "$W/principale-wt"
+# une copie H faite par git worktree add de la copie principale (et non par clone) : rien n'y est posé, toute commande refusée
+HW="$W/copie-h-worktree"; git -C "$FW" worktree add -q -b ligne-h-sonde "$HW" HEAD 2>/dev/null
+mkdir -p "$HW/.devcontainer" "$HW/profiles"
+for f in dbt.conf products.conf referents.conf lib-dbt.sh dbt-run.sh dbt-doctor.sh git-push-garde-h.sh; do [ -f "$FW/.devcontainer/$f" ] && cp "$FW/.devcontainer/$f" "$HW/.devcontainer/"; done
+cp -a "$FW/profiles/." "$HW/profiles/"; rm -f "$HW/profiles/v4-"*.env; cp "$FW/.gitignore" "$HW/.gitignore"
+printf 'DBT_V4_FLUX=H\n' > "$HW/.devcontainer/flux.conf"
+O="$(life "$HW" start)"
+[ ! -e "$FW/.git/hooks/pre-push" ] && [ ! -e "$HW/v4" ] && has "$O" "nothing is set up in this copy" && has "$O" "not the .git directory of its own folder" \
+  && pass "copie H faite par git worktree add de la copie principale : rien n'y est posé (ni garde dans le dépôt commun, ni worktree), dit" || bad "copie H par worktree ($(cd "$FW/.git/hooks" && echo pre-push*) $O)"
+O="$( (cd "$HW" && bash .devcontainer/dbt-run.sh v2 delta parse) 2>&1)"; has "$O" "not the .git directory of its own folder" && has "$O" "shares its git repository" && ! has "$O" "ARGS=" \
+  && pass "…toute commande dbt y est refusée (son dépôt est celui de la copie principale)" || bad "copie H par worktree, commande ($O)"
+O="$( (cd "$HW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "❌ flux H: its git repository is" && pass "…doctor : dit" || bad "doctor, copie H par worktree ($(grep -i 'git repository' <<<"$O" | head -2))"
+git -C "$FW" fetch -q home-delta
+( cd "$FW/v4/delta" && git merge -q --ff-only home-delta/v4 && echo "-- D998" >> dbt/models/m_delta.sql && git commit -q -am "D998 : une redescente de la ligne ISO" -m "Redescente: D998" )
+O="$(git -C "$FW/v4/delta" push --dry-run home-delta HEAD:v4 2>&1)"; RC=$?
+[ "$RC" = 0 ] && ! has "$O" "push guard" && pass "…et la copie principale pousse toujours sa v4 (HEAD:v4, comme committer-redescente.sh dans la ligne ISO ; --dry-run)" || bad "la copie principale ne pousse plus sa v4 ($RC $O)"
+git -C "$FW/v4/delta" reset -q --hard HEAD~1
+git -C "$FW" worktree remove --force "$HW"; git -C "$FW" branch -q -D ligne-h-sonde
+rm -rf "$CH" "$W/delta-h-side" "$W/delta-iso-side" "$W/sans-lfs"
+rm -rf "$CF" "$CG"
+git config --global --unset-all url."file://$W/gh/".insteadOf
+cp "$W/gitignore-avant-flux" "$FW/.gitignore"
+life "$FW" start >/dev/null
+# la copie principale : un réglage de coupure généré dans global/ (laissé là quand elle était une copie invitée) retiré ;
+# un fichier à soi (sans la marque « generated »), gardé
+mkdir -p "$FW/global/.vscode"; printf '{\n  "dbt-project.generated": "x",\n  "dbt-project.guest-cut": "y"\n}\n' > "$FW/global/.vscode/settings.json"
+life "$FW" start >/dev/null; [ ! -e "$FW/global/.vscode" ] && pass "copie principale : le réglage de coupure généré dans global/ (laissé d'une copie invitée) retiré au just setup" || bad "copie principale, coupure de global/ laissée"
+mkdir -p "$FW/global/.vscode"; printf '{ "dbt-project.guest-cut": "à moi" }\n' > "$FW/global/.vscode/settings.json"
+life "$FW" start >/dev/null; [ -f "$FW/global/.vscode/settings.json" ] && pass "…un fichier à soi (sans la marque « generated ») : gardé" || bad "copie principale, fichier à soi effacé"
+rm -rf "$FW/global/.vscode"
 
 echo "== Paquets v1 incomplets : deps relancé au create =="
 DP="$WS/v1/dbt"; DEPS() { ( cd "$WS" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_v1_deps' ) 2>&1; }

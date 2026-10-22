@@ -56,6 +56,12 @@ case "$V2" in
   *) ko "v2 engine missing or not dbt v2 ('${V2:-no answer}')" "just setup" ;;
 esac
 [ -x "$DBT_BIN_DIR/dbtf" ] && ok "dbtf -> v2 engine" || ko "dbtf command missing" "just setup"
+if ! _dbt_owns_container; then
+  info "the engines are the container's, installed by the main copy (${DBT_V4_MAIN_WS:-?}): this copy never installs nor rebuilds them"
+  if [ -n "${DBT_V1_PINS:-}" ] && [ "$(cat "$DBT_V1_VENV/.dbt-pins" 2>/dev/null)" != "pins:$DBT_V1_PINS" ]; then
+    ko "this copy pins '$DBT_V1_PINS', the container's dbt Core was built from other pins" "align DBT_V1_PINS with the main copy's dbt.conf"
+  fi
+fi
 # The official dbt extension looks for dbt v2 at this exact path
 [ "$(command -v dbt 2>/dev/null)" = "$DBT_BIN_DIR/dbt" ] \
   && ok "\`dbt\` on PATH is the v2 binary (what the dbt extension expects)" \
@@ -89,7 +95,10 @@ while IFS= read -r U; do
 done < <(_dbt_upstream_urls)
 # The push lock (verrou 4), layer by layer — offline: ssh is stubbed, and the https probes run only once the
 # dead proxy is checked in the configuration (they meet it on 127.0.0.1): nothing connects anywhere
-if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+# A copy that does not own the container (a flux, an orphan) never lifts a lock: the lock is checked whatever its own
+# DBT_UPSTREAM_PUSH_LOCK says, and its https layer goes by the container's state (lib-dbt.sh, dbt_git_setup)
+OWNC=1; _dbt_owns_container || OWNC=0
+if [ -n "$HOSTS" ] && { [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || [ "$OWNC" = 0 ]; }; then
   PL="$(git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null)"
   for H in $HOSTS; do
     NP=0; MISS=""
@@ -98,7 +107,7 @@ if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
     done < <(_dbt_push_prefixes "$H")
     [ -z "$MISS" ] && ok "push lock on $H, global (pushInsteadOf: $NP forms — git push only, git send-pack never reads them)" \
       || ko "global push lock incomplete for $H (pushInsteadOf missing:$MISS)" "just setup"
-    if _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; then
+    if { [ "$OWNC" = 1 ] && _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; } || { [ "$OWNC" = 0 ] && _dbt_container_https_over_ssh "$H"; }; then
       # (b), first line: the dead proxy
       POK=1
       for U in "https://$H" "http://$H"; do
@@ -151,7 +160,8 @@ if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
       *) ko "core.sshCommand is customised: the ssh push guard is not installed" "put bash $G --hosts=$(echo $HOSTS | tr ' ' ',') in front of its options" ;; esac
   elif [ "${SC#"bash $(printf '%q' "$G") --hosts="}" = "$SC" ]; then
     ko "core.sshCommand runs a guard other than its installed copy ~/.local/libexec/git-ssh-garde.sh (in the worktree, a checkout of an older commit takes it away)" "just setup"
-  elif ! cmp -s "$GS" "$G"; then ko "the installed ssh push guard (~/.local/libexec/git-ssh-garde.sh) differs from .devcontainer/git-ssh-garde.sh" "just setup"
+  elif ! cmp -s "$GS" "$G"; then ko "the installed ssh push guard (~/.local/libexec/git-ssh-garde.sh) differs from .devcontainer/git-ssh-garde.sh" \
+    "$( [ "$OWNC" = 1 ] && echo "just setup" || echo "just setup in the main copy (${DBT_V4_MAIN_WS:-?}): the installed guard is the container's, never replaced from this copy")"
   elif [ -n "$MISS" ]; then ko "the ssh push guard does not cover$MISS" "just setup"
   elif [ "$(git config --global --get core.sshCommand 2>/dev/null)" != "$SC" ]; then
     ko "the workspace's own git config overrides core.sshCommand" "git -C $WS config --local --unset core.sshCommand"
@@ -224,7 +234,8 @@ for N in $(dbt_members); do
     W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
     if [ "$V" = v4 ] && ! _dbt_is_worktree "$W" && ! git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/$(_dbt_hbr v4)"; then
       # declared, not opened yet where its branches live: nothing to repair here
-      if [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
+      if _dbt_is_line_h; then info "$SHOW: the harmonized line's $(_dbt_hbr v4) not opened yet — it starts from the published v4: git push $P_HOME $P_HOME/${P_HB4%-h}:refs/heads/$(_dbt_hbr v4), then just setup"
+      elif [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
       else info "$SHOW: v4 not opened yet — it starts from the published v2: git push $P_HOME $P_HOME/$P_HB2:refs/heads/$(_dbt_hbr v4), then just setup"; fi
       continue
     fi
@@ -246,18 +257,51 @@ for N in $(dbt_members); do
       if P="$(dbt_project_dir "$V")"; then
         ok "$(label "$V") dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
         if [ "$V" = v4 ]; then
-          [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$WS/profiles/v4.env")" ] \
-            && ok "$SHOW: .env -> profiles/v4.env (the dbt extension stays in the v4 space)" \
-            || ko "$SHOW: .env does not point to profiles/v4.env" "just setup — until then the dbt extension would read another space there"
+          E4="$(dbt_v4_env_file)"
+          if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+            [ -e "$P/.env" ] || [ -L "$P/.env" ] \
+              && ko "$SHOW: a .env while the flux declaration is refused" "just setup removes it (the dbt extension would read a space nobody vouches for)" \
+              || ok "$SHOW: no .env while the flux declaration is refused (the dbt extension reads no v4 space)"
+          else
+            [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$E4")" ] \
+              && ok "$SHOW: .env -> ${E4#"$WS"/} (the dbt extension stays in the v4 space${DBT_V4_FLUX:+ of flux $DBT_V4_FLUX})" \
+              || ko "$SHOW: .env does not point to ${E4#"$WS"/}" "just setup — until then the dbt extension would read another space there"
+          fi
         fi
       else
         ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
+      fi
+      # a copy that is not the main one: its dbt extensions cut where they would compute in the main copy's space
+      WHY="$(_dbt_editor_cut "$V")"
+      if [ -n "$WHY" ]; then
+        grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$W/.vscode/settings.json" 2>/dev/null \
+          && grep -qF '"dbt.allowListFolders": [".vscode"]' "$W/.vscode/settings.json" \
+          && ok "$SHOW: the dbt extensions are cut in a window opened on it ($WHY)" \
+          || ko "$SHOW: the dbt extensions are NOT cut in a window opened on it ($WHY): their Run/Build/Preview/Compare would compute in the main copy's space, hooks included" "just setup (a .vscode/settings.json of yours: give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\" and \"dbt.allowListFolders\": [\".vscode\"])"
+      fi
+      # the harmonized line's v4 copies: the dbt extension defers to no state there (lib-dbt.sh, _DBT_EDITOR_NO_STATE)
+      if [ "$V" = v4 ] && _dbt_is_line_h; then
+        G="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; GM="$(git -C "$WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+        [ -n "$G" ] && [ "$(realpath -m -- "$G")" = "$(realpath -m -- "$GM")" ] \
+          || ko "$SHOW is the root of another git repository (${G:-?}), not a worktree of this copy: its branch, tracking and hooks are its own — no push guard there" "move it away, then: just setup"
+        grep -qF '"dbt.flag.noDefer": true' "$W/.vscode/settings.json" 2>/dev/null && grep -qF '"dbt.flag.defer": false' "$W/.vscode/settings.json" \
+          && ok "$SHOW: the dbt extension's deferral is off in a window opened on it (dbt.flag.defer false, dbt.flag.noDefer true)" \
+          || ko "$SHOW: the dbt extension's deferral is NOT off in a window opened on it: it passes --defer by default, and dbt.flag.state as --state" "just setup (a .vscode/settings.json of yours: give it \"dbt.flag.defer\": false, \"dbt.flag.noDefer\": true, \"dbt.flag.state\": \"\")"
       fi
     else
       ko "$SHOW is not a worktree" "just setup"
     fi
   done
   BR="$P_BRANCH"
+  # the harmonized line: its v4-h is the ISO line's v4 plus its convergences
+  if _dbt_is_line_h && dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4" \
+     && git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/${P_HB4%-h}"; then
+    if git -C "$WS" merge-base --is-ancestor "$P_HOME/${P_HB4%-h}" "$P_B4" 2>/dev/null; then
+      info "$P_B4 contains $P_HOME/${P_HB4%-h}, the ISO line's (+$(git -C "$WS" rev-list --count "$P_HOME/${P_HB4%-h}..$P_B4" 2>/dev/null) commit(s) of its own, as last fetched)"
+    else
+      info "$P_B4 lacks $(git -C "$WS" rev-list --count "$P_B4..$P_HOME/${P_HB4%-h}" 2>/dev/null) commit(s) of $P_HOME/${P_HB4%-h}, the ISO line's (as last fetched): recalibrate"
+    fi
+  fi
   if dbt_v4_enabled && [ "${P_REFERENT:-0}" != 1 ] && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
     if git -C "$WS" merge-base --is-ancestor "$P_B2" "$P_B4" 2>/dev/null; then
       info "$P_B4 contains $P_B2 (+$(git -C "$WS" rev-list --count "$P_B2..$P_B4" 2>/dev/null) commit(s) of its own)"
@@ -284,15 +328,29 @@ if dbt_is_fleet; then
   if P="$(dbt_project_dir global-v4)"; then
     ok "global-v4/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) project(s) as local packages"
   fi
+  if _dbt_is_line_h && P="$(dbt_project_dir global-v4)"; then
+    grep -qF '"dbt.flag.noDefer": true' "$P/.vscode/settings.json" 2>/dev/null && grep -qF '"dbt.flag.defer": false' "$P/.vscode/settings.json" \
+      && ok "global-v4/: the dbt extension's deferral is off in a window opened on it" \
+      || ko "global-v4/: the dbt extension's deferral is NOT off in a window opened on it" "just setup"
+  fi
+  for A in global global-v4; do
+    P="$(dbt_project_dir "$A")" || continue
+    WHY="$(_dbt_editor_cut "$A")"; [ -n "$WHY" ] || continue
+    grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$P/.vscode/settings.json" 2>/dev/null \
+      && ok "$A/: the dbt extensions are cut in a window opened on it ($WHY)" \
+      || ko "$A/: the dbt extensions are NOT cut in a window opened on it ($WHY): their Run/Build/Preview/Compare would compute in the main copy's space, hooks included" "just setup"
+  done
 fi
 
 if dbt_is_fleet; then
-  echo "[lock — .devcontainer/products.lock]"
+  LOCKN="$(basename "$DBT_LOCK_FILE")"
+  echo "[lock — .devcontainer/$LOCKN]"
+  _dbt_is_line_h && info "the harmonized line's lock: products-h.lock, never products.lock (the ISO line's)"
   if [ ! -f "$DBT_LOCK_FILE" ]; then
-    info "no products.lock yet — just lock, then commit it with global/"
+    info "no $LOCKN yet — just lock, then commit it with $(_dbt_is_line_h && echo global-v4/ || echo global/)"
   else
-    git -C "$WS" ls-files --error-unmatch .devcontainer/products.lock >/dev/null 2>&1 \
-      || info "products.lock is not committed yet — commit it with the global/ change it goes with"
+    git -C "$WS" ls-files --error-unmatch ".devcontainer/$LOCKN" >/dev/null 2>&1 \
+      || info "$LOCKN is not committed yet — commit it with the $(_dbt_is_line_h && echo global-v4/ || echo global/) change it goes with"
     for N in $(dbt_members); do
       dbt_use_product "$N" || continue
       for V in $(dbt_versions); do
@@ -304,9 +362,15 @@ if dbt_is_fleet; then
 fi
 
 echo "[profile hub]"
-[ "${DBT_PROFILES_DIR:-}" = "$WS/profiles" ] \
-  && ok "DBT_PROFILES_DIR -> profiles/" \
-  || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only the just recipes"
+if [ "${DBT_PROFILES_DIR:-}" = "$WS/profiles" ]; then
+  ok "DBT_PROFILES_DIR -> profiles/"
+elif ! _dbt_owns_container && [ -n "${DBT_V4_MAIN_WS:-}" ] && [ -n "${DBT_PROFILES_DIR:-}" ] \
+     && [ "$(readlink -f "$DBT_PROFILES_DIR")" = "$(readlink -f "$DBT_V4_MAIN_WS/profiles")" ] \
+     && cmp -s "$DBT_V4_MAIN_WS/profiles/profiles.yml" "$WS/profiles/profiles.yml"; then
+  ok "DBT_PROFILES_DIR -> the main copy's hub ($DBT_V4_MAIN_WS/profiles), byte for byte this copy's (the extensions' buttons read it; the guard imposes this copy's)"
+else
+  ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only the just recipes$(_dbt_owns_container || echo "; in a copy that is not the main one: its profiles/profiles.yml must be the main copy's, byte for byte")"
+fi
 if [ -f "$WS/profiles/profiles.yml" ]; then
   NAMES=""
   for N in $(dbt_members); do
@@ -335,9 +399,61 @@ else
 fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
-# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf) or a v4 prefix is set
-if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)" ]; then
+# a flux declared where there is no fleet: refused, and said (a fleet says it in its v4 section)
+if ! dbt_is_fleet && [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+  echo "[flux]"
+  ko "$DBT_V4_FLUX_ERR" "remove .devcontainer/flux.conf — until then every dbt command is refused"
+fi
+
+# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf), a v4 prefix is set, or a flux
+if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)${DBT_V4_FLUX:-}${DBT_V4_FLUX_ERR:-}" ]; then
   echo "[v4 space — datasets of its own]"
+  # which working copy this is (dbt_v4_role): the main one is named (DBT_V4_MAIN_WS), never inferred from a missing file
+  case "$(dbt_v4_role)" in
+    main)   ok "this copy is the MAIN one (DBT_V4_MAIN_WS=\"$DBT_V4_MAIN_WS\", dbt.conf): the main v4 space, and the container's state (engines, ~/.bashrc, global git settings)" ;;
+    flux)   ok "this copy is flux $DBT_V4_FLUX; the main copy is $DBT_V4_MAIN_WS — it keeps the container's state (engines, ~/.bashrc, global git settings)"
+            [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else"
+            if [ "$DBT_V4_FLUX" = H ]; then
+              # the harmonized line is apart in git too: its own v4 branches, a push guard, its own lock
+              info "flux H, in git: its v4 copies follow <product>/v4-h (v4-h where the products' branches live), never the ISO line's v4 — v1 and v2 are shared with the main copy, read only here, and so is its branch (main); its lock is .devcontainer/products-h.lock; clone, state, --state, --defer, --manage-state are refused, from the command line, the environment or a settings file"
+              [ -n "$(_dbt_push_guard_h_problem)" ] \
+                || ok "flux H: its push guard runs on every push ($(_dbt_push_guard_h_dst)): nothing reaches v1, v2, v4 nor the main copy's branch; a v4-h is created at the published v4 only, never deleted nor rewritten, never given a redescente the published v4 does not hold"
+              X="$(_dbt_state_flags_in "${HOME:-/nonexistent}/.dbt/user_settings.yml" | LC_ALL=C sort -u | paste -sd' ' -)"
+              [ -z "$X" ] && ok "flux H: ~/.dbt/user_settings.yml turns no dbt State, deferral nor state on" \
+                || ko "flux H: ~/.dbt/user_settings.yml (every copy of the container reads it) sets $X — every dbt command of the harmonized line is refused" "remove it there (dbt login offers to write it), or move ~/.dbt/user_settings.yml away"
+            else
+              # a flux <A999> is separated from the main copy in BigQuery only: its worktrees follow the same branches
+              info "git is shared: this copy's worktrees follow the products' branches the main copy follows — commit nothing on v2 from here (dbt v2 deps rewrites its package-lock.yml)"
+            fi ;;
+    orphan) while IFS= read -r L; do
+              ko "ORPHAN copy — $L" "every v4 command is refused and v1/v2/global build nothing until this copy is the main one (DBT_V4_MAIN_WS) or a flux (.devcontainer/flux.conf); then: just setup"
+            done < <(dbt_v4_orphan_why) ;;
+  esac
+  # a copy that is not the main one: what its dbt extensions may do (lib-dbt.sh, _dbt_editor_cut)
+  case "$(dbt_v4_role)" in
+    flux)   info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare outside v4/ (in v1/, v2/ and global/ they would compute in the main copy's space, hooks included); open a v4/<product>/ folder alone$(_dbt_is_line_h && echo ", or h.code-workspace (v4/ and global-v4/ only)")" ;;
+    orphan|refused) info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare anywhere in this copy (it has no space of its own)" ;;
+  esac
+  if _dbt_is_line_h; then
+    # its window: h.code-workspace (lib-dbt.sh, dbt_ensure_line_h_workspace)
+    if [ -f "$(_dbt_line_h_workspace_file)" ] && grep -q '"dbt-project.generated"' "$(_dbt_line_h_workspace_file)"; then
+      ok "flux H: h.code-workspace (generated): open it (File > Open Workspace from File…) rather than the copy's root — v4/ and global-v4/ only, the dbt extension's deferral off"
+    else
+      ko "flux H: no generated h.code-workspace (the harmonized line's window: v4/ and global-v4/ only)" "just setup"
+    fi
+    # settings of a broader scope the folder settings do not override (dbt.environmentVariables: an object VS Code merges),
+    # or that a window on the root reads: the root's (tracked), the machine's (the VS Code server of this container)
+    for F in "$WS/.vscode/settings.json" "$WS/h.code-workspace" "${HOME:-/nonexistent}"/.vscode-server*/data/Machine/settings.json; do
+      [ -f "$F" ] || continue
+      X="$(LC_ALL=C grep -oE '"dbt\.(flag\.[A-Za-z]+|environmentVariables)"[[:space:]]*:[[:space:]]*[^,}]*' "$F" 2>/dev/null \
+        | LC_ALL=C grep -vE '^"dbt\.flag\.(defer"[[:space:]]*:[[:space:]]*false|noDefer"[[:space:]]*:[[:space:]]*true|state"[[:space:]]*:[[:space:]]*"")' | paste -sd' ' -)"
+      [ -z "$X" ] || ko "flux H: ${F#"$WS"/} sets the dbt extension's deferral, state or environment ($X): its buttons could defer to another space's state" "remove it there (the harmonized line's v4 copies turn the deferral off; dbt.environmentVariables is merged, never overridden)"
+    done
+  fi
+  case "$(dbt_v4_role)" in flux|orphan|refused)
+    ! _dbt_hub_has "$WS/profiles/profiles.yml" "$DBT_GUEST_EDITOR_PROFILE" \
+      || ko "profiles/profiles.yml declares '$DBT_GUEST_EDITOR_PROFILE', the profile that cuts the dbt extensions of a copy that is not the main one" "remove it from the hub" ;;
+  esac
   if _dbt_v4_prefix_ok; then
     ok "write guard v4: v4/ and global-v4/ write under $DBT_BQ_DATASET_PREFIX_V4 / ${DBT_BQ_DATASET_PREFIX_V4}_* only — and nothing else writes there"
     if [ -f "$WS/profiles/dbt.env" ] && cmp -s <(_dbt_v4_env_render) "$WS/profiles/v4.env"; then
@@ -354,22 +470,44 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
     _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}' \
       || ko "DBT_V4_PRODUCTS names '$N', which is not in products.conf" "fix DBT_V4_PRODUCTS in .devcontainer/dbt.conf"
   done
-  # the reverse: no project outside the v4 space reads the v4's env
-  E4="$(readlink -f "$WS/profiles/v4.env")"; LEAK=""
+  # the flux of this working copy (lib-dbt.sh, "a flux"): none (the main copy), a sound one, or one that refuses all
+  FPB="$(dbt_v4_flux_problem)"
+  if [ -n "$FPB" ]; then
+    while IFS= read -r L; do
+      ko "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: $L" "fix .devcontainer/flux.conf (one line DBT_V4_FLUX=<A999> or DBT_V4_FLUX=H, ignored by git) or remove it — until then every dbt command is refused"
+    done <<< "$FPB"
+  elif [ -n "${DBT_V4_FLUX:-}" ]; then
+    ok "flux $DBT_V4_FLUX (.devcontainer/flux.conf): v4/ and global-v4/ write under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* only — never the main v4 space nor another flux's; v1/, v2/ and global/ build nothing here"
+    E4F="$(dbt_v4_env_file)"
+    if [ -f "$WS/profiles/dbt.env" ] && cmp -s <(_dbt_v4_env_render "$DBT_V4_FLUX") "$E4F"; then
+      ok "${E4F#"$WS"/} = profiles/dbt.env with DATASET_PREFIX=$(dbt_v4_prefix) (generated, ignored by git)"
+    else
+      ko "${E4F#"$WS"/} missing or stale" "just setup (never commit it)"
+    fi
+  elif _dbt_v4_prefix_ok && [ "$(dbt_v4_role)" = main ]; then
+    ok "no flux (.devcontainer/flux.conf absent): the main v4 space — a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999> / ${DBT_BQ_DATASET_PREFIX_V4}_<A999>_*, and the harmonized line's, ${DBT_BQ_DATASET_PREFIX_V4}_H / ${DBT_BQ_DATASET_PREFIX_V4}_H_*, are never written from here"
+  fi
+  # the reverse: no project outside the v4 space reads an env of the v4 space (profiles/v4.env, profiles/v4-<flux>.env)
+  E4="$(readlink -f "$(dbt_v4_env_file)")"; LEAK=""
   for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     for V in $(dbt_versions); do
       [ "$V" = v4 ] && continue
       P="$(dbt_project_dir "$V")" || continue
-      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK ${P#"$WS"/}"
+      _dbt_is_v4_env "$P/.env" && LEAK="$LEAK ${P#"$WS"/}"
     done
   done
-  P="$(dbt_project_dir global)" && [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK global"
-  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env" \
-    || ko "these .env point to profiles/v4.env:$LEAK" "point them back to their env file (or remove them), then: just setup"
+  P="$(dbt_project_dir global)" && _dbt_is_v4_env "$P/.env" && LEAK="$LEAK global"
+  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env$( [ -n "${DBT_V4_FLUX:-}" ] && echo " nor profiles/v4-$DBT_V4_FLUX.env")" \
+    || ko "these .env point to an env of the v4 space (profiles/v4.env, profiles/v4-<flux>.env):$LEAK" "point them back to their env file (or remove them), then: just setup"
   if P="$(dbt_project_dir global-v4)"; then
-    [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> profiles/v4.env" \
-      || ko "global-v4/.env does not point to profiles/v4.env" "just setup"
+    if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then
+      [ -e "$P/.env" ] || [ -L "$P/.env" ] && ko "global-v4/.env present while the flux declaration is refused" "just setup removes it" \
+        || ok "global-v4/: no .env while the flux declaration is refused"
+    else
+      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> ${E4#"$(readlink -f "$WS")"/}" \
+        || ko "global-v4/.env does not point to $(dbt_v4_env_file | sed "s|^$WS/||")" "just setup"
+    fi
   fi
 fi
 
@@ -378,6 +516,20 @@ check_hooks() {   # check_hooks V PROJECT_DIR
   local V="$1" P="$2" HOOKS N S
   if dbt_packages_unchecked "$P"; then
     info "$(label "$V"): packages not installed, their hooks are unknown — $(dbt_just_cmd "$V") deps"
+    return
+  fi
+  # a copy that is not the main one (a flux, an orphan), in the main copy's spaces: no hook ever runs from here
+  # (dbt-run.sh, guest_hooks_guard) — the approvals of dbt.conf are the main copy's
+  if ! dbt_is_v4 "$V" && case "$(dbt_v4_role)" in flux|orphan) true ;; *) false ;; esac; then
+    PK="$(_dbt_packages_guest_problem "$P" | head -1)"
+    [ -z "$PK" ] || info "$(label "$V"): compile/show refused in this copy — its packages are not installed exactly as locked: $PK"
+    HOOKS="$(dbt_hook_sources_deep "$P")"
+    if [ -z "$HOOKS" ]; then
+      ok "$(label "$V"): no hook, neither in the project, nor in its installed packages, nor in a local package it links"
+    else
+      info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+      info "    -> refused in this copy, which is not the main one: $(dbt_hook_commands "$V") — whatever dbt.conf approves (DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2, DBT_HOOKS_REVIEWED are the main copy's)"
+    fi
     return
   fi
   HOOKS="$(dbt_hook_sources "$P")"
@@ -396,10 +548,10 @@ check_hooks() {   # check_hooks V PROJECT_DIR
           ko "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF names no proof: compile/show refused" "DBT_HOOKS_V4_PROOF in .devcontainer/dbt.conf"
         elif ! S="$(cd "$WS" && dbt_hooks_v4_seal)"; then
           ko "global-v4: its hooks cannot be sealed — compile/show refused" "$(dbt_just_cmd "$V") deps, then prove its hooks again"
-        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S"; then
-          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
+        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then
+          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $(dbt_hooks_v4_proof_path)${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
         else
-          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) — compile/show refused" "prove its hooks again"
+          ko "global-v4: the proof of its hooks ($(dbt_hooks_v4_proof_path)) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) — compile/show refused" "prove its hooks again${DBT_V4_FLUX:+ in this flux (its own file, its verdict line names it: « $(dbt_hooks_v4_verdict_line '<hex>' "$DBT_V4_FLUX") »)}"
         fi ;;
       *) info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name $N for compile/show$([ "$N" = global-v4 ] && echo ', under a proof of its hooks — DBT_HOOKS_V4_PROOF')): $(dbt_hook_commands "$V")" ;;
     esac
