@@ -131,10 +131,47 @@ ignored by `main`:
 1. **Upstream access, read-only.** The upstream host key is pinned in
    `.devcontainer/upstream_known_hosts` (`~/.ssh` is mounted read-only, so ssh
    cannot record it). `https://<upstream host>/` is fetched over SSH (private
-   dbt packages). Pushing to that host is impossible: a global
-   `url."DISABLED://".pushInsteadOf` covers explicit URLs and submodules, and
-   `remote.upstream.pushurl` is `DISABLED`. `DBT_UPSTREAM_PUSH_LOCK=0` lifts
-   both.
+   dbt packages). **No push by git** reaches that host, in three layers:
+   a global `url."DISABLED://".pushInsteadOf` covers `git push` to explicit
+   URLs and submodules (13 prefixes per host: `git@`, `ssh://`, `https://`,
+   and `git+ssh://`, `ssh+git://`, `:22`, no user, `http://`, `:443`) and
+   `remote.upstream.pushurl` is `DISABLED`; git's `core.sshCommand` is the ssh
+   push guard, `.devcontainer/git-ssh-garde.sh` copied to
+   `~/.local/libexec/` (a checkout of an older commit cannot take it away):
+   to an upstream host only `git-upload-pack` / `git-upload-archive` go
+   through, `git send-pack` included — the host is recognised by name
+   (another user, upper case, a trailing dot, an `~/.ssh/config` alias read
+   by `ssh -G`: HostName, HostKeyAlias, ProxyJump, ProxyCommand,
+   CanonicalDomains) and, for a write, by address (`getent ahosts`: an IP
+   address in any writing, an IPv4-mapped `::ffff:` one, another name of the
+   same server); a read from a host recognised by name, without a terminal,
+   gets `BatchMode=yes` (no passphrase nor host-key question); an upstream
+   host read over ssh gets no
+   https: `http.https://<host>.proxy` is a dead proxy (127.0.0.1:9 — it holds
+   against a reset of the credential helpers, a password in the URL, an
+   `http.extraHeader`), with a credential quitter behind it (no prompt).
+   Reads are unchanged, every other host (GitHub) goes through untouched.
+   `DBT_UPSTREAM_PUSH_LOCK=0` lifts all of it.
+   **Limits — "no push by git" is not "no push".** The key that can write
+   stays available to every process of the container (the agent): ssh run
+   outside git (a `git-receive-pack` typed by hand, gitlab-shell's
+   `personal_access_token` then an https push carrying that token) is never
+   seen. Nor are a pure tunnel (`ssh -L`, socat… to 127.0.0.1, without a
+   HostKeyAlias naming the host), a master connection shared through a fixed
+   `ControlPath`, https on another port (`:8443`) or under another name, an
+   upstream host that does not resolve (offline: an IP address is refused, a
+   name cannot be compared). Nor a deliberate override of git's
+   configuration: an exported `GIT_SSH_COMMAND`, `git -c core.sshCommand=…`,
+   `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, some repository's own
+   `core.sshCommand`, `ext::` with `protocol.ext.allow=always`,
+   `GIT_CONFIG_GLOBAL=/dev/null` or another `HOME` (only the remote's pushurl
+   is left), a `NO_PROXY` covering the host (the quitter is left); under
+   these the pushInsteadOf prefixes still hold for `git push`, never for
+   `git send-pack`. `GIT_SSH` alone does not: git prefers `core.sshCommand`.
+   The real cover is server-side — a read-only access for the container (a
+   read-only deploy key, or an account with the Reporter role). `just doctor`
+   proves each layer offline and reports what it sees in the environment.
+   For night jobs: `GIT_TERMINAL_PROMPT=0` and an empty `GIT_ASKPASS`.
 2. **Worktrees.** Branches come from `origin` when already published, else
    `v1` is created from the upstream branch (fetched once) and `v2` from
    `v1`. The worktrees are **locked**: their git links are container paths

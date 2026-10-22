@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# =============================================================================
+# git-ssh-garde.sh — the ssh layer of the upstream push lock (TEMPLATE-OWNED)
+# Updated by `copier update` — do not edit in projects.
+#
+# dbt_git_setup (lib-dbt.sh) copies it to ~/.local/libexec/git-ssh-garde.sh — outside the worktree, so a
+# `git checkout` of an older commit cannot take it away — and makes that copy git's core.sshCommand,
+# replayed on every start:
+#   bash ~/.local/libexec/git-ssh-garde.sh --hosts=<host1,host2> [-o "UserKnownHostsFile=<pinned> ~/.ssh/known_hosts"]
+# git appends its own arguments: [ssh options] <[user@]host> "<remote command>".
+#
+# To an upstream host only the READS go through: git-upload-pack (fetch, clone, ls-remote) and
+# git-upload-archive (git archive --remote), each with the one quoted path git writes — from a host
+# recognised by name and without a terminal, with BatchMode=yes (no passphrase nor host-key question:
+# an agent or a night job never waits; in a terminal a passphrase can still be typed). Anything else —
+# git-receive-pack (git push, git send-pack), git-lfs-authenticate, a shell, a read followed by more —
+# is refused BEFORE ssh runs, when the destination is an upstream host:
+#   - by name: the host written in the URL, and what `ssh -G` reads from ~/.ssh/config and the options
+#     (an alias): HostName, HostKeyAlias, the ProxyJump hops, the words of ProxyCommand, the host
+#     followed by each CanonicalDomains — any user, any case, a trailing dot, brackets, a port;
+#   - by address (writes only): each of those names resolved by `getent ahosts` — an IP address of
+#     the host in any writing ssh accepts, an IPv4-mapped ::ffff:a.b.c.d (brought back to a.b.c.d),
+#     another name of the same server (its reverse name, a search domain) — against the addresses of
+#     the upstream hosts;
+#   - an upstream host that does not resolve (offline, VPN down): an IP address is treated as it
+#     (fail closed, writes only); a name cannot be compared, it goes through.
+# Every other host goes to ssh unchanged (GitHub), and so does git's own probe (`ssh -G`, which runs
+# nothing remotely).
+#
+# Limits — "no push by git" is not "no push": the real cover is server-side (a read-only access).
+#   - What ssh reaches without naming the host: a pure tunnel (ssh -L, socat… to 127.0.0.1, an alias
+#     whose HostName is the tunnel, a ProxyJump host that resolves the upstream on its side) without a
+#     HostKeyAlias naming the host; a master connection shared through a fixed ControlPath.
+#   - ssh outside git: the key that can write stays available to every process of the container (the
+#     agent), so a git-receive-pack typed by hand, or gitlab-shell's personal_access_token followed by
+#     an https push carrying that token, is never seen by git's core.sshCommand.
+#   - git told to use another ssh, deliberately — the same user can rewrite any configuration: an
+#     exported GIT_SSH_COMMAND, `git -c core.sshCommand=…`, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT /
+#     _KEY_n / _VALUE_n, a core.sshCommand in some repository's own config, the ext:: transport (git
+#     refuses it unless `-c protocol.ext.allow=always`), GIT_CONFIG_GLOBAL=/dev/null or another HOME (the
+#     three layers gone: only a remote's pushurl DISABLED is left). GIT_SSH alone does not: git prefers
+#     core.sshCommand to it. Under any of them the pushInsteadOf prefixes still hold for `git push` —
+#     never for `git send-pack`, which does not read them.
+# =============================================================================
+set -u
+HOSTS=""
+case "${1:-}" in --hosts=*) HOSTS="${1#--hosts=}"; shift ;; esac
+
+# ssh options, as ssh's getopt reads them: a cluster of flags, the last of which may take a value
+# (attached, or the next argument). -G anywhere among them = print the configuration and exit.
+TAKES_VALUE="BbcDEeFIiJLlmOoPpQRSWw"
+ARGS=("$@"); N=${#ARGS[@]}; I=0; OPTS=()
+while [ "$I" -lt "$N" ]; do
+  A="${ARGS[$I]}"
+  case "$A" in
+    --) I=$((I + 1)); break ;;
+    -?*)
+      OPTS+=("$A"); I=$((I + 1)); REST="${A#-}"
+      while [ -n "$REST" ]; do
+        C="${REST:0:1}"; REST="${REST:1}"
+        [ "$C" = G ] && exec ssh "$@"
+        case "$TAKES_VALUE" in
+          *"$C"*) if [ -z "$REST" ] && [ "$I" -lt "$N" ]; then OPTS+=("${ARGS[$I]}"); I=$((I + 1)); fi
+                  break ;;
+        esac
+      done ;;
+    *) break ;;
+  esac
+done
+DEST="${ARGS[$I]:-}"
+[ -n "$DEST" ] || exec ssh "$@"
+CMD="${ARGS[*]:$((I + 1))}"
+Q="'"
+READ="^git[- ]upload-(pack|archive) ${Q}([^${Q}]|${Q}\\\\[!${Q}]${Q})*${Q}\$"
+IS_READ=0; [[ "$CMD" =~ $READ ]] && IS_READ=1
+T=""; command -v timeout >/dev/null 2>&1 && T="timeout 10"
+
+# an IPv4-mapped IPv6 address (::ffff:a.b.c.d, ::ffff:hhhh:hhhh, 0:0:0:0:0:ffff:…) -> a.b.c.d
+unmap() {
+  local H="$1" X Y
+  case "$H" in 0:0:0:0:0:ffff:*) H="::ffff:${H#0:0:0:0:0:ffff:}" ;; esac
+  if [[ "$H" =~ ^::ffff:([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then H="${BASH_REMATCH[1]}"
+  elif [[ "$H" =~ ^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$ ]]; then
+    X=$((16#${BASH_REMATCH[1]})); Y=$((16#${BASH_REMATCH[2]}))
+    H="$((X >> 8)).$((X & 255)).$((Y >> 8)).$((Y & 255))"
+  fi
+  printf '%s' "$H"
+}
+# [ssh://][user@]host[:port][/…], [v6]:port, an address -> host, lower case, no trailing dot, unmapped
+canon() {
+  local H="${1,,}"
+  H="${H#ssh://}"; H="${H%%/*}"; H="${H##*@}"
+  case "$H" in
+    \[*) H="${H#\[}"; H="${H%%\]*}" ;;
+    *:*:*) ;;
+    *) H="${H%%:*}" ;;
+  esac
+  H="${H%.}"
+  unmap "$H"
+}
+is_ip() { [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || [[ "$1" == *:* ]]; }
+
+# What ssh will really reach, read from `ssh -G` (local: the configuration, the options, no connection)
+CONF="$($T ssh "${OPTS[@]}" -G "$DEST" 2>/dev/null)"
+cget() { awk -v k="$1" '$1 == k { sub(/^[^ ]+ /, ""); print; exit }' <<<"$CONF"; }
+H1="$(canon "$DEST")"
+H2="$(canon "$(cget hostname)")"
+alias_hka() { local V; V="$(cget hostkeyalias)"; { [ -z "$V" ] || [ "$V" = none ]; } || canon "$V"; echo; }
+alias_pj() {
+  local V X; V="$(cget proxyjump)"; { [ -z "$V" ] || [ "$V" = none ]; } && return 0
+  local -a J; IFS=, read -r -a J <<<"$V"; for X in "${J[@]}"; do canon "$X"; echo; done
+}
+alias_pc() {
+  local V X; V="$(cget proxycommand)"; { [ -z "$V" ] || [ "$V" = none ]; } && return 0
+  V="${V//%h/$H2}"; V="${V//%n/$H1}"
+  grep -oE '\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f.]*|[A-Za-z0-9._-]+' <<<"$V" | grep -v '^-' | head -32 \
+    | while IFS= read -r X; do canon "$X"; echo; done
+}
+alias_canon() {
+  local D X; case "$(cget canonicalizehostname)" in true|yes|always) ;; *) return 0 ;; esac
+  for D in $(cget canonicaldomains); do
+    [ "$D" = none ] && continue
+    for X in "$H1" "$H2"; do is_ip "$X" || { canon "$X.$D"; echo; }; done
+  done
+}
+mapfile -t NAMES < <({ printf '%s\n' "$H1" "$H2"; alias_hka; alias_pj; alias_pc; alias_canon; } | awk 'NF && !seen[$0]++')
+IFS=, read -r -a LIST <<<"${HOSTS,,}"
+
+ORIGIN=""
+for X in "${LIST[@]}"; do
+  X="${X%.}"; [ -n "$X" ] || continue
+  for Y in "${NAMES[@]}"; do [ "$Y" = "$X" ] && { ORIGIN="$X"; break 2; }; done
+done
+
+# by address — writes only (a read needs no name resolution, and goes through anyway)
+addrs() {   # <name>… -> their addresses (getent ahosts), unmapped, one per line
+  [ "$#" -gt 0 ] && command -v getent >/dev/null 2>&1 || return 0
+  $T getent ahosts "$@" 2>/dev/null | awk '{ print $1 }' | while IFS= read -r A; do canon "$A"; echo; done | awk 'NF && !seen[$0]++'
+}
+dest_addrs() {   # the addresses the destination names stand for (an IP literal stands for itself)
+  local Y
+  for Y in "$@"; do is_ip "$Y" && printf '%s\n' "$Y"; done
+  addrs "$@"
+}
+if [ -z "$ORIGIN" ] && [ "$IS_READ" = 0 ]; then
+  CAND=(); for Y in "${NAMES[@]}"; do case "$Y" in -*|*%*) ;; *) CAND+=("$Y") ;; esac; done
+  DADDR=""; DONE=0
+  for X in "${LIST[@]}"; do
+    X="${X%.}"; [ -n "$X" ] || continue
+    OADDR="$(addrs "$X")"
+    if [ -z "$OADDR" ]; then
+      for Y in "${CAND[@]}"; do is_ip "$Y" && { ORIGIN="$X (unresolved: $Y may be it)"; break 2; }; done
+      continue
+    fi
+    [ "$DONE" = 1 ] || { DADDR="$(dest_addrs "${CAND[@]}")"; DONE=1; }
+    M="$(printf '%s\n' "$DADDR" | grep -Fx -f <(printf '%s\n' "$OADDR") | head -1)"
+    [ -n "$M" ] && { ORIGIN="$X ($M)"; break; }
+  done
+fi
+
+if [ -n "$ORIGIN" ]; then
+  if [ "$IS_READ" = 0 ]; then
+    printf 'verrou 4 (ssh guard): « %s » to %s refused — nothing is ever pushed to an upstream host from here (only git-upload-pack and git-upload-archive go through)\n' \
+      "${CMD%% *}" "$ORIGIN" >&2
+    exit 1
+  fi
+  # a read from an upstream host: no question without a terminal (pinned key, agent or nothing)
+  { : </dev/tty; } 2>/dev/null || exec ssh -o BatchMode=yes "$@"
+fi
+exec ssh "$@"

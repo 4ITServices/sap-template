@@ -11,12 +11,20 @@
 #   dbt-run.sh v2 <product> <dbt args…>  dbt v2 on v2/<product>/
 #   dbt-run.sh global <dbt args…>        dbt v2 on global/ (the products' v2
 #                                        as local packages)
+#   dbt-run.sh v4 <product> <dbt args…>  dbt v2 on v4/<product>/ (DBT_V4_PRODUCTS,
+#                                        or a referent), in the v4 space:
+#                                        profiles/v4.env, DBT_BQ_DATASET_PREFIX_V4
+#   dbt-run.sh global-v4 <dbt args…>     dbt v2 on global-v4/, the v4 assembly
+#                                        (same refusals as global/, v4 space)
 #   dbt-run.sh products                  the products and their state
 #   dbt-run.sh sync [<product>]          fetch where the products' branches
 #                                        live, fast-forward the clean worktrees
 #   dbt-run.sh product-add <name> <url> [branch] [subdir] [global] [home]
 #                                        declare a product whose repository
 #                                        exists (home = its own repo, or '-')
+#   dbt-run.sh referent-add <name> <home> [subdir]
+#                                        declare a product born here (no
+#                                        upstream, v4 only): referents.conf
 #   dbt-run.sh lock [<product>]          write .devcontainer/products.lock: the
 #                                        exact commit of every v1/v2 (pushed ones only)
 #   dbt-run.sh lock-status               where each worktree stands against the lock
@@ -29,26 +37,42 @@
 # Both:
 #   dbt-run.sh auto <dbt args…>          engine (and product) from the current
 #                                        directory — what the `dbt` function calls
-#   dbt-run.sh destinations [<product>|global]
+#   dbt-run.sh destinations [<product>|global|global-v4]
 #                                        where each engine would write each
-#                                        node, and where v1 and v2 disagree
+#                                        node, where v1 and v2 (v2 and v4)
+#                                        disagree, and whether a v4 stays in
+#                                        its own space
 #   dbt-run.sh upstream-pull [<product>] fetch upstream, refresh its mirror on
 #                                        origin (never merges)
 #
 # Every process of the container already gets the profile hub
 # (DBT_PROFILES_DIR). On top of it, this wrapper:
 #   - imposes the hub: --profiles-dir is refused
+#   - runs the project it checks, with the packages it reads: --project-dir,
+#     --packages-install-path, DBT_PROJECT_DIR and DBT_PACKAGES_INSTALL_PATH
+#     are refused
 #   - loads profiles/dbt.env (+ profiles/env/<product>.env in a fleet), the
 #     env vars the projects' Jinja needs
 #   - refuses run-operation (arbitrary macros) unless DBT_ALLOW_RUN_OPERATION=1
 #   - lets a write (run/build/seed/snapshot/clone/retry) through only with an
 #     explicit selection whose every node resolves into the sandbox: project
 #     DBT_BQ_PROJECT, dataset starting with DBT_BQ_DATASET_PREFIX — and, in
-#     global/, whose relations no other node of the project writes too
+#     global/ and global-v4/, whose relations no other node of the project
+#     writes too
+#   - keeps the v4 space apart, both ways: v4/ and global-v4/ run on
+#     profiles/v4.env and write only under DBT_BQ_DATASET_PREFIX_V4 (= or _*),
+#     everything else never there — the DATASET_PREFIX in force and the .env
+#     the dbt extension reads are checked on every command, parse included
+#   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
+#     copy, a probe…): never handed to plain dbt v2
 #   - refuses every command that would execute hooks — the project's own or
 #     those of its installed packages — until DBT_HOOKS_REVIEWED=1. Which
 #     commands run hooks depends on the engine: see dbt_hook_commands in
-#     lib-dbt.sh (dbt v2 runs them on compile and show too)
+#     lib-dbt.sh (dbt v2 runs them on compile and show too). In the v4 space,
+#     DBT_HOOKS_COMPILE_OK opens global-v4's compile/show only while the proof
+#     of its hooks (DBT_HOOKS_V4_PROOF) holds for the files on disk — its seal
+#     is recomputed at every such command (dbt_hooks_v4_seal, lib-dbt.sh), and
+#     what the seal cannot see is refused there: --vars, --profile, DBT_PROFILE
 # The raw engines (`dbt1`, `dbtf`) and the editor extensions' buttons bypass
 # these guards — they only get the hub.
 # =============================================================================
@@ -69,14 +93,22 @@ MODE="${1:-}"
 # select_product NAME — fleet only: NAME must be declared in products.conf
 select_product() {
   local N="${1:-}" LIST
-  LIST="$(dbt_products | paste -sd' ' -)"
+  LIST="$(dbt_members | paste -sd' ' -)"
   [ -n "$N" ] || die "which product? ${LIST:-none declared} — e.g. just ${MODE:-v1} <product> parse"
   dbt_use_product "$N" && return 0
   # a dbt command where the product belongs: the product was forgotten
   case " parse compile run build test ls list seed snapshot deps show docs debug clean source freshness retry clone run-operation " in
     *" $N "*) die "which product? ${LIST:-none declared} — e.g. just ${MODE:-v1} <product> $N" ;;
   esac
-  die "unknown product '$N' — declared in .devcontainer/products.conf: ${LIST:-none}"
+  die "unknown product '$N' — declared in .devcontainer/products.conf$( [ -n "$(dbt_referents)" ] && echo ' and referents.conf'): ${LIST:-none}"
+}
+
+# check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
+# referent, v1/v2 for every product but a referent
+check_generation() {
+  case " $(dbt_versions) " in *" ${1:-} "*) return 0 ;; esac
+  if [ "${1:-}" = v4 ]; then die "${P_NAME:-this project} has no v4 (DBT_V4_PRODUCTS in .devcontainer/dbt.conf, or .devcontainer/referents.conf)"; fi
+  die "${P_NAME:-?} is a referent, born here: no ${1:-?}, v4 only — just v4 ${P_NAME:-<name>} …"
 }
 
 # -----------------------------------------------------------------------------
@@ -84,6 +116,7 @@ select_product() {
 # -----------------------------------------------------------------------------
 upstream_pull_one() {
   local BR="$P_BRANCH" OLD NEW V B
+  [ "${P_REFERENT:-0}" = 1 ] && die "$P_NAME is a referent, born here (referents.conf): no upstream to pull"
   git -C "$WS" remote get-url "$P_REMOTE" >/dev/null 2>&1 || die "no '$P_REMOTE' remote — run: just setup"
   OLD="$(git -C "$WS" rev-parse -q --verify "refs/remotes/$P_REMOTE/$BR" 2>/dev/null || true)"
   echo "→ ${P_TAG}git fetch $P_REMOTE (read-only)"
@@ -103,7 +136,10 @@ upstream_pull_one() {
     git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
     echo "  $B: $(git -C "$WS" rev-list --count "$B..$P_REMOTE/$BR") commit(s) behind $P_REMOTE/$BR, $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$B") ahead"
   done
-  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1"
+  if dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
+    echo "  $P_B4: $(git -C "$WS" rev-list --count "$P_B4..$P_B2") commit(s) of $P_B2 not in it yet"
+  fi
+  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1$(dbt_v4_enabled && printf ', then into %s && git merge %s' "${P_SHOW4%/}" "$P_B2")"
 }
 
 upstream_pull() {
@@ -121,11 +157,18 @@ upstream_pull() {
 # destinations
 # -----------------------------------------------------------------------------
 destinations_one() {
-  local TMP V RC=0
+  local TMP V RC=0 VS PD=""
   TMP="$(mktemp -d)"
   export_env
-  for V in $DBT_WORKTREES; do
-    if dbt_destinations "$V" > "$TMP/$V.tsv" && [ -s "$TMP/$V.tsv" ]; then
+  VS="$(dbt_versions)"
+  # a v4 not opened yet (no worktree): said, not a failure
+  if _in "$VS" v4 && ! _dbt_is_worktree "$(_dbt_wt v4)"; then
+    echo "== ${P_TAG}v4: not opened yet (no $(_dbt_show v4)) =="
+    VS="$(printf '%s' "$VS" | sed 's/ *v4$//')"
+  fi
+  for V in $VS; do
+    # each worktree under its own environment (the v4: profiles/v4.env), in a subshell
+    if ( export_env "$V"; space_check "$V"; dbt_destinations "$V" ) > "$TMP/$V.tsv" && [ -s "$TMP/$V.tsv" ]; then
       echo "== ${P_TAG}$V: $(wc -l < "$TMP/$V.tsv") node(s) =="
       cut -f2,3 "$TMP/$V.tsv" | sort | uniq -c | sort -rn | sed 's/^/  /'
     else
@@ -134,23 +177,46 @@ destinations_one() {
       RC=1
     fi
   done
-  python3 - "$TMP/v1.tsv" "$TMP/v2.tsv" "$P_TAG" "${DBT_BQ_DATASET_PREFIX:-}" "${DATASET_PREFIX:-}" \
-    "$(sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$(dbt_project_dir v2 2>/dev/null)/dbt_project.yml" 2>/dev/null | head -1)" <<'PY'
+  PD="$(dbt_project_dir v2 2>/dev/null)" || PD="$(dbt_project_dir v4 2>/dev/null)" || true
+  PKG="$(sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$PD/dbt_project.yml" 2>/dev/null | head -1)"
+  if _in "$VS" v1 && _in "$VS" v2; then dest_compare "$TMP" v1 v2 "$PKG"; fi
+  if _in "$VS" v2 && _in "$VS" v4; then dest_compare "$TMP" v2 v4 "$PKG"; fi
+  if _in "$VS" v4 && [ -s "$TMP/v4.tsv" ]; then dest_v4_check "$TMP/v4.tsv" v4 || RC=1; fi
+  rm -rf "$TMP"
+  return $RC
+}
+
+# _in LIST WORD — WORD is one of the words of LIST
+_in() { case " ${1:-} " in *" ${2:-} "*) return 0 ;; esac; return 1; }
+
+# dest_compare TMP VA VB PACKAGE — the nodes of VA and VB written to different places (TMP/<V>.tsv)
+dest_compare() {
+  python3 - "$1/$2.tsv" "$1/$3.tsv" "$P_TAG" "${DBT_BQ_DATASET_PREFIX:-}" "${DATASET_PREFIX:-}" "${4:-}" "$2" "$3" \
+    "${DBT_BQ_DATASET_PREFIX_V4:-}" <<'PY'
 import sys
+fa, fb, tag, p1, p2, pkg, va, vb, p4 = sys.argv[1:10]
 # The sandbox prefix is how a branch reaches the sandbox, not a move: v1,
 # faithful to upstream, may not read DATASET_PREFIX while v2 does — nor the
 # per-product namespace <PREFIX>_<PACKAGE>__<dataset> (global/'s convention)
 # that a v2 may adopt so that products do not collide in one sandbox project.
-pfxs = sorted({x.rstrip("_").upper() for x in sys.argv[4:6] if x.rstrip("_")}, key=len, reverse=True)
-pkg = (sys.argv[6] if len(sys.argv) > 6 else "").upper()
-def norm(schema, v2=False):
+# v2 vs v4: the v4 writes under its own prefix, and a node without a schema of
+# its own lands in <V4 PREFIX>_<PACKAGE>__<target.schema> — the v2's prefix
+# left on target.schema: both are stripped.
+v4 = vb == "v4"
+pfxs = sorted({x.rstrip("_").upper() for x in [p1, p2] + ([p4] if v4 else []) if x.rstrip("_")}, key=len, reverse=True)
+pkg = pkg.upper()
+def norm(schema, ns=False, again=False):
     s = schema.upper()
     for x in pfxs:
         if s.startswith(x + "_"):
             s = s[len(x) + 1:]
             # only v2 may carry the namespace: v1's own datasets may start with it
-            if v2 and pkg and s.startswith(pkg + "__"):
+            if ns and pkg and s.startswith(pkg + "__"):
                 s = s[len(pkg) + 2:]
+                for y in (pfxs if again else []):
+                    if s.startswith(y + "_"):
+                        s = s[len(y) + 1:]
+                        break
             return s
     return s
 def load(path):
@@ -160,32 +226,44 @@ def load(path):
         if len(p) >= 4:
             out[(p[0], p[3])] = (p[1], p[2])
     return out
-a, b = load(sys.argv[1]), load(sys.argv[2])
+a, b = load(fa), load(fb)
 if not a or not b:
     sys.exit(0)
-moved = sorted(k for k in a.keys() & b.keys() if (a[k][0], norm(a[k][1])) != (b[k][0], norm(b[k][1], True)))
+moved = sorted(k for k in a.keys() & b.keys() if (a[k][0], norm(a[k][1], va != "v1")) != (b[k][0], norm(b[k][1], True, v4)))
 only1, only2 = sorted(a.keys() - b.keys()), sorted(b.keys() - a.keys())
 note = f" (sandbox prefix {'/'.join(x + '_' for x in pfxs)}{' and namespace ' + pkg + '__' if pkg else ''} ignored)" if pfxs else ""
-print(f"== {sys.argv[3]}v1 vs v2: {len(moved)} node(s) written elsewhere{note}, {len(only1)} only in v1, {len(only2)} only in v2 ==")
+print(f"== {tag}{va} vs {vb}: {len(moved)} node(s) written elsewhere{note}, {len(only1)} only in {va}, {len(only2)} only in {vb} ==")
 for k in moved:
     print(f"  {k[0]} {k[1]}: {'.'.join(a[k])}  ->  {'.'.join(b[k])}")
 for k in only1:
-    print(f"  only in v1: {k[0]} {k[1]}")
+    print(f"  only in {va}: {k[0]} {k[1]}")
 for k in only2:
-    print(f"  only in v2: {k[0]} {k[1]}")
+    print(f"  only in {vb}: {k[0]} {k[1]}")
 PY
-  rm -rf "$TMP"
-  return $RC
 }
 
-destinations_global() {
-  local TMP RC=0
+# dest_v4_check NODES.tsv V — every node of the v4 space resolves under DBT_BQ_DATASET_PREFIX_V4, in the sandbox
+dest_v4_check() {
+  local BAD
+  BAD="$(offenders "$2" < "$1")"
+  if [ -z "$BAD" ]; then
+    echo "== ${P_TAG}$2: every node in the v4 space ($DBT_BQ_PROJECT, ${DBT_BQ_DATASET_PREFIX_V4} / ${DBT_BQ_DATASET_PREFIX_V4}_*) =="
+    return 0
+  fi
+  echo "== ${P_TAG}$2: $(printf '%s\n' "$BAD" | wc -l) node(s) OUTSIDE the v4 space (${DBT_BQ_DATASET_PREFIX_V4:-?}_*) — their writes are refused =="
+  printf '%s\n' "$BAD" | head -n 20
+  return 1
+}
+
+destinations_global() {   # global | global-v4
+  local A="${1:-global}" TMP RC=0
   TMP="$(mktemp)"
-  export_env
-  if dbt_destinations global > "$TMP" && [ -s "$TMP" ]; then
-    echo "== global: $(wc -l < "$TMP") node(s) =="
+  export_env "$A"
+  space_check "$A"
+  if dbt_destinations "$A" > "$TMP" && [ -s "$TMP" ]; then
+    echo "== $A: $(wc -l < "$TMP") node(s) =="
     awk -F'\t' '{split($4, a, "."); print a[1] "\t" $2 "." $3}' "$TMP" | sort | uniq -c | sort -rn | head -n 40 | sed 's/^/  /'
-    python3 - "$TMP" <<'PY'
+    python3 - "$TMP" "$A" <<'PY'
 import sys, collections
 rel = collections.defaultdict(list)
 for line in open(sys.argv[1]):
@@ -193,12 +271,13 @@ for line in open(sys.argv[1]):
     if len(p) >= 5:
         rel[(p[1], p[2].upper(), p[4].upper())].append(p[3])
 dups = {k: v for k, v in rel.items() if len(v) > 1}
-print(f"== global: {len(dups)} relation(s) written by several nodes ==")
+print(f"== {sys.argv[2]}: {len(dups)} relation(s) written by several nodes ==")
 for k, v in sorted(dups.items()):
     print(f"  {'.'.join(k)} <- {', '.join(sorted(v))}")
 PY
+    ! dbt_is_v4 "$A" || dest_v4_check "$TMP" "$A" || RC=1
   else
-    echo "== global: no destination — \`just global parse\` must pass first =="
+    echo "== $A: no destination — \`just $A parse\` must pass first =="
     RC=1
   fi
   rm -f "$TMP"
@@ -207,9 +286,9 @@ PY
 
 destinations() {
   local N RC=0
-  if [ "${1:-}" = "global" ]; then destinations_global; return $?; fi
+  if dbt_is_assembly "${1:-}"; then destinations_global "$1"; return $?; fi
   if dbt_is_fleet && [ -z "${1:-}" ]; then
-    for N in $(dbt_products); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
+    for N in $(dbt_members); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
     return $RC
   fi
   dbt_is_fleet && select_product "$1"
@@ -223,14 +302,14 @@ products() {
   local N V P B S
   dbt_is_fleet || die "single-product workspace: no products.conf"
   printf '%-18s %-6s %-10s %-34s %s\n' "PRODUCT" "GLOBAL" "UPSTREAM" "WORKTREES" "BRANCHES LIVE IN"
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     S=""
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
       P="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
       if _dbt_is_worktree "$P"; then S="$S $V=$(git -C "$P" rev-parse --short HEAD 2>/dev/null)"; else S="$S $V=missing"; fi
     done
-    printf '%-18s %-6s %-10s %-34s %s\n' "$N" "$( [ "$P_GLOBAL" = 1 ] && echo yes || echo no)" "$P_BRANCH" "${S# }" "${P_HOME_URL:-this repository (origin)}"
+    printf '%-18s %-6s %-10s %-34s %s\n' "$N" "$( [ "$P_GLOBAL" = 1 ] && echo yes || echo no)" "$( [ "${P_REFERENT:-0}" = 1 ] && echo 'born here' || echo "$P_BRANCH")" "${S# }" "${P_HOME_URL:-this repository (origin)}"
   done
 }
 
@@ -243,12 +322,14 @@ sync_products() {
   dbt_is_fleet || { dbt_use_product ""; dbt_sync; return; }
   load_token
   if [ -n "${1:-}" ]; then select_product "$1"; dbt_sync; return; fi
-  for N in $(dbt_products); do dbt_use_product "$N" && dbt_sync; done
+  for N in $(dbt_members); do dbt_use_product "$N" && dbt_sync; done
   [ -f "$DBT_LOCK_FILE" ] || return 0
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
       read -r ST _ <<< "$(dbt_lock_status "$V")"
+      # a v4 not opened yet has nothing to lock: not "away from the lock"
+      [ "$V" = v4 ] && [ "$ST" = missing ] && continue
       [ "$ST" = same ] || MOVED=$((MOVED + 1))
     done
   done
@@ -260,7 +341,7 @@ sync_products() {
 # The fleet lock (.devcontainer/products.lock)
 # -----------------------------------------------------------------------------
 
-# lock [PRODUCT] — record the current commit of each v1/v2. Only commits that
+# lock [PRODUCT] — record the current commit of each v1/v2 (and v4). Only commits that
 # are PUSHED where the product's branches live: a lock that names a commit
 # nobody else can fetch would replay nothing. Uncommitted changes are not
 # part of a commit, hence of the lock: they are reported.
@@ -271,22 +352,28 @@ lock_write() {
   load_token
   TMP="$(mktemp)"
   {
-    echo "# products.lock — the exact commit of every product's v1 and v2 (just lock)."
-    echo "# Commit it with the change of global/ it goes with: \`git log -p\` on this file"
+    echo "# products.lock — the exact commit of every product's v1 and v2, and v4 where there is one (just lock)."
+    echo "# Commit it with the change of global/ (or global-v4/) it goes with: \`git log -p\` on this file"
     echo "# then tells which product versions each state of global/ was validated with."
     echo "# Generated — edit with \`just lock\`, not by hand. Replay: just lock-checkout"
     echo "# PRODUCT        VERSION  COMMIT                                    SOURCE"
   } > "$TMP"
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     if [ -n "$ONLY" ] && [ "$N" != "$ONLY" ]; then
-      for V in $DBT_WORKTREES; do grep -E "^$N +$V " "$DBT_LOCK_FILE" 2>/dev/null >> "$TMP"; done
+      for V in $(dbt_versions); do grep -E "^$N +$V " "$DBT_LOCK_FILE" 2>/dev/null >> "$TMP"; done
       continue
     fi
     _dbt_fetch_home >/dev/null 2>&1 || true
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
       W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"; U="$P_HOME/$(_dbt_hbr "$V")"
-      if ! _dbt_is_worktree "$W"; then BAD="$BAD"$'\n'"   $N $V: no worktree (just setup)"; continue; fi
+      if ! _dbt_is_worktree "$W"; then
+        # a v4 not opened yet where the product's branches live: nothing to lock
+        if [ "$V" = v4 ] && ! git -C "$DBT_WS" show-ref --verify --quiet "refs/remotes/$U"; then
+          WARN="$WARN"$'\n'"   $N v4: not opened yet ($U missing) — nothing to lock"; continue
+        fi
+        BAD="$BAD"$'\n'"   $N $V: no worktree (just setup)"; continue
+      fi
       C="$(git -C "$W" rev-parse HEAD)"
       [ "$(git -C "$W" rev-parse --abbrev-ref HEAD)" = "$B" ] \
         || BAD="$BAD"$'\n'"   $N $V: $(_dbt_show "$V") is not on $B (a replayed lock? just lock-release)"
@@ -324,9 +411,12 @@ lock_status() {
   local N V
   dbt_is_fleet || die "single-product workspace: no lock"
   [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/products.lock yet — just lock"; return 0; }
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do printf '  %-24s %s\n' "$(_dbt_show "$V")" "$(dbt_lock_describe "$V")"; done
+    for V in $(dbt_versions); do
+      if [ "$V" = v4 ] && ! _dbt_is_worktree "$(_dbt_wt v4)"; then printf '  %-24s %s\n' "$(_dbt_show v4)" "not opened yet"; continue; fi
+      printf '  %-24s %s\n' "$(_dbt_show "$V")" "$(dbt_lock_describe "$V")"
+    done
   done
 }
 
@@ -338,10 +428,10 @@ lock_checkout() {
   [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/products.lock — nothing to replay"
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     [ -z "$ONLY" ] || [ "$N" = "$ONLY" ] || continue
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
       W="$(_dbt_wt "$V")"; L="$(_dbt_lock_get "$N" "$V")"
       [ -n "$L" ] && _dbt_is_worktree "$W" || continue
       [ -z "$(git -C "$W" status --porcelain --untracked-files=no 2>/dev/null)" ] \
@@ -358,10 +448,10 @@ lock_release() {
   local ONLY="${1:-}" N V W B
   dbt_is_fleet || die "single-product workspace: no lock"
   [ -z "$ONLY" ] || select_product "$ONLY"
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     [ -z "$ONLY" ] || [ "$N" = "$ONLY" ] || continue
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
       W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"
       _dbt_is_worktree "$W" || continue
       [ "$(git -C "$W" rev-parse --abbrev-ref HEAD)" = "$B" ] && continue
@@ -379,7 +469,7 @@ product_add() {
   dbt_is_fleet || die "single-product workspace: no products.conf"
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-add <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
-  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/products.conf"; fi
+  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
   case "$URL" in ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "'$URL' is not a git URL (git@host:group/repo.git, ssh://…, https://… or a local path)" ;; esac
   case "${GL:-no}" in yes|no) ;; *) die "GLOBAL must be yes or no (got '$GL')" ;; esac
   case "${HOMEU:--}" in -|ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "HOME must be a git URL or '-' (got '$HOMEU')" ;; esac
@@ -399,6 +489,36 @@ product_add() {
   fi
 }
 
+# referent_add NAME HOME [SUBDIR] — declare a product BORN HERE (no upstream: no remote up-<name>, no mirror, no
+# v1/v2): its own repository HOME carries a branch v4, followed in v4/NAME/ under the v4 space. Never pushes.
+referent_add() {
+  local N="${1:-}" HOMEU="${2:-}" SUB="${3:-}" H U
+  dbt_is_fleet || die "single-product workspace: no referents.conf"
+  [ -n "$N" ] && [ -n "$HOMEU" ] || die "usage: just referent-add <name> <url of its own repository> [subdir]"
+  printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid referent name '$N': lowercase, digits and '-' (41 characters max)"
+  if dbt_use_product "$N"; then die "'$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
+  case "$HOMEU" in ssh://*|https://*|*@*:*|file://*|/*) ;; *) die "'$HOMEU' is not a git URL (its own repository)" ;; esac
+  case "$SUB" in *[[:space:]]*) die "SUBDIR must not contain spaces (got '$SUB')" ;; esac
+  # no upstream: its repository must not sit on an upstream host (push-locked by pushInsteadOf)
+  H="$(_dbt_url_host "$HOMEU")"
+  if [ -n "$H" ]; then
+    while IFS= read -r U; do
+      [ "$(_dbt_url_host "$U")" != "$H" ] || die "$H serves an upstream here (push-locked): a referent cannot live there"
+    done < <(_dbt_upstream_urls)
+  fi
+  _dbt_v4_prefix_ok || die "a referent lives in the v4 space: set DBT_BQ_DATASET_PREFIX_V4 (<DBT_BQ_DATASET_PREFIX>_<x>) in .devcontainer/dbt.conf first"
+  load_token
+  [ -f "$DBT_REFERENTS_CONF" ] || printf '# Products born here (no upstream, a v4 worktree only), one per line:   NAME  SUBDIR  HOME\n' > "$DBT_REFERENTS_CONF"
+  [ -s "$DBT_REFERENTS_CONF" ] && [ -n "$(tail -c1 "$DBT_REFERENTS_CONF")" ] && echo >> "$DBT_REFERENTS_CONF"
+  printf '%-14s %s  %s\n' "$N" "${SUB:--}" "$HOMEU" >> "$DBT_REFERENTS_CONF"
+  echo "→ $N declared in .devcontainer/referents.conf"
+  bash -c 'source "$1/.devcontainer/lib-dbt.sh" && dbt_process "$1" create' _ "$WS"
+  dbt_load_conf "$WS"
+  dbt_use_product "$N" || die "$N is not readable back from referents.conf"
+  echo
+  echo "Next: commit .devcontainer/referents.conf and profiles/profiles.yml (its profile, if it was added)."
+}
+
 # product_new NAME URL [BRANCH] [SUBDIR] [GLOBAL] — the coordinator model in
 # one command: create the product's own repository from the template
 # (project_type dbt-project, the coordinator's sandbox answers), fill it from
@@ -410,7 +530,7 @@ product_new() {
   dbt_is_fleet || die "single-product workspace: no products.conf"
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-new <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
-  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/products.conf"; fi
+  if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
   case "$GL" in yes|no) ;; *) die "GLOBAL must be yes or no (got '$GL')" ;; esac
   command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) not found"
   command -v copier >/dev/null 2>&1 || die "copier not found"
@@ -484,29 +604,88 @@ product_new() {
 # -----------------------------------------------------------------------------
 
 # The hub is imposed and the env files are loaded (fleet-wide, then the
-# product's own); nothing in them can move the lock.
+# product's own); nothing in them can move the lock. The v4 space (V = v4,
+# global-v4) starts from profiles/v4.env instead of profiles/dbt.env — chosen
+# by the MODE, never by a variable a shell could have exported.
+# _guard_vars — every DBT_* variable of this shell with its value (DBT_SEND_ANONYMOUS_USAGE_STATS aside): what
+# export_env compares around each env file it sources.
+_guard_vars() {
+  local G
+  for G in $(compgen -v DBT_); do
+    [ "$G" = DBT_SEND_ANONYMOUS_USAGE_STATS ] || printf '%s=%q\n' "$G" "${!G}"
+  done
+}
+
 export_env() {
-  local F
-  for F in "$WS/profiles/dbt.env" "${P_ENV:-}"; do
+  local F BEFORE V="${1:-}" BASE="$WS/profiles/dbt.env" OWN="${P_ENV:-}"
+  if dbt_is_v4 "$V"; then
+    _dbt_v4_prefix_ok || refuse "$V: DBT_BQ_DATASET_PREFIX_V4 ('${DBT_BQ_DATASET_PREFIX_V4:-}') is not ${DBT_BQ_DATASET_PREFIX:-<DBT_BQ_DATASET_PREFIX>}_<x> in .devcontainer/dbt.conf:" \
+                                "the v4 has no datasets of its own — every v4 command is refused."
+    BASE="$WS/profiles/v4.env"
+    [ -f "$BASE" ] || refuse "$V: profiles/v4.env is missing — the v4 has no environment of its own." "Run: just setup"
+    [ "$OWN" = "$WS/profiles/dbt.env" ] && OWN=""
+  fi
+  for F in "$BASE" "$OWN"; do
     [ -n "$F" ] && [ -f "$F" ] || continue
+    BEFORE="$(_guard_vars)"
     set -a
     # shellcheck disable=SC1090
     . "$F"
     set +a
+    # an env file feeds the dbt project (DATASET_PREFIX, SOURCE, ENV…), never the guard: a DBT_* setting it adds
+    # or changes (DBT_SANDBOX_NEVER_BUILD, DBT_HOOKS_REVIEWED, DBT_BQ_DATASET_PREFIX, DBT_PROJECT_DIR…) is refused
+    [ "$(_guard_vars)" = "$BEFORE" ] \
+      || refuse "${F#"$WS"/} sets a DBT_* variable: guard settings live in .devcontainer/dbt.conf only — refused." \
+                "Remove it from ${F#"$WS"/} (DBT_SEND_ANONYMOUS_USAGE_STATS is the one exception)."
   done
   export DBT_PROFILES_DIR="$WS/profiles"
   export DBT_SEND_ANONYMOUS_USAGE_STATS="${DBT_SEND_ANONYMOUS_USAGE_STATS:-false}"
+}
+
+# space_check V — after export_env V: the dataset prefix in force and the .env the dbt extension reads in V's
+# project are the v4 space's under v4/ and global-v4/, never the v4 space's anywhere else. Every command, parse
+# included: a manifest computed under the other space's prefix names the other space's tables.
+space_check() {
+  local V="${1:-}" P L="" E4="$WS/profiles/v4.env"
+  if P="$(dbt_project_dir "$V" 2>/dev/null)"; then L="$(readlink -f "$P/.env" 2>/dev/null || true)"; else P=""; fi
+  if dbt_is_v4 "$V"; then
+    [ "${DATASET_PREFIX:-}" = "$DBT_BQ_DATASET_PREFIX_V4" ] \
+      || refuse "DATASET_PREFIX is '${DATASET_PREFIX:-}' under $V — the v4 space is $DBT_BQ_DATASET_PREFIX_V4 (profiles/v4.env): refused." \
+                "An env file of the product (profiles/env/${P_NAME:-<name>}.env) must not set DATASET_PREFIX; then: just setup"
+    [ -z "$P" ] || [ "$L" = "$(readlink -f "$E4")" ] \
+      || refuse "${P#"$WS"/}/.env does not point to profiles/v4.env: the dbt extension would read — and its Run/Build" \
+                "write — another space there. Run: just setup"
+  elif [ -n "${DBT_BQ_DATASET_PREFIX_V4:-}" ]; then
+    ! _dbt_under_v4 "${DATASET_PREFIX:-}" \
+      || refuse "DATASET_PREFIX is '$DATASET_PREFIX' under $V: that is the v4 space ($DBT_BQ_DATASET_PREFIX_V4), never written from $V — refused." \
+                "Check profiles/dbt.env and profiles/env/*.env."
+    [ -z "$P" ] || [ -z "$L" ] || [ "$L" != "$(readlink -f "$E4")" ] \
+      || refuse "${P#"$WS"/}/.env points to profiles/v4.env: the dbt extension would write $V into the v4 space." \
+                "Point it back to its env file (or remove it), then: just setup"
+  fi
+  return 0
+}
+
+# offenders V < destinations — the nodes V may not write ("   type name -> db.schema"): outside the sandbox
+# project, outside DBT_BQ_DATASET_PREFIX — and, the v4 space, outside DBT_BQ_DATASET_PREFIX_V4 (= or _*) for v4/
+# and global-v4/, inside it for everything else. Without a v4 prefix, a v4 node always offends (fail-closed).
+offenders() {
+  local ISV4=0
+  dbt_is_v4 "${1:-}" && ISV4=1
+  awk -F'\t' -v p="${DBT_BQ_PROJECT:-}" -v x="${DBT_BQ_DATASET_PREFIX:-}" -v v4="$ISV4" \
+    -v q="$(printf '%s' "${DBT_BQ_DATASET_PREFIX_V4:-}" | tr '[:lower:]' '[:upper:]')" '
+    function under(s, f) { s = toupper(s); return s == f || index(s, f "_") == 1 }
+    NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (q=="" || !under($3,q))) || (!v4 && q!="" && under($3,q))) {
+      print "   " $1 " " $4 " -> " $2 "." $3 }'
 }
 
 # DBT_HOOKS_COMPILE_OK — products (`global` for global/, `project` outside a fleet) whose hooks a human has read and found
 # harmless on compile/show (dbt v2 runs on-run-start/end there). Only compile and show:
 # any other hook-running or writing word keeps the refusal. elementary's hooks are allowed
 # only while ELEMENTARY is not 1 (its uploads are then disabled by the products' vars).
-hooks_compile_name() {
-  if [ "$1" = global ]; then printf 'global'
-  elif dbt_is_fleet; then printf '%s' "${P_NAME:-}"
-  else printf 'project'; fi
-}
+# The v4 space has names of its own — `global-v4`, `v4/<product>`: listing a product (its v2) never opens its v4,
+# and a name of the v4 space holds only with a proof of its hooks whose seal still matches (hooks_v4_proof_ok).
+hooks_compile_name() { dbt_hooks_compile_name "$@"; }
 hooks_compile_ok() {
   local NAME
   [ -n "$CMD_HOOKS" ] && [ -z "$CMD_WRITE$CMD_HOOKS_HARD$CMD_RUNOP" ] || return 1
@@ -518,12 +697,47 @@ hooks_compile_ok() {
     echo "· hooks: ELEMENTARY is not 0 — elementary would upload: compile/show refused" >&2
     return 1
   fi
+  if dbt_is_v4 "$1"; then hooks_v4_proof_ok "$NAME"; fi
   return 0
 }
 
-# DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks): every command may run
-# hooks there, but only the hooks a human approved (`just hooks-approve`, .devcontainer/hooks.approved — text and
-# where its sources resolve). A hook that is new, edited, or whose source now resolves elsewhere is refused.
+# hooks_v4_proof_ok NAME — a name of the v4 space listed in DBT_HOOKS_COMPILE_OK: the v4 has no approved-hooks list, so
+# its compile/show runs only while the proof of its hooks (DBT_HOOKS_V4_PROOF, a file of the workspace) holds for the
+# files on disk — its one verdict line carries the seal the guard recomputes here (dbt_hooks_v4_seal,
+# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
+# collected by run_dbt: --vars overrides the vars of the sealed dbt_project.yml — elementary's disable_* among them —,
+# --profile or DBT_PROFILE another profile than the sealed one), no proof named, a state that cannot be sealed, a proof
+# whose seal no longer matches.
+hooks_v4_proof_ok() {
+  local NAME="$1" S
+  [ "$NAME" = global-v4 ] \
+    || refuse "$NAME is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own (only global-v4 has one):" \
+              "\`dbt ${CMD_HOOKS:-compile}\` refused. Remove it from DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)."
+  [ -z "${UNSEALED[*]-}" ] && [ -z "${DBT_PROFILE:-}" ] \
+    || refuse "global-v4: \`dbt ${CMD_HOOKS:-compile}\` with ${UNSEALED[*]-}${DBT_PROFILE:+ DBT_PROFILE=$DBT_PROFILE} — the proof of its hooks holds for" \
+              "the vars of its dbt_project.yml and its own profile, both under its seal; --vars (it overrides elementary's" \
+              "disable_* vars) and another profile are not: refused. Compile global-v4 without them (parse may take them)."
+  case "${DBT_HOOKS_V4_PROOF:-}" in
+    ""|/*|../*|*/../*|*/..|..)
+      refuse "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF ('${DBT_HOOKS_V4_PROOF:-}') names no proof of its" \
+             "hooks inside the workspace: \`dbt ${CMD_HOOKS:-compile}\` refused (.devcontainer/dbt.conf)." ;;
+  esac
+  S="$(cd "$WS" && dbt_hooks_v4_seal)" \
+    || refuse "global-v4: its hooks cannot be sealed — a package declared in a form the seal does not read, a link or a special" \
+              "file in macros/, vendor/ or an installed package, or dbt_packages/ not exactly what package-lock.yml locks:" \
+              "\`dbt ${CMD_HOOKS:-compile}\` refused. Install its packages (no hook runs): $JCMD deps; then prove its hooks again."
+  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" \
+    || refuse "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) —" \
+              "something that decides which hooks run, or what they do, changed since it was written, or it has no single" \
+              "verdict line « VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <hex> »: \`dbt ${CMD_HOOKS:-compile}\` refused." \
+              "Prove its hooks again (the tool that writes $DBT_HOOKS_V4_PROOF), then compile."
+  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF)" >&2
+}
+
+# DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks; the v4 space has no
+# approval list): every command may run hooks there, but only the hooks a human approved (`just hooks-approve`,
+# .devcontainer/hooks.approved — text and where its sources resolve). A hook that is new, edited, or whose source
+# now resolves elsewhere is refused.
 HOOKS_APPROVED_FILE="$WS/.devcontainer/hooks.approved"
 hooks_v2_ok() {
   case "$1" in v2|global) ;; *) return 1 ;; esac
@@ -541,10 +755,12 @@ hooks_v2_ok() {
 # after reading them: in this fleet, docs/flotte/HOOKS_REVUE.md). Fleet: global/ by default.
 hooks_approve() {
   local W="${1:-}" M N
+  case "$W" in global-v4|v4|v4/*) die "the v4 space has no approved-hooks list: its hooks stay refused (DBT_HOOKS_COMPILE_OK may name global-v4 or v4/<product>, for compile/show only)" ;; esac
   if [ -z "$W" ] || [ "$W" = global ]; then
     dbt_is_fleet && M="$WS/global/target/manifest.json" || M="$(dbt_project_dir v2)/target/manifest.json"
   else
     dbt_use_product "$W" >/dev/null || die "unknown product: $W"
+    [ "${P_REFERENT:-0}" = 1 ] && die "$W is a referent (v4 only): the v4 space has no approved-hooks list"
     M="$(dbt_project_dir v2)/target/manifest.json"
   fi
   [ -f "$M" ] || die "no manifest: ${M#"$WS"/} — compile first ($(dbt_is_fleet && echo 'just global compile' || echo 'just v2 compile'))"
@@ -564,7 +780,7 @@ hooks_approve() {
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
   local HOOKS_CHECK="" NEW
-  local -a SEL=()
+  local -a SEL=() UNSEALED=()
   shift
   JCMD="$(dbt_just_cmd "$V")"
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
@@ -576,6 +792,12 @@ run_dbt() {
       --profiles-dir|--profiles-dir=*)
         refuse "--profiles-dir is not allowed: the profile hub is imposed." \
                "Edit profiles/profiles.yml instead." ;;
+      --project-dir|--project-dir=*)
+        refuse "--project-dir is not allowed: the guard checks the destinations of $(_dbt_show "$V") only," \
+               "and dbt would run another project. Run it through its own recipe." ;;
+      --packages-install-path|--packages-install-path=*)
+        refuse "--packages-install-path is not allowed: the guard reads the hooks of the packages installed in" \
+               "$(_dbt_show "$V")'s dbt_packages/ only (global-v4 seals them), and dbt would load others." ;;
       run|build|seed|snapshot|clone|retry) CMD_WRITE="$A" ;;
       run-operation) CMD_RUNOP=1 ;;
     esac
@@ -592,9 +814,18 @@ run_dbt() {
       -*) COLLECT=0 ;;
       *) [ "$COLLECT" = 1 ] && SEL+=("$A") ;;
     esac
+    # the arguments the seal of global-v4's hook proof cannot see (refused there: hooks_v4_proof_ok)
+    case "$A" in --vars|--vars=*|--profile|--profile=*) UNSEALED+=("${A%%=*}") ;; esac
   done
 
-  export_env
+  export_env "$V"
+  space_check "$V"
+  [ -z "${DBT_PROJECT_DIR:-}" ] \
+    || refuse "DBT_PROJECT_DIR is set ('$DBT_PROJECT_DIR'): dbt would run that project, not the one the guard checks — refused." \
+              "unset DBT_PROJECT_DIR"
+  [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
+    || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
+              "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
     refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \
@@ -618,8 +849,13 @@ run_dbt() {
         printf '%s\n' "$HOOKS" | head -n 12 | sed 's/^/     /'
         [ "$(printf '%s\n' "$HOOKS" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$HOOKS" | wc -l) files)"
         [ "$V" != v1 ] && echo "   (dbt v2 runs on-run-start hooks on compile and show too.)"
-        echo "   Read them. v2 worktrees and global/ only: just hooks-approve, then DBT_HOOKS_REVIEWED_V2=1;"
-        echo "   everywhere (v1 included): DBT_HOOKS_REVIEWED=1 — both in .devcontainer/dbt.conf."
+        if dbt_is_v4 "$V"; then
+          echo "   Read them. The v4 space has no approved-hooks list: DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)"
+          echo "   may name $(hooks_compile_name "$V") — compile and show only. A v2 approval never opens the v4."
+        else
+          echo "   Read them. v2 worktrees and global/ only: just hooks-approve, then DBT_HOOKS_REVIEWED_V2=1;"
+          echo "   everywhere (v1 included): DBT_HOOKS_REVIEWED=1 — both in .devcontainer/dbt.conf."
+        fi
       } >&2
       exit 1
     fi
@@ -641,11 +877,14 @@ run_dbt() {
     OUT="$(dbt_destinations "$V" ${SEL[@]+"${SEL[@]}"})" \
       || refuse "cannot resolve the selection (dbt ls failed): a write whose destination is unknown is refused." \
                 "See it fail with: $JCMD ls ${SEL[*]:-}"
-    BAD="$(printf '%s\n' "$OUT" | awk -F'\t' -v p="$DBT_BQ_PROJECT" -v x="${DBT_BQ_DATASET_PREFIX:-}" \
-      'NF>=4 && ($2!=p || (x!="" && index($3,x)!=1)) {print "   " $1 " " $4 " -> " $2 "." $3}')"
+    BAD="$(printf '%s\n' "$OUT" | offenders "$V")"
     if [ -n "$BAD" ]; then
       echo "⛔ \`dbt $CMD_WRITE\` refused: $(printf '%s\n' "$BAD" | wc -l) selected node(s) would be written outside the sandbox" >&2
-      echo "   (allowed: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, dataset starting with $DBT_BQ_DATASET_PREFIX}):" >&2
+      if dbt_is_v4 "$V"; then
+        echo "   (allowed for the v4 space: project $DBT_BQ_PROJECT, dataset $DBT_BQ_DATASET_PREFIX_V4 or ${DBT_BQ_DATASET_PREFIX_V4}_*):" >&2
+      else
+        echo "   (allowed: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, dataset starting with $DBT_BQ_DATASET_PREFIX}${DBT_BQ_DATASET_PREFIX_V4:+, never $DBT_BQ_DATASET_PREFIX_V4 nor ${DBT_BQ_DATASET_PREFIX_V4}_* — the v4 space}):" >&2
+      fi
       printf '%s\n' "$BAD" | head -n 15 >&2
       [ "$(printf '%s\n' "$BAD" | wc -l)" -gt 15 ] && echo "   … (full list: just destinations${P_NAME:+ $P_NAME})" >&2
       exit 1
@@ -655,7 +894,7 @@ run_dbt() {
     # A sandbox copy would either expose those rows or, with the policy, hide them from us.
     if [ -n "${DBT_SANDBOX_NEVER_BUILD:-}" ]; then
       local PKG=""
-      [ "$V" = "global" ] || PKG="$(sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$PROJ/dbt_project.yml" | head -1)"
+      dbt_is_assembly "$V" || PKG="$(sed -nE "s/^name:[[:space:]]*['\"]?([A-Za-z0-9_]+).*/\1/p" "$PROJ/dbt_project.yml" | head -1)"
       NEVER="$(printf '%s\n' "$OUT" | awk -F'\t' -v pkg="$PKG" -v l=" $DBT_SANDBOX_NEVER_BUILD " \
         'NF>=4 { n = (pkg != "" ? pkg "." $4 : $4); if (index(l, " " n " ")) print n }')"
       if [ -n "$NEVER" ]; then
@@ -666,11 +905,11 @@ run_dbt() {
         exit 1
       fi
     fi
-    if [ "$V" = "global" ]; then
+    if dbt_is_assembly "$V"; then
       # several products in one project: two nodes writing the same table
       # would overwrite each other in the sandbox
-      ALL="$(dbt_destinations global)" \
-        || refuse "cannot list every node of global/ (dbt ls failed): collisions cannot be ruled out."
+      ALL="$(dbt_destinations "$V")" \
+        || refuse "cannot list every node of $V/ (dbt ls failed): collisions cannot be ruled out."
       DUPS="$(python3 - <(printf '%s\n' "$ALL") <(printf '%s\n' "$OUT") <<'PY'
 import sys, collections
 rel = collections.defaultdict(set)
@@ -686,7 +925,7 @@ for line in open(sys.argv[2]):
             print(f"   {'.'.join(k)} <- {', '.join(sorted(rel[k]))}")
 PY
 )"
-      [ -z "$DUPS" ] || { echo "⛔ \`dbt $CMD_WRITE\` refused: these relations are written by several nodes of global/:" >&2; printf '%s\n' "$DUPS" | sort -u | head -n 15 >&2; exit 1; }
+      [ -z "$DUPS" ] || { echo "⛔ \`dbt $CMD_WRITE\` refused: these relations are written by several nodes of $V/:" >&2; printf '%s\n' "$DUPS" | sort -u | head -n 15 >&2; exit 1; }
     fi
     echo "[dbt:${P_NAME:+$P_NAME:}$V] $(printf '%s\n' "$OUT" | grep -c .) node(s), all inside the sandbox" >&2
   fi
@@ -720,19 +959,29 @@ PY
 
 # auto — the engine (and the product) from the current directory
 run_auto() {
-  local REL N
+  local REL N UP
   case "$PWD/" in
-    "$WS/global/"*)
-      dbt_is_fleet && { run_dbt global "$@"; return; } ;;
-    "$WS/v1/"*|"$WS/v2/"*)
+    "$WS/global/"*|"$WS/global-v4/"*)
+      REL="${PWD#"$WS"/}"
+      dbt_is_fleet && { run_dbt "${REL%%/*}" "$@"; return; } ;;
+    "$WS/v1/"*|"$WS/v2/"*|"$WS/v4/"*)
       REL="${PWD#"$WS"/}"
       if dbt_is_fleet; then
         N="$(printf '%s' "$REL" | cut -d/ -f2)"
-        if [ -n "$N" ] && dbt_use_product "$N"; then run_dbt "${REL%%/*}" "$@"; return; fi
+        if [ -n "$N" ] && dbt_use_product "$N"; then check_generation "${REL%%/*}"; run_dbt "${REL%%/*}" "$@"; return; fi
       else
-        run_dbt "${REL%%/*}" "$@"; return
+        check_generation "${REL%%/*}"; run_dbt "${REL%%/*}" "$@"; return
       fi ;;
   esac
+  # inside the workspace, a dbt project the guard does not know (a copy, a probe, an assembly not wired in) is
+  # never handed to plain dbt v2: its writes and its hooks would bypass every check
+  UP="$PWD"
+  while :; do
+    case "$UP/" in "$WS/"*) ;; *) break ;; esac
+    [ -f "$UP/dbt_project.yml" ] && die "${UP#"$WS"/}: a dbt project outside v1/ v2/ v4/ global/ global-v4/ — no guard there. Use just v1|v2|v4 <product> … or just global|global-v4 …; the raw engines (dbt1, dbtf) only knowingly."
+    [ "$UP" = "$WS" ] && break
+    UP="$(dirname "$UP")"
+  done
   # outside every project there is nothing to guard: plain dbt v2
   # (`dbt --version`, `dbt system update`, `dbt login`…)
   ENGINE="$(dbt_engine v2)"
@@ -741,12 +990,13 @@ run_auto() {
 }
 
 case "$MODE" in
-  v1|v2)
+  v1|v2|v4)
     if dbt_is_fleet; then select_product "${1:-}"; shift; fi
+    check_generation "$MODE"
     run_dbt "$MODE" "$@" ;;
-  global)
-    dbt_is_fleet || die "no global/ project in a single-product workspace"
-    run_dbt global "$@" ;;
+  global|global-v4)
+    dbt_is_fleet || die "no $MODE/ project in a single-product workspace"
+    run_dbt "$MODE" "$@" ;;
   auto)
     run_auto "$@" ;;
   destinations)
@@ -757,6 +1007,8 @@ case "$MODE" in
     products ;;
   product-add)
     product_add "$@" ;;
+  referent-add)
+    referent_add "$@" ;;
   product-new)
     product_new "$@" ;;
   sync)
@@ -773,7 +1025,7 @@ case "$MODE" in
     lock_release "${1:-}" ;;
   *)
     if dbt_is_fleet; then
-      echo "usage: dbt-run.sh v1|v2 <product> <dbt args…> | global <dbt args…> | auto <dbt args…> | destinations [<product>|global] | upstream-pull [<product>] | products | sync [<product>] | lock [<product>] | lock-status | lock-checkout [<product>] | lock-release [<product>] | hooks-approve [global|<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | product-new <name> <url> [branch] [subdir] [global]" >&2
+      echo "usage: dbt-run.sh v1|v2|v4 <product> <dbt args…> | global|global-v4 <dbt args…> | auto <dbt args…> | destinations [<product>|global|global-v4] | upstream-pull [<product>] | products | sync [<product>] | lock [<product>] | lock-status | lock-checkout [<product>] | lock-release [<product>] | hooks-approve [global|<product>] | product-add <name> <url> [branch] [subdir] [global] [home] | referent-add <name> <home> [subdir] | product-new <name> <url> [branch] [subdir] [global]" >&2
     else
       echo "usage: dbt-run.sh v1|v2|auto <dbt args…> | destinations | upstream-pull | hooks-approve" >&2
     fi
