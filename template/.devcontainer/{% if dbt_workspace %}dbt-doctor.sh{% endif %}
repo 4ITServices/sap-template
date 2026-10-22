@@ -279,6 +279,15 @@ for N in $(dbt_members); do
           && ok "$SHOW: the dbt extensions are cut in a window opened on it ($WHY)" \
           || ko "$SHOW: the dbt extensions are NOT cut in a window opened on it ($WHY): their Run/Build/Preview/Compare would compute in the main copy's space, hooks included" "just setup (a .vscode/settings.json of yours: give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\" and \"dbt.allowListFolders\": [\".vscode\"])"
       fi
+      # the harmonized line's v4 copies: the dbt extension defers to no state there (lib-dbt.sh, _DBT_EDITOR_NO_STATE)
+      if [ "$V" = v4 ] && _dbt_is_line_h; then
+        G="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; GM="$(git -C "$WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+        [ -n "$G" ] && [ "$(realpath -m -- "$G")" = "$(realpath -m -- "$GM")" ] \
+          || ko "$SHOW is the root of another git repository (${G:-?}), not a worktree of this copy: its branch, tracking and hooks are its own — no push guard there" "move it away, then: just setup"
+        grep -qF '"dbt.flag.noDefer": true' "$W/.vscode/settings.json" 2>/dev/null && grep -qF '"dbt.flag.defer": false' "$W/.vscode/settings.json" \
+          && ok "$SHOW: the dbt extension's deferral is off in a window opened on it (dbt.flag.defer false, dbt.flag.noDefer true)" \
+          || ko "$SHOW: the dbt extension's deferral is NOT off in a window opened on it: it passes --defer by default, and dbt.flag.state as --state" "just setup (a .vscode/settings.json of yours: give it \"dbt.flag.defer\": false, \"dbt.flag.noDefer\": true, \"dbt.flag.state\": \"\")"
+      fi
     else
       ko "$SHOW is not a worktree" "just setup"
     fi
@@ -318,6 +327,11 @@ if dbt_is_fleet; then
   fi
   if P="$(dbt_project_dir global-v4)"; then
     ok "global-v4/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) project(s) as local packages"
+  fi
+  if _dbt_is_line_h && P="$(dbt_project_dir global-v4)"; then
+    grep -qF '"dbt.flag.noDefer": true' "$P/.vscode/settings.json" 2>/dev/null && grep -qF '"dbt.flag.defer": false' "$P/.vscode/settings.json" \
+      && ok "global-v4/: the dbt extension's deferral is off in a window opened on it" \
+      || ko "global-v4/: the dbt extension's deferral is NOT off in a window opened on it" "just setup"
   fi
   for A in global global-v4; do
     P="$(dbt_project_dir "$A")" || continue
@@ -417,9 +431,25 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
   esac
   # a copy that is not the main one: what its dbt extensions may do (lib-dbt.sh, _dbt_editor_cut)
   case "$(dbt_v4_role)" in
-    flux)   info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare outside v4/ (in v1/, v2/ and global/ they would compute in the main copy's space, hooks included); open a v4/<product>/ folder alone" ;;
+    flux)   info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare outside v4/ (in v1/, v2/ and global/ they would compute in the main copy's space, hooks included); open a v4/<product>/ folder alone$(_dbt_is_line_h && echo ", or h.code-workspace (v4/ and global-v4/ only)")" ;;
     orphan|refused) info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare anywhere in this copy (it has no space of its own)" ;;
   esac
+  if _dbt_is_line_h; then
+    # its window: h.code-workspace (lib-dbt.sh, dbt_ensure_line_h_workspace)
+    if [ -f "$(_dbt_line_h_workspace_file)" ] && grep -q '"dbt-project.generated"' "$(_dbt_line_h_workspace_file)"; then
+      ok "flux H: h.code-workspace (generated): open it (File > Open Workspace from File…) rather than the copy's root — v4/ and global-v4/ only, the dbt extension's deferral off"
+    else
+      ko "flux H: no generated h.code-workspace (the harmonized line's window: v4/ and global-v4/ only)" "just setup"
+    fi
+    # settings of a broader scope the folder settings do not override (dbt.environmentVariables: an object VS Code merges),
+    # or that a window on the root reads: the root's (tracked), the machine's (the VS Code server of this container)
+    for F in "$WS/.vscode/settings.json" "$WS/h.code-workspace" "${HOME:-/nonexistent}"/.vscode-server*/data/Machine/settings.json; do
+      [ -f "$F" ] || continue
+      X="$(LC_ALL=C grep -oE '"dbt\.(flag\.[A-Za-z]+|environmentVariables)"[[:space:]]*:[[:space:]]*[^,}]*' "$F" 2>/dev/null \
+        | LC_ALL=C grep -vE '^"dbt\.flag\.(defer"[[:space:]]*:[[:space:]]*false|noDefer"[[:space:]]*:[[:space:]]*true|state"[[:space:]]*:[[:space:]]*"")' | paste -sd' ' -)"
+      [ -z "$X" ] || ko "flux H: ${F#"$WS"/} sets the dbt extension's deferral, state or environment ($X): its buttons could defer to another space's state" "remove it there (the harmonized line's v4 copies turn the deferral off; dbt.environmentVariables is merged, never overridden)"
+    done
+  fi
   case "$(dbt_v4_role)" in flux|orphan|refused)
     ! _dbt_hub_has "$WS/profiles/profiles.yml" "$DBT_GUEST_EDITOR_PROFILE" \
       || ko "profiles/profiles.yml declares '$DBT_GUEST_EDITOR_PROFILE', the profile that cuts the dbt extensions of a copy that is not the main one" "remove it from the hub" ;;

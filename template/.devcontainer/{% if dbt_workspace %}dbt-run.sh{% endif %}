@@ -89,12 +89,19 @@
 #     an orphan copy or a refused declaration writes and replays no lock
 #   - in a copy that is not the main one, compile and show of the main copy's
 #     spaces only for a project whose packages are installed exactly as locked
-#     (a strict reader: dbt v2 would install the rest and run its hooks unread)
+#     (a strict reader: dbt v2 would install the rest and run its hooks unread);
+#     product-new, product-add and referent-add refused (the main copy's: a
+#     repository created from a temporary one, which no hook of the copy sees),
+#     upstream-pull pushes no mirror, dbt login, init and system refused (the
+#     container's state), and --target-path, --log-path, DBT_TARGET_PATH,
+#     DBT_LOG_PATH never inside another working copy (its tools would read
+#     those artifacts as their own)
 #   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
 #     copy, a probe…): never handed to plain dbt v2 — nor one of ANOTHER
 #     workspace of this kind (a flux's working copy): it runs through its own
 #     guard. Outside every project, plain dbt v2 runs an allowlist only
-#     (--version, help, system, login, man, init), and never with
+#     (--version, help, system, login, man, init — system, login and init in
+#     the main copy only, never typed inside another copy), and never with
 #     --project-dir, --profiles-dir, --packages-install-path, DBT_PROJECT_DIR
 #     or DBT_PACKAGES_INSTALL_PATH; a directory of the workspace reached through
 #     a link is routed by its real path
@@ -253,6 +260,22 @@ line_h_guard() {
          "The harmonized line builds and commits its v4-h branches only (never the ISO line's v4)."
 }
 
+# main_only_guard WHAT — (product-new, product-add, referent-add) what only the main copy does: declare a product or a
+# referent in the committed products.conf / referents.conf, create its repository, publish its branches. A copy that
+# is not the main one (dbt_v4_role: a flux, an orphan, a refused declaration) never does — its pre-push hook would not
+# even see it: product_new pushes main, upstream-<branch>, v1 and v2 from a temporary repository of its own. Case: a
+# referent created from the harmonized line's copy would publish the ISO line's v4 from there, declared in that copy's
+# referents.conf only; the ISO line could no longer create it (« already exists »). Refused (exit); the main copy, a
+# single product and a fleet without a v4: nothing changes.
+main_only_guard() {
+  local R
+  R="$(dbt_v4_role)"
+  case "$R" in flux|orphan|refused) ;; *) return 0 ;; esac
+  refuse "$(case "$R" in flux) echo "flux $DBT_V4_FLUX" ;; orphan) echo "orphan copy" ;; *) echo "flux declaration refused" ;; esac): just $1 refused — only the main copy${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)} declares a product or a referent and publishes its branches." \
+         "This copy's products.conf and referents.conf are the main copy's (committed there); a repository created from here would be pushed" \
+         "from a temporary repository, which this copy's push guard never sees. Run it in the main copy."
+}
+
 # check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
 # referent, v1/v2 for every product but a referent
 check_generation() {
@@ -278,9 +301,16 @@ upstream_pull_one() {
     echo "  $P_REMOTE/$BR: ${OLD:+${OLD:0:9} → }${NEW:0:9}"
     git -C "$WS" --no-pager log --oneline -n 20 "${OLD:+$OLD..}$NEW"
   fi
-  echo "→ mirror on $P_HOME: $P_MIRROR"
-  _dbt_git_home -C "$WS" push "$P_HOME" "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
-    || echo "  WARNING: mirror not pushed ($P_HOME unreachable, or upstream history was rewritten)" >&2
+  # the mirror is the main copy's to refresh: a copy that is not the main one (a flux, an orphan) pushes none — an
+  # orphan has no push guard at all, and the mirror is both lines' (it reads upstream, and says so)
+  case "$(dbt_v4_role)" in
+    flux|orphan|refused)
+      echo "→ mirror on $P_HOME ($P_MIRROR): NOT pushed — a copy that is not the main one refreshes no mirror (just upstream-pull ${P_NAME:-} in the main copy${DBT_V4_MAIN_WS:+, $DBT_V4_MAIN_WS})" ;;
+    *)
+      echo "→ mirror on $P_HOME: $P_MIRROR"
+      _dbt_git_home -C "$WS" push "$P_HOME" "refs/remotes/$P_REMOTE/$BR:refs/heads/$P_MIRROR" \
+        || echo "  WARNING: mirror not pushed ($P_HOME unreachable, or upstream history was rewritten)" >&2 ;;
+  esac
   for V in $DBT_WORKTREES; do
     B="$(_dbt_br "$V")"
     git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
@@ -645,6 +675,7 @@ lock_release() {
 product_add() {
   local N="${1:-}" URL="${2:-}" BR="${3:-}" SUB="${4:-}" GL="${5:-}" HOMEU="${6:-}"
   dbt_is_fleet || die "single-product workspace: no products.conf"
+  main_only_guard product-add
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-add <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -672,6 +703,7 @@ product_add() {
 referent_add() {
   local N="${1:-}" HOMEU="${2:-}" SUB="${3:-}" H U
   dbt_is_fleet || die "single-product workspace: no referents.conf"
+  main_only_guard referent-add
   [ -n "$N" ] && [ -n "$HOMEU" ] || die "usage: just referent-add <name> <url of its own repository> [subdir]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid referent name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "'$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -706,6 +738,7 @@ product_new() {
   local N="${1:-}" URL="${2:-}" BR="${3:-main}" SUB="${4:--}" GL="${5:-no}"
   local A ORG SRC REF REPO HOMEU TMP R PROF
   dbt_is_fleet || die "single-product workspace: no products.conf"
+  main_only_guard product-new
   [ -n "$N" ] && [ -n "$URL" ] || die "usage: just product-new <name> <git-url> [branch] [subdir] [global: yes|no]"
   printf '%s' "$N" | grep -Eq "$DBT_PRODUCT_RE" || die "invalid product name '$N': lowercase, digits and '-' (41 characters max)"
   if dbt_use_product "$N"; then die "product '$N' is already declared in .devcontainer/$( [ "${P_REFERENT:-0}" = 1 ] && echo referents.conf || echo products.conf)"; fi
@@ -976,6 +1009,56 @@ hooks_approve() {
   echo "$N hook(s) of ${M#"$WS"/} approved — $(grep -vc '^#' "$HOOKS_APPROVED_FILE") in ${HOOKS_APPROVED_FILE#"$WS"/}"
 }
 
+# _ws_root_of PATH — the root of the workspace of this kind (.devcontainer/dbt-run.sh and .devcontainer/lib-dbt.sh)
+# that PATH lies in, walking up from PATH itself; return 1: none
+_ws_root_of() {
+  local U="${1:-}"
+  while [ -n "$U" ] && [ "$U" != "/" ]; do
+    [ -f "$U/.devcontainer/dbt-run.sh" ] && [ -f "$U/.devcontainer/lib-dbt.sh" ] && { printf '%s' "$U"; return 0; }
+    U="$(dirname "$U")"
+  done
+  return 1
+}
+
+# The variables that set where dbt writes its artifacts or its logs (dbt 2.0.8: DBT_TARGET_PATH, DBT_LOG_PATH,
+# DBT_DOCS_TARGET_PATH — strings of its binary, not tried on the engine): a pattern, read by guest_paths_guard
+DBT_GUEST_PATH_ENV_RE='^_?DBT_[A-Z0-9_]*(TARGET_PATH|LOG_PATH)$'
+
+# guest_paths_guard DIR ARGS… — (run_dbt) a copy that is not the main one (dbt_v4_role: a flux, an orphan) writes its
+# artifacts and its logs nowhere in ANOTHER workspace of this kind — the main copy above all: `just v4 <p> compile
+# --target-path <main copy>/v4/<p>/dbt/target` from the harmonized line would put its manifest where the ISO line's
+# tools read theirs (estimer_build.py, the cost gates). --target-path, --log-path (= or as the next word) and the
+# variables of DBT_GUEST_PATH_ENV_RE, resolved from DIR (where dbt runs; .. and links resolved), may name this copy or
+# a place outside every workspace (/tmp/…, as the fleet's tools do) — never another copy. Refused (exit) otherwise. The
+# main copy, a single product, a fleet without a v4: nothing changes. Not read: a target-path written in a dbt_project.yml.
+guest_paths_guard() {
+  local DIR="$1" A NX="" X N VAL R ROOT ME
+  local -a PS=() BAD=()
+  shift
+  case "$(dbt_v4_role)" in flux|orphan) ;; *) return 0 ;; esac
+  for A in "$@"; do
+    if [ -n "$NX" ]; then PS+=("$NX $A"); NX=""; continue; fi
+    case "$A" in
+      --target-path|--log-path) NX="$A" ;;
+      --target-path=*|--log-path=*) PS+=("${A%%=*} ${A#*=}") ;;
+    esac
+  done
+  for N in $(compgen -e | LC_ALL=C grep -E "$DBT_GUEST_PATH_ENV_RE"); do PS+=("$N ${!N}"); done
+  ME="$(cd "$WS" 2>/dev/null && pwd -P)"
+  for X in ${PS[@]+"${PS[@]}"}; do
+    N="${X%% *}"; VAL="${X#* }"
+    [ -n "$VAL" ] || continue
+    case "$VAL" in /*) R="$VAL" ;; *) R="$DIR/$VAL" ;; esac
+    R="$(realpath -m -- "$R" 2>/dev/null)" || R=""
+    ROOT="$(_ws_root_of "$R")" || continue
+    [ "$(cd "$ROOT" 2>/dev/null && pwd -P)" = "$ME" ] || BAD+=("$N $VAL → $R, in $ROOT")
+  done
+  [ -z "${BAD[*]-}" ] && return 0
+  refuse "$( [ "$(dbt_v4_role)" = flux ] && echo "flux $DBT_V4_FLUX" || echo "orphan copy"): \`dbt …\` refused — it would write its artifacts or its logs in another working copy:" \
+         "${BAD[@]}" \
+         "A copy writes in itself only, or outside every copy (a /tmp/… directory): another copy's target/ is read by that copy's tools as its own."
+}
+
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
   local HOOKS_CHECK="" NEW E
@@ -1030,6 +1113,9 @@ run_dbt() {
   [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
     || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
               "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
+  # a copy that is not the main one: its artifacts and logs never in another copy (guest_paths_guard), resolved from
+  # where dbt runs (below: the project's folder, or the caller's folder inside it)
+  case "$PWD/" in "$PROJ/"*) guest_paths_guard "$PWD" "$@" ;; *) guest_paths_guard "$PROJ" "$@" ;; esac
   # the harmonized line: nothing that copies another space's relations or reads its state, in any space — from the
   # command line, an exported variable (DBT_LINE_H_STATE_ENV_RE) or a settings file (dbt_line_h_state_settings_problem)
   if _dbt_is_line_h; then
@@ -1039,7 +1125,7 @@ run_dbt() {
       || refuse "flux H (the harmonized line): \`dbt $*\` refused — ${STATEARGS[*]}: clone, deferral, state comparison and service-backed" \
                 "dbt State bring another space's relations or state into the line (\`dbt clone --state <the ISO line's manifest>\` would copy" \
                 "ISO tables under $(dbt_v4_prefix)). Refused here — options, their variables (DBT_STATE, DBT_DEFER, DBT_ENGINE_*STATE*…)" \
-                "and the settings files that set them (~/.dbt/user_settings.yml, dbt_project.yml: flags) — until a later change of the" \
+                "and the settings files that set them (~/.dbt/user_settings.yml, dbt_project.yml: flags, dbt-cloud; dbt_cloud.yml) — until a later change of the" \
                 "template opens them."
   fi
 
@@ -1222,6 +1308,13 @@ run_auto() {
       if [ -n "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
         die "${L}: a dbt project of another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')) — this shell's \`dbt\` guards $WS only, and plain dbt v2 would bypass that workspace's guard. Run it there: cd $UP && just v4|v2|… <product> …, or bash $UP/.devcontainer/dbt-run.sh auto … from the project's folder."
       fi
+      # outside its dbt projects, another workspace of this kind still decides what writes the container's state from
+      # there (dbt login, init, system: its guard, below) — never this shell's guard on its behalf
+      if [ -z "$L" ] && [ -f "$UP/.devcontainer/dbt-run.sh" ] && [ -f "$UP/.devcontainer/lib-dbt.sh" ]; then
+        case "${1:-}" in login|init|system)
+          die "\`dbt ${1}\` in another workspace ($UP$( [ -f "$UP/.devcontainer/flux.conf" ] && echo ', a flux')): this shell's \`dbt\` guards $WS only — that workspace's guard decides. Run it there: bash $UP/.devcontainer/dbt-run.sh auto ${1} …" ;;
+        esac
+      fi
       UP="$(dirname "$UP")"
     done
   done
@@ -1244,6 +1337,14 @@ run_auto() {
     case "${1:-}" in
       ""|--version|--help|-h|help|system|login|man|init) ;;
       *) die "\`dbt ${1:-}\` outside every dbt project: plain dbt v2 runs only --version, help, system, login, man and init here. A dbt command runs from its project's folder (v4/<product>/…) or through just v1|v2|v4 <product> … / just global|global-v4 …" ;;
+    esac
+    # login, init and system write the container's state — ~/.dbt (user_settings.yml: `dbt login` offers « flags:
+    # manage_state: true », which every copy reads), the profile hub DBT_PROFILES_DIR names (the main copy's), the engine
+    # ~/.local/bin/dbt: the main copy's (_dbt_owns_container), never a copy that is not the main one (dbt_v4_role)
+    case "${1:-}" in login|init|system)
+      case "$(dbt_v4_role)" in flux|orphan|refused)
+        die "\`dbt ${1}\` refused in this copy ($(dbt_v4_role)${DBT_V4_FLUX:+ $DBT_V4_FLUX}): it writes the container's state (~/.dbt, the profile hub, the engine), which is the main copy's${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)} — run it there, knowingly: ~/.dbt/user_settings.yml is read by every copy." ;;
+      esac ;;
     esac
   fi
   ENGINE="$(dbt_engine v2)"

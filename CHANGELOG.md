@@ -412,7 +412,8 @@ and commit messages; this changelog starts at v0.8.12.
   - **a flux is a clone**: a copy whose git repository is not the `.git` of
     its own folder, or is the main copy's (`git worktree add`), gets nothing
     set up, and every dbt command is refused;
-  - **dbt State everywhere in the harmonized line**: the `state` command,
+  - **dbt State in the harmonized line, from the command line, the
+    environment and the settings files**: the `state` command,
     `--run-cache-mode`, `--task-cache-url`, every exported variable whose
     name reads as state, deferral or a run/task/build cache, and the settings
     files that turn them on (`~/.dbt/user_settings.yml`, the project's and its
@@ -421,6 +422,51 @@ and commit messages; this changelog starts at v0.8.12.
   - a `v4/<p>` folder that is not a worktree of the copy is refused.
   Tests: 1054 offline checks in `scripts/test-lib-dbt.sh` (a copy made by
   `git worktree add` and git-lfs 3.8.0 among them); 244 mutants, all killed (73 new).
+- **The third review of the harmonized line, closed.** Guards once more; the
+  main copy does not change:
+  - **what only the main copy does**: `just product-new`, `product-add` and
+    `referent-add` are refused in any other copy (a flux, an orphan, a refused
+    declaration). `product-new` pushes from a temporary repository, which no
+    hook of the copy sees; a referent created from the harmonized line would
+    have published the ISO line's `v4`. `just upstream-pull` there reads
+    upstream and pushes no mirror. `dbt login`, `init` and `system` (the
+    container's state: `~/.dbt`, the profile hub, the engine) are refused
+    there too — and from the main copy's guard when typed inside another
+    copy;
+  - **the push guard never deletes nor rewrites any branch** (the mirrors
+    `upstream-<branch>`, the line's own coordinator branch, a work branch:
+    fast-forwards only), and never pushes another generation (`v3`, `v5`,
+    `v2-x`…: a change of structure, the user's call);
+  - **a copy's artifacts and logs stay in that copy**: in a copy that is not
+    the main one, `--target-path`, `--log-path`, `DBT_TARGET_PATH`,
+    `DBT_LOG_PATH` (and `DBT_DOCS_TARGET_PATH`) are refused when they resolve
+    — `..` and links included — inside another working copy; `/tmp/…` and the
+    copy itself pass;
+  - **a `v4/<p>` that is the root of another git repository** (a clone of the
+    product put there) is refused, branch and tracking read in the copy;
+  - **an orphan copy opens no v4 copy** (a fresh clone set up before its
+    `flux.conf`: on the ISO branch, with no push guard), and the harmonized
+    line creates its `<p>/v4-h` for a v4 copy already there, so that the
+    `git checkout <p>/v4-h` it advises works;
+  - **dbt State, the forms a line reader cannot read are refused**: a complex
+    key (`? …`), a key written with an escape, a top-level line that is no
+    plain key (a flow map, a tag, content after `---`), the `dbt-cloud:` block
+    of a `dbt_project.yml`, and `~/.dbt/dbt_cloud.yml` or the project's
+    `dbt_cloud.yml` (dbt v2 reads `defer-env-id` there);
+  - **the dbt extension defers to no state in the harmonized line's v4
+    space**: its generated settings (`v4/<p>/`, and `global-v4/`) set
+    `dbt.flag.defer` false, `dbt.flag.noDefer` true and `dbt.flag.state`
+    empty (the extension passes `--defer` by default). `h.code-workspace`, a
+    generated and ignored workspace file, opens the v4 copies and
+    `global-v4/` only; the doctor recommends it over the copy's root, and says
+    where a broader setting (`dbt.flag.*`, `dbt.environmentVariables`) shows
+    up — the root's, the machine's. The user's own settings are not visible
+    from the container;
+  - `just lock-status` and the doctor name `products-h.lock` in the
+    harmonized line.
+  Tests: 1117 offline checks in `scripts/test-lib-dbt.sh` (1054 before); 293
+  mutants, all killed (49 new, 4 rewritten; 6 older ones killed again by
+  witnesses that now read the reason of the refusal).
 
 ### Fixed (on the unreleased dbt-project type)
 

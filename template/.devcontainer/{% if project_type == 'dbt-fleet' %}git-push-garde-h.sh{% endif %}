@@ -28,8 +28,14 @@
 #   - a commit a v4-h update brings that is not in the published v4 (as last fetched) carries a `Redescente:` line: a
 #     redescente belongs to the ISO line — committed on v4, it reaches v4-h by a merge of v4, never on v4-h alone. Case:
 #     the coordinator's committer-redescente.sh, run in this copy, commits « Redescente: Dnnn » on <product>/v4-h and
-#     pushes HEAD:v4-h — from proofs read in a directory every copy of the container shares (/tmp/redescentes-v4/).
-# Any other ref (the harmonized line's own coordinator branch on origin, a tag) is left to git.
+#     pushes HEAD:v4-h — from proofs read in a directory every copy of the container shares (/tmp/redescentes-v4/);
+#   - a ref of another generation is pushed at all: v3, v5, v2-x… (v<digits>, with a suffix or not, <x>/ in front or
+#     not), v4-h aside — a generation opened in a product's repository is a change of structure, the user's call, never
+#     made from here;
+#   - any other branch — the mirrors upstream-<branch> (shared by both lines), the harmonized line's own coordinator
+#     branch on origin, a work branch — is DELETED, or updated by anything but a fast-forward: published history is
+#     never rewritten, from here. Created, or fast-forwarded, it is left to git.
+# A tag is left to git.
 # git-lfs: when the copy's pre-push hook was git-lfs's own (a clone of a repository that tracks files in LFS gets it),
 # lib-dbt.sh puts this guard in its place, and the guard runs it: `git lfs pre-push` on the same arguments and input,
 # once the push is accepted — the LFS objects still leave with their commits. Without git-lfs on the PATH, in a
@@ -37,6 +43,9 @@
 # say « Hook already exists: pre-push »: expected, this guard is that hook.
 # Not covered — a guard against accidents, not against a deliberate bypass: `git push --no-verify`, a hooks path
 # given at push time (-c core.hooksPath=…, GIT_CONFIG_*), `git send-pack`, a push from outside git with the same key.
+# Nor a push from ANOTHER repository — a temporary one, as `just product-new` (main, upstream-<branch>, v1, v2) or the
+# coordinator's outils/ref-new.sh (main, v4) make: this copy's hooks never see it. dbt-run.sh refuses product-new,
+# product-add and referent-add in any copy but the main one; ref-new.sh is the coordinator's to refuse.
 # Offline: it reads this repository only.
 # =============================================================================
 set -u
@@ -63,8 +72,15 @@ while read -r LREF LOID RREF ROID _; do
       continue ;;
     v4-h|*/v4-h) ;;
     *)
-      [ -n "$DEF" ] && [ "$B" = "$DEF" ] \
-        && BAD="$BAD"$'\n'"   $RREF: the default branch of $REMOTE (refs/remotes/$REMOTE/HEAD), the main copy's — the harmonized line never writes it"
+      if [ -n "$DEF" ] && [ "$B" = "$DEF" ]; then
+        BAD="$BAD"$'\n'"   $RREF: the default branch of $REMOTE (refs/remotes/$REMOTE/HEAD), the main copy's — the harmonized line never writes it"
+      elif [[ "$B" =~ ^(.*/)?v[0123456789]+(-[^/]*)?$ ]]; then
+        BAD="$BAD"$'\n'"   $RREF: a branch of another generation (v3, v5, v2-x…): a change of structure, the user's call — never pushed from the harmonized line"
+      elif nul "$LOID"; then
+        BAD="$BAD"$'\n'"   $RREF: deleting a branch — published history is never rewritten from the harmonized line (a mirror upstream-<branch> is both lines')"
+      elif ! nul "$ROID" && { ! git cat-file -e "$ROID^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$ROID" "$LOID" 2>/dev/null; }; then
+        BAD="$BAD"$'\n'"   $RREF: not a fast-forward of ${ROID:0:9} — published history is never rewritten from the harmonized line (fetch, then merge)"
+      fi
       continue ;;
   esac
   P="$(git rev-parse -q --verify "refs/remotes/$REMOTE/${B%-h}^{commit}" 2>/dev/null)"
@@ -92,7 +108,7 @@ done <<< "$IN"
 if [ -n "$BAD" ]; then
   {
     echo "⛔ push refused by the harmonized line's push guard (flux H — .devcontainer/git-push-garde-h.sh, pre-push):$BAD"
-    echo "   This copy's v4 work goes to v4-h only; v1, v2, v4 and the main copy's branch belong to the main copy (the ISO line)."
+    echo "   This copy's v4 work goes to v4-h only; v1, v2, v4, the main copy's branch and the shared mirrors belong to the main copy (the ISO line); nothing is deleted nor rewritten from here."
   } >&2
   exit 1
 fi

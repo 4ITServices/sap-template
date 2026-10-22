@@ -795,14 +795,26 @@ dbt_ensure_worktrees() {
 
     if _dbt_is_worktree "$P"; then
       echo "  ${SHOW} on branch $(git -C "$P" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-      # the harmonized line: a v4 copy on any other branch than its own is refused (never switched for you)
-      [ "$V" != v4 ] || dbt_v4_line_h_branch_problem | while IFS= read -r X; do
-        echo "  WARNING: ${P_TAG}$X — its dbt commands are refused until then"; done
+      # the harmonized line: a v4 copy on any other branch than its own is refused (never switched for you) — its own
+      # branch created here as soon as it is opened where the product's branches live, so that the checkout said works
+      if [ "$V" = v4 ] && _dbt_is_line_h; then
+        _dbt_has_ref "refs/heads/$B" || _dbt_ensure_branch v4 >/dev/null 2>&1 || true
+        dbt_v4_line_h_branch_problem | while IFS= read -r X; do
+          echo "  WARNING: ${P_TAG}$X — its dbt commands are refused until then"; done
+      fi
     else
       if [ -e "$P" ] && [ -n "$(ls -A "$P" 2>/dev/null)" ]; then
         echo "  WARNING: ${SHOW} exists but is not a worktree of this repository."
         echo "           Move it away (nothing is deleted for you), then run: just setup"
         continue
+      fi
+      # an orphan copy (a fresh clone before its flux.conf), or a refused declaration, has no v4 space: no v4 copy is
+      # opened there — on the ISO line's branch, without a push guard, it would push to v4. Those it already has stay.
+      if [ "$V" = v4 ]; then
+        case "$(dbt_v4_role)" in orphan|refused)
+          echo "  ${P_TAG}${SHOW}: not created — this copy has no v4 space ($(dbt_v4_role)): the harmonized line writes .devcontainer/flux.conf (DBT_V4_FLUX=H) BEFORE its first just setup"
+          continue ;;
+        esac
       fi
       _dbt_ensure_branch "$V" || continue
       # A record left by a worktree whose directory is gone (deleted by hand)
@@ -918,14 +930,16 @@ dbt_lock_status() {
   else echo "diverged $L"; fi
 }
 
-# dbt_lock_describe V — the same, as a sentence
+# dbt_lock_describe V — the same, as a sentence (the lock of THIS copy: products.lock, products-h.lock in the
+# harmonized line — DBT_LOCK_FILE)
 dbt_lock_describe() {
-  local ST N L
+  local ST N L LK
+  LK="$(basename "${DBT_LOCK_FILE:-products.lock}")"
   read -r ST N L <<< "$(dbt_lock_status "$1")"
   case "$ST" in
-    nolock)   echo "no products.lock yet" ;;
+    nolock)   echo "no $LK yet" ;;
     missing)  echo "no worktree" ;;
-    unlocked) echo "not in products.lock — just lock" ;;
+    unlocked) echo "not in $LK — just lock" ;;
     unknown)  echo "locked at ${N:0:9}, a commit not fetched here — just sync" ;;
     same)     echo "= lock (${N:0:9})" ;;
     ahead)    echo "$N commit(s) since the lock (${L:0:9}) — just lock once global/ is validated" ;;
@@ -1693,13 +1707,16 @@ DBT_LINE_H_STATE_ARGS="clone state --state --defer --defer-state --favor-state -
 DBT_LINE_H_STATE_ENV_RE='^_?DBT_[A-Z0-9_]*(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'
 
 # The keys of a settings file that turn dbt State, deferral or a state on (snake_case or kebab-case, any case): read
-# where dbt reads flags — under the top-level `flags:` key — and at the top level itself
-_DBT_STATE_KEYS="manage_state state defer defer_state favor_state defer_to_state favor_state_mode artifact_state_path run_cache_mode task_cache_url"
+# where dbt reads flags — under the top-level `flags:` key — and at the top level itself. dbt_cloud: the `dbt-cloud:`
+# block of a dbt_project.yml (project-id, defer-env-id: deferral to a dbt platform environment — dbt 2.0.8's strings)
+_DBT_STATE_KEYS="manage_state state defer defer_state favor_state defer_to_state favor_state_mode artifact_state_path run_cache_mode task_cache_url dbt_cloud"
 
 # _dbt_state_flags_in FILE — the keys of _DBT_STATE_KEYS that FILE (YAML: a dbt_project.yml, a user_settings.yml) sets
 # at its top level or under its top-level `flags:` key, one line each; or one line « a form … not read »: `flags:` given
 # otherwise than as a block or a one-line {…} map (an anchor, an alias, a tag, a multi-line flow map), a merge key
-# (<<) or an alias under it, a tab. Read line by line (LC_ALL=C), never sourced: a `state:` elsewhere (a seed's
+# (<<) or an alias under it, a tab, a complex key (`? …`, anywhere), a key written with an escape (`"fl\x61gs"`), a
+# top-level line that is no plain key (a flow map or sequence, an anchor, an alias, a tag, a block scalar, a
+# directive, content after `---`). Read line by line (LC_ALL=C), never sourced: a `state:` elsewhere (a seed's
 # column_types) is not a flag. Nothing: no such key, or no FILE.
 _dbt_state_flags_in() {
   [ -f "${1:-}" ] || return 0
@@ -1719,10 +1736,13 @@ _dbt_state_flags_in() {
       sub(/[ \t]#.*$/, "", l)
       if (l ~ /^[ \t]*$/) next
       if (l ~ /\t/) { print "a tab: a form not read"; exit }
+      if (l ~ /^[ ]*(-[ ]+)?\?/) { print "a complex key (?): a form not read"; exit }
       if (l ~ /^[^ ]/) {
         f = 0
-        if (l ~ /^(---|\.\.\.)/) next
+        if (l ~ /^(---|\.\.\.)[ ]*$/) next
+        if (l !~ ("^(-[ ]+)?[\"" q "A-Za-z0-9_]")) { print "a top-level line that is no plain key: a form not read (" substr(l, 1, 24) ")"; exit }
         k = l; sub(/^-[ ]*/, "", k); sub(/[ ]*:.*$/, "", k)
+        if (k ~ /\\/) { print "a key written with an escape: a form not read"; exit }
         if (index(keys, " " norm(k) " ")) print norm(k)
         if (norm(k) == "flags") {
           v = l; sub(/^[^:]*:[ ]*/, "", v)
@@ -1737,6 +1757,8 @@ _dbt_state_flags_in() {
         print "flags: a merge key, an anchor or an alias: a form not read"; exit
       }
       k = l; sub(/^[ ]*(-[ ]+)?/, "", k)
+      kk = k; sub(/:([ ].*)?$/, "", kk)
+      if (kk ~ /\\/) { print "flags: a key written with an escape: a form not read"; exit }
       if (k ~ ("^[\"" q "]?[A-Za-z0-9_-]+[\"" q "]?[ ]*:")) { sub(/[ ]*:.*$/, "", k); if (index(keys, " " norm(k) " ")) print "flags: " norm(k) }
       if (l ~ /\{/) flow(l)
     }' "$1"
@@ -1748,6 +1770,11 @@ _dbt_state_flags_in() {
 # each `local:` of its packages.yml or dependencies.yml, each link of its dbt_packages/. Nothing: none does.
 dbt_line_h_state_settings_problem() {
   local P="${1:-}" F X L
+  # dbt Cloud's own settings (dbt 2.0.8 reads ./dbt_cloud.yml or ~/.dbt/dbt_cloud.yml: project-id, defer-env-id — a
+  # deferral to a dbt platform environment): not read here, refused while there
+  for F in "${HOME:-/nonexistent}/.dbt/dbt_cloud.yml" "$P/dbt_cloud.yml"; do
+    { [ -e "$F" ] || [ -L "$F" ]; } && echo "${F#"$DBT_WS"/}: dbt Cloud's settings (project-id, defer-env-id — a deferral to a dbt platform environment), not read here"
+  done
   {
     printf '%s\n' "${HOME:-/nonexistent}/.dbt/user_settings.yml" "$P/dbt_project.yml"
     for F in "$P/packages.yml" "$P/dependencies.yml"; do
@@ -1763,14 +1790,29 @@ dbt_line_h_state_settings_problem() {
   return 0
 }
 
+# _dbt_line_h_checkout_hint — (the harmonized line; after dbt_use_product) how to put the v4 copy on its own branch:
+# `git checkout <product>/v4-h` once the branch exists here (the lifecycle creates it, tracking $P_HOME/$P_HB4, as soon
+# as it is opened there — the copy itself is never switched for you), else how to open it
+_dbt_line_h_checkout_hint() {
+  if _dbt_has_ref "refs/heads/$P_B4"; then
+    printf 'git -C %s checkout %s' "${P_SHOW4%/}" "$P_B4"
+  elif _dbt_has_ref "refs/remotes/$P_HOME/$P_HB4"; then
+    printf 'git -C %s checkout -b %s --track %s/%s' "${P_SHOW4%/}" "$P_B4" "$P_HOME" "$P_HB4"
+  else
+    printf '%s is not opened yet in %s — git push %s %s/%s:refs/heads/%s, then: just setup' "$P_HB4" "${P_HOME_URL:-origin}" "$P_HOME" "$P_HOME" "${P_HB4%-h}" "$P_HB4"
+  fi
+}
+
 # dbt_v4_line_h_branch_problem — (the harmonized line; after dbt_use_product) why the current product's v4 copy is not
-# the harmonized line's, one line; nothing: it is, or there is no v4 copy (yet). It must be on <product>/v4-h ($P_B4),
-# tracking $P_HOME/$P_HB4 — or detached at a commit of <product>/v4-h's own history (a replay: lock-checkout). Refused:
-# the ISO line's <product>/v4 (or any other branch), a detached HEAD elsewhere, <product>/v4-h tracking anything else
-# (its `git push` would go there), a folder there that is not one of this copy's worktrees (a copy of one: its branch
-# is unknown).
+# the harmonized line's, one line; nothing: it is, or there is no v4 copy (yet). It must be a worktree of THIS copy's
+# repository (its git common dir is the copy's: a clone of the product put in its place has a repository, a branch, a
+# tracking and hooks of its own — no push guard), on <product>/v4-h ($P_B4), tracking $P_HOME/$P_HB4 — or detached at a
+# commit of <product>/v4-h's own history (a replay: lock-checkout). Refused: the ISO line's <product>/v4 (or any other
+# branch), a detached HEAD elsewhere, <product>/v4-h tracking anything else (its `git push` would go there), a folder
+# there that is not one of this copy's worktrees (a copy of one, or another repository: its branch is unknown). Branch
+# and tracking are read in the copy itself.
 dbt_v4_line_h_branch_problem() {
-  local W B U C
+  local W B U C G M
   _dbt_is_line_h && dbt_v4_enabled || return 0
   W="$(_dbt_wt v4)"
   if ! _dbt_is_worktree "$W"; then
@@ -1778,18 +1820,24 @@ dbt_v4_line_h_branch_problem() {
       && echo "$(_dbt_show v4) is there but is not a worktree of this copy (git worktree list): its branch is unknown, and the harmonized line builds its own v4-h branches only — move it away, then: just setup"
     return 0
   fi
+  G="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  M="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  if [ -z "$G" ] || [ -z "$M" ] || [ "$(realpath -m -- "$G")" != "$(realpath -m -- "$M")" ]; then
+    echo "$(_dbt_show v4) is the root of another git repository (${G:-?}), not a worktree of this copy's ($M): its branch, its tracking and its hooks are its own (no push guard there) — move it away, then: just setup"
+    return 0
+  fi
   B="$(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null)"
   if [ -z "$B" ]; then
     C="$(git -C "$W" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"
-    [ -n "$C" ] && _dbt_has_ref "refs/heads/$P_B4" && git -C "$DBT_WS" merge-base --is-ancestor "$C" "refs/heads/$P_B4" 2>/dev/null && return 0
-    echo "$(_dbt_show v4) is detached at ${C:0:9}, a commit outside $P_B4's history: the harmonized line works on its own branch ($P_HOME/$P_HB4) — git -C ${P_SHOW4%/} checkout $P_B4"
+    [ -n "$C" ] && _dbt_has_ref "refs/heads/$P_B4" && git -C "$W" merge-base --is-ancestor "$C" "refs/heads/$P_B4" 2>/dev/null && return 0
+    echo "$(_dbt_show v4) is detached at ${C:0:9}, a commit outside $P_B4's history: the harmonized line works on its own branch ($P_HOME/$P_HB4) — $(_dbt_line_h_checkout_hint)"
     return 0
   fi
   if [ "$B" != "$P_B4" ]; then
-    echo "$(_dbt_show v4) is on $B, not on $P_B4: the harmonized line works on its own branch ($P_HOME/$P_HB4), never on the ISO line's — git -C ${P_SHOW4%/} checkout $P_B4"
+    echo "$(_dbt_show v4) is on $B, not on $P_B4: the harmonized line works on its own branch ($P_HOME/$P_HB4), never on the ISO line's — $(_dbt_line_h_checkout_hint)"
     return 0
   fi
-  U="$(git -C "$DBT_WS" rev-parse --abbrev-ref "$P_B4@{upstream}" 2>/dev/null)"
+  U="$(git -C "$W" rev-parse --abbrev-ref "$P_B4@{upstream}" 2>/dev/null)"
   [ "$U" = "$P_HOME/$P_HB4" ] \
     || echo "$P_B4 tracks ${U:-nothing}, not $P_HOME/$P_HB4: its pushes would go elsewhere — git -C ${P_SHOW4%/} branch -u $P_HOME/$P_HB4"
   return 0
@@ -2072,8 +2120,22 @@ _dbt_editor_cut() {
   return 0
 }
 
-# _dbt_editor_settings FILE KIND ALLOW ENVF [WHY] — the generated settings of a window opened on one folder alone; with
-# WHY (_dbt_editor_cut), the dbt extensions cut there. Without WHY, the very bytes written before cuts existed.
+# The harmonized line's settings of the dbt extension (dbtlabsinc.dbt 0.118.0, its package.json): it passes --defer to
+# its commands by default ("dbt.flag.defer": "true"), and the --state of "dbt.flag.state" to them and to its language
+# server. In the harmonized line's v4 space — where clone, --state and --defer are refused on the command line — its
+# deferral is off: "dbt.flag.defer": false (its commands get --no-defer, never --state), "dbt.flag.noDefer": true and
+# "dbt.flag.state": "" (its language server gets --no-defer, never --state). A setting of a broader scope (the root's,
+# the machine's, the user's) is overridden by these; "dbt.environmentVariables" (an object VS Code merges across
+# scopes) is not — the doctor says where it sees one.
+_DBT_EDITOR_NO_STATE='  "dbt-project.line-h-no-state": "the harmonized line: the dbt extension defers to no state here (clone, --state, --defer refused in this line)",
+  "dbt.flag.defer": false,
+  "dbt.flag.noDefer": true,
+  "dbt.flag.state": "",
+'
+
+# _dbt_editor_settings FILE KIND ALLOW ENVF [WHY] [NOSTATE] — the generated settings of a window opened on one folder
+# alone; with WHY (_dbt_editor_cut), the dbt extensions cut there; with NOSTATE (the harmonized line's v4 space), their
+# deferral off (_DBT_EDITOR_NO_STATE). Without WHY nor NOSTATE, the very bytes written before cuts existed.
 _dbt_editor_settings() {
   local F="$1" KIND="$2" ALLOW="$3" ENVF="$4" WHY="${5:-}" CUT=""
   if [ -n "$WHY" ]; then
@@ -2083,6 +2145,7 @@ _dbt_editor_settings() {
   \"dbt.targetName\": \"$DBT_GUEST_EDITOR_PROFILE\",
 "
   fi
+  [ -z "${6:-}" ] || CUT="$CUT$_DBT_EDITOR_NO_STATE"
   mkdir -p "$(dirname "$F")"
   cat > "$F" <<EOF
 {
@@ -2106,7 +2169,7 @@ EOF
 # copy) — generated there only, and removed again (marker keys) once the copy
 # is the main one.
 dbt_ensure_editor_files() {
-  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF ROLE A WHY
+  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF ROLE A WHY NS
   ROLE="$(dbt_v4_role)"
   EXCL="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
   if [ -d "$(dirname "$EXCL")" ]; then
@@ -2145,31 +2208,79 @@ dbt_ensure_editor_files() {
       # window). Rewritten as long as they carry the marker key below.
       F="$WT/.vscode/settings.json"
       WHY="$(_dbt_editor_cut "$V")"
+      NS=""; [ "$V" = v4 ] && _dbt_is_line_h && NS=1
       if [ ! -f "$F" ] || grep -q '"dbt-project.generated"' "$F" 2>/dev/null; then
         if [ "$V" = "v1" ]; then KIND="v1"; ALLOW="[]"; else KIND="v2"; ALLOW='[".vscode"]'; fi
-        _dbt_editor_settings "$F" "$KIND" "$ALLOW" "$ENVF" "$WHY"
+        _dbt_editor_settings "$F" "$KIND" "$ALLOW" "$ENVF" "$WHY" "$NS"
       elif [ -n "$WHY" ] && ! grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$F"; then
         echo "  WARNING: ${P_TAG}$(_dbt_show "$V").vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there — $WHY, their buttons would compute in the main copy's space. Give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\", or remove it, then: just setup"
+      elif [ -n "$NS" ] && ! grep -qF '"dbt.flag.noDefer": true' "$F"; then
+        echo "  WARNING: ${P_TAG}$(_dbt_show "$V").vscode/settings.json, yours (no generated marker), leaves the dbt extension's deferral on in the harmonized line (it passes --defer by default, and dbt.flag.state as --state). Give it \"dbt.flag.defer\": false, \"dbt.flag.noDefer\": true, \"dbt.flag.state\": \"\", or remove it, then: just setup"
       fi
     done
   done
   dbt_use_product "" >/dev/null 2>&1 || true
-  # the assembly projects are folders of this copy (not worktrees): a settings file only where the extensions are cut
+  # the assembly projects are folders of this copy (not worktrees): a settings file only where the extensions are cut,
+  # or (the harmonized line's global-v4/) where their deferral is off
   for A in global global-v4; do
     dbt_is_fleet && [ -f "$DBT_WS/$A/dbt_project.yml" ] || continue
     F="$DBT_WS/$A/.vscode/settings.json"; WHY="$(_dbt_editor_cut "$A")"
+    NS=""; dbt_is_v4 "$A" && _dbt_is_line_h && NS=1
     ENVF="$DBT_WS/profiles/dbt.env"; dbt_is_v4 "$A" && ENVF="$(dbt_v4_env_file)"
-    if [ -n "$WHY" ]; then
+    if [ -n "$WHY$NS" ]; then
       if [ ! -f "$F" ] || grep -q '"dbt-project.generated"' "$F" 2>/dev/null; then
-        _dbt_editor_settings "$F" v2 '[".vscode"]' "$ENVF" "$WHY"
-      elif ! grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$F"; then
+        _dbt_editor_settings "$F" v2 '[".vscode"]' "$ENVF" "$WHY" "$NS"
+      elif [ -n "$WHY" ] && ! grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$F"; then
         echo "  WARNING: $A/.vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there — $WHY. Give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\", or remove it, then: just setup"
+      elif [ -n "$NS" ] && ! grep -qF '"dbt.flag.noDefer": true' "$F"; then
+        echo "  WARNING: $A/.vscode/settings.json, yours (no generated marker), leaves the dbt extension's deferral on in the harmonized line. Give it \"dbt.flag.defer\": false, \"dbt.flag.noDefer\": true, \"dbt.flag.state\": \"\", or remove it, then: just setup"
       fi
-    elif [ -f "$F" ] && grep -q '"dbt-project.generated"' "$F" && grep -q '"dbt-project.guest-cut"' "$F"; then
+    elif [ -f "$F" ] && grep -q '"dbt-project.generated"' "$F" && grep -qE '"dbt-project\.(guest-cut|line-h-no-state)"' "$F"; then
       rm -f "$F"; rmdir "$DBT_WS/$A/.vscode" 2>/dev/null || true
     fi
   done
+  dbt_ensure_line_h_workspace
   return 0
+}
+
+# The harmonized line's VS Code window: h.code-workspace at the root of its copy — generated, ignored (info/exclude),
+# rewritten while it carries the marker key — whose folders are the copy's v4 worktrees and global-v4/ only, the dbt
+# extension's deferral off (_DBT_EDITOR_NO_STATE) and dbt Power User kept out. A window opened on the copy's ROOT reads
+# the tracked root settings, where nothing is cut (v1/, v2/ and global/: the main copy's spaces); this one never shows
+# them. Removed (generated only) once the copy is no longer the harmonized line.
+_dbt_line_h_workspace_file() { printf '%s' "$DBT_WS/h.code-workspace"; }
+dbt_ensure_line_h_workspace() {
+  local F N W EXCL FOLDERS=""
+  F="$(_dbt_line_h_workspace_file)"
+  if ! _dbt_is_line_h; then
+    if [ -f "$F" ] && grep -q '"dbt-project.generated"' "$F"; then rm -f -- "${F:?}"; fi
+    return 0
+  fi
+  if [ -f "$F" ] && ! grep -q '"dbt-project.generated"' "$F"; then
+    echo "  WARNING: h.code-workspace is yours (no generated marker): left as it is — the harmonized line's window should show v4/ and global-v4/ only"
+    return 0
+  fi
+  EXCL="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
+  if [ -d "$(dirname "$EXCL")" ]; then grep -qxF "/h.code-workspace" "$EXCL" 2>/dev/null || echo "/h.code-workspace" >> "$EXCL"; fi
+  for N in $(dbt_members); do
+    dbt_use_product "$N" >/dev/null 2>&1 && dbt_v4_enabled || continue
+    W="$(_dbt_wt v4)"; _dbt_is_worktree "$W" || continue
+    FOLDERS="$FOLDERS"$'\n'"    { \"path\": \"${W#"$DBT_WS"/}\" },"
+  done
+  dbt_use_product "" >/dev/null 2>&1 || true
+  [ -f "$DBT_WS/global-v4/dbt_project.yml" ] && FOLDERS="$FOLDERS"$'\n'"    { \"path\": \"global-v4\" },"
+  FOLDERS="${FOLDERS%,}"
+  cat > "$F" <<EOF
+{
+  "folders": [${FOLDERS}
+  ],
+  "settings": {
+    "dbt-project.generated": "by .devcontainer/lib-dbt.sh — the harmonized line's window (File > Open Workspace from File…), never the copy's root: v4/ and global-v4/ only; remove this key to own the file",
+    "dbt.allowListFolders": [".vscode"],
+$(printf '%s' "$_DBT_EDITOR_NO_STATE" | sed 's/^  /    /; $ s/,$//')
+  }
+}
+EOF
 }
 
 # ~/.bashrc lives in the container filesystem: the block is rewritten on
@@ -2740,7 +2851,8 @@ dbt_process() {
   case "$(dbt_v4_role)" in
     flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})"
              [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes"
-             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git: its v4 worktrees follow <product>/v4-h (v4-h where the products' branches live), no push of it reaches v1, v2, v4 nor the main copy's branch (pre-push guard), its lock is products-h.lock" ;;
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git: its v4 worktrees follow <product>/v4-h (v4-h where the products' branches live), no push of it reaches v1, v2, v4 nor the main copy's branch (pre-push guard), its lock is products-h.lock"
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, its VS Code window: h.code-workspace (the v4 copies and global-v4/ only) — never the copy's root, where the dbt extensions are not cut" ;;
     refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
     orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
   esac
