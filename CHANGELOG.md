@@ -299,6 +299,47 @@ and commit messages; this changelog starts at v0.8.12.
   flux; `DBT_BQ_DATASET_PREFIX_V4` may not hold an `H` segment.
   Tests: 826 offline checks in `scripts/test-lib-dbt.sh`; 7 more
   mutants (103 in all), all killed.
+- **Fluxes, after the review of the reprise.** Four holes closed, one limit
+  said:
+  - **No hook in the main copy's spaces from a copy that is not the main
+    one.** The allowlist of a flux or an orphan let `compile` and `show`
+    through under `v2/` and `global/` — and dbt v2 runs the on-run-start hooks
+    there, which write where the project writes: the main copy's datasets
+    (`DATASET_PREFIX` of `profiles/dbt.env`). `DBT_HOOKS_COMPILE_OK`,
+    `DBT_HOOKS_REVIEWED_V2` and `DBT_HOOKS_REVIEWED` are the main copy's
+    approvals: in a flux or an orphan they are never read there. `compile` and
+    `show` pass only for a project whose packages are installed and that
+    declares no hook at all — in its files, its installed packages'
+    `dbt_project.yml`, or the files of a local package it links
+    (`dbt_hook_sources_deep`: a member's model in `global/`); a link to no
+    directory refuses. `just doctor` says it. The v4 space of a flux keeps its
+    own rules (global-v4 under its proof).
+  - **Guard settings at least as strict as the main copy's.** A flux compares
+    `DBT_SANDBOX_NEVER_BUILD` (every name of the main copy's, maybe more),
+    `DBT_HOOKS_COMPILE_OK` (no name the main copy's does not list),
+    `DBT_HOOKS_REVIEWED`, `DBT_HOOKS_REVIEWED_V2` and `DBT_ALLOW_RUN_OPERATION`
+    (`1` only where the main copy says `1`) with its main copy's `dbt.conf`
+    (`_DBT_FLUX_STRICT`): tighter passes, looser refuses every dbt command — a
+    long-lived flux (the harmonized line) that lags behind a table the main
+    copy has added to `DBT_SANDBOX_NEVER_BUILD` builds nothing until it
+    catches up.
+  - **A flux's hook proof is a file of its own**: `DBT_HOOKS_V4_PROOF` with
+    `-<FLUX>` before the extension (`HOOKS_V4.md` -> `HOOKS_V4-H.md`,
+    `dbt_hooks_v4_proof_path`), read by the guard and the doctor. The main
+    copy's file keeps its one verdict line: the two proofs hold side by side
+    in one tree, the day the harmonized line's branch meets `main`.
+  - **Said: a flux is separated in BigQuery only, not in git.** Its worktrees
+    follow the products' branches the main copy follows (`v4`, `v2`): a
+    convergence committed and pushed from flux `H` would reach the ISO line at
+    its next `just sync`. `just setup` warns and `just doctor` reports it as a
+    problem in flux `H` until the harmonized line has branches of its own;
+    every flux is told to commit nothing on `v2` (dbt v2 `deps` rewrites its
+    `package-lock.yml`).
+  - `DBT_V4_MAIN_WS` empty in a fleet with a v4: the main copy is then an
+    orphan too — no v4 command, and its v1/v2/global build nothing (now said
+    in `dbt.conf`).
+  Tests: 874 offline checks in `scripts/test-lib-dbt.sh`; 18 more mutants
+  (121 in all), all killed.
 
 ### Fixed (on the unreleased dbt-project type)
 

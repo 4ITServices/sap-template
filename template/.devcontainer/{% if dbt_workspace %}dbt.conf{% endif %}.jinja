@@ -81,19 +81,24 @@ DBT_TARGET_NAME="{{ dbt_target_name }}"
 # declared OUTSIDE this file: .devcontainer/flux.conf, one line
 # DBT_V4_FLUX=<A999> (a capital letter, three digits), ignored by git. Its v4/
 # and global-v4/ then write under <DBT_BQ_DATASET_PREFIX_V4>_<A999> only
-# (profiles/v4-<A999>.env), its v1/v2/global build nothing, and this copy never
-# writes there. DBT_V4_FLUX=H is the HARMONIZED line: a long-lived copy whose
-# v4 is this copy's (the ISO line, outputs equal to production) plus one
+# (profiles/v4-<A999>.env), its v1/v2/global build nothing and run no hook
+# (whatever the settings below approve: they are this copy's), and this copy
+# never writes there. DBT_V4_FLUX=H is the HARMONIZED line: a long-lived copy
+# whose v4 is this copy's (the ISO line, outputs equal to production) plus one
 # convergence per deviation, under <DBT_BQ_DATASET_PREFIX_V4>_H — where this
-# copy never writes. Never set DBT_V4_FLUX here: every dbt command would be
-# refused.
+# copy never writes. A flux is separated in BigQuery only, not in git: its
+# worktrees follow the same branches as this copy's. Never set DBT_V4_FLUX
+# here: every dbt command would be refused.
 # The MAIN working copy is NAMED, by its real path in the container (e.g.
 # "/workspaces/<folder>"): the one copy whose v4 writes the main v4 space and
 # that writes the container's state (engines, ~/.bashrc, global git settings).
 # As soon as a v4 is declared, a copy that is neither the main one nor a flux
 # (a clone, a flux whose flux.conf was erased) runs no v4 command, its
-# v1/v2/global build nothing — and empty here, no copy is the main one. A flux
-# reads the main copy's dbt.conf: same sandbox, prefixes and engine pins.
+# v1/v2/global build nothing — and empty here, no copy is the main one: the
+# main copy itself then builds nothing. A flux reads the main copy's dbt.conf:
+# same sandbox, prefixes and engine pins, and guard settings at least as strict
+# (DBT_SANDBOX_NEVER_BUILD, DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED,
+# DBT_HOOKS_REVIEWED_V2, DBT_ALLOW_RUN_OPERATION) — looser refuses every command.
 DBT_V4_MAIN_WS=""
 DBT_V4_PRODUCTS=""
 DBT_BQ_DATASET_PREFIX_V4=""
@@ -124,6 +129,9 @@ DBT_HOOKS_COMPILE_OK=""
 # dbt_hooks_v4_seal: what decides which hooks run there, and what they do).
 # Written by the fleet's own proof tool; a path inside the workspace. Empty:
 # global-v4 stays refused. A `v4/<product>` has no seal: listed, refused.
+# A flux reads its own proof: this path with -<FLUX> before the extension
+# (HOOKS_V4.md -> HOOKS_V4-H.md), its verdict line naming it
+# (VERDICT HOOKS GLOBAL-V4 FLUX <FLUX> : …).
 DBT_HOOKS_V4_PROOF=""
 {%- endif %}
 # Nodes never built in the sandbox, whatever the selection (space-separated,

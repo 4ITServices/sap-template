@@ -371,7 +371,11 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
   case "$(dbt_v4_role)" in
     main)   ok "this copy is the MAIN one (DBT_V4_MAIN_WS=\"$DBT_V4_MAIN_WS\", dbt.conf): the main v4 space, and the container's state (engines, ~/.bashrc, global git settings)" ;;
     flux)   ok "this copy is flux $DBT_V4_FLUX; the main copy is $DBT_V4_MAIN_WS — it keeps the container's state (engines, ~/.bashrc, global git settings)"
-            [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else" ;;
+            [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else"
+            # a flux is separated from the main copy in BigQuery only: its worktrees follow the same branches
+            info "git is shared: this copy's worktrees follow the products' branches the main copy follows — commit nothing on v2 from here (dbt v2 deps rewrites its package-lock.yml)"
+            [ "$DBT_V4_FLUX" != H ] || ko "flux H: the two lines are separated in BigQuery only, not in git — its v4 worktrees follow the products' branch v4, the ISO line's: a convergence committed and pushed from here would reach the ISO line at its next just sync" \
+                                          "commit and push nothing on v4 from this copy until the harmonized line has branches of its own" ;;
     orphan) while IFS= read -r L; do
               ko "ORPHAN copy — $L" "every v4 command is refused and v1/v2/global build nothing until this copy is the main one (DBT_V4_MAIN_WS) or a flux (.devcontainer/flux.conf); then: just setup"
             done < <(dbt_v4_orphan_why) ;;
@@ -440,6 +444,18 @@ check_hooks() {   # check_hooks V PROJECT_DIR
     info "$(label "$V"): packages not installed, their hooks are unknown — $(dbt_just_cmd "$V") deps"
     return
   fi
+  # a copy that is not the main one (a flux, an orphan), in the main copy's spaces: no hook ever runs from here
+  # (dbt-run.sh, guest_hooks_guard) — the approvals of dbt.conf are the main copy's
+  if ! dbt_is_v4 "$V" && case "$(dbt_v4_role)" in flux|orphan) true ;; *) false ;; esac; then
+    HOOKS="$(dbt_hook_sources_deep "$P")"
+    if [ -z "$HOOKS" ]; then
+      ok "$(label "$V"): no hook, neither in the project, nor in its installed packages, nor in a local package it links"
+    else
+      info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+      info "    -> refused in this copy, which is not the main one: $(dbt_hook_commands "$V") — whatever dbt.conf approves (DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2, DBT_HOOKS_REVIEWED are the main copy's)"
+    fi
+    return
+  fi
   HOOKS="$(dbt_hook_sources "$P")"
   if [ -z "$HOOKS" ]; then
     ok "$(label "$V"): no hook, neither in the project nor in its installed packages"
@@ -456,10 +472,10 @@ check_hooks() {   # check_hooks V PROJECT_DIR
           ko "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF names no proof: compile/show refused" "DBT_HOOKS_V4_PROOF in .devcontainer/dbt.conf"
         elif ! S="$(cd "$WS" && dbt_hooks_v4_seal)"; then
           ko "global-v4: its hooks cannot be sealed — compile/show refused" "$(dbt_just_cmd "$V") deps, then prove its hooks again"
-        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}"; then
-          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
+        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then
+          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $(dbt_hooks_v4_proof_path)${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
         else
-          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) — compile/show refused" "prove its hooks again${DBT_V4_FLUX:+ in this flux (its verdict line names it: « $(dbt_hooks_v4_verdict_line '<hex>' "$DBT_V4_FLUX") »)}"
+          ko "global-v4: the proof of its hooks ($(dbt_hooks_v4_proof_path)) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) — compile/show refused" "prove its hooks again${DBT_V4_FLUX:+ in this flux (its own file, its verdict line names it: « $(dbt_hooks_v4_verdict_line '<hex>' "$DBT_V4_FLUX") »)}"
         fi ;;
       *) info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name $N for compile/show$([ "$N" = global-v4 ] && echo ', under a proof of its hooks — DBT_HOOKS_V4_PROOF')): $(dbt_hook_commands "$V")" ;;
     esac

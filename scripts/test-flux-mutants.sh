@@ -5,7 +5,10 @@
 # Pour chaque garde listée ci-dessous (lib-dbt.sh, dbt-run.sh, dbt-doctor.sh :
 # le sous-espace v4 d'une copie de travail, la copie principale nommée, les
 # copies orphelines, l'état du container, la liste blanche hors de l'espace v4,
-# `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
+# aucun hook hors de l'espace v4 d'une copie qui n'est pas la principale, les
+# réglages du garde-fou au moins aussi stricts que ceux de la copie principale,
+# la preuve d'un flux dans son propre fichier, l'alerte git de la ligne
+# harmonisée, `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
 # retirée ou affaiblie — un « mutant » —, puis scripts/test-lib-dbt.sh sur cette
 # copie. Un mutant doit faire échouer au moins un contrôle ; un mutant qui passe
 # est une garde que rien ne teste.
@@ -62,7 +65,7 @@ M = [
   ("garde-flux-muette", "R", '  [ -z "$PB" ] && return 0\n', '  return 0\n'),
   # le flux et sa copie principale : mêmes réglages partagés, une copie principale nommée et présente
   ("flux-principale-ignoree", "L", '  _dbt_flux_main_problem\n  return 0\n', '  return 0\n'),
-  ("flux-principale-egale-toujours", "L", '  [ "$M" = "$H" ] && return 0\n', '  return 0\n'),
+  ("flux-principale-egale-toujours", "L", '  if [ "$M" != "$H" ]; then\n    diff', '  if false; then\n    diff'),
   ("flux-principale-absente-ok", "L", '  [ -f "$C" ] || return 1\n', '  [ -f "$C" ] || return 0\n'),
   ("flux-principale-sans-nom-ok", "L", '  case "${DBT_V4_MAIN_WS:-}" in\n    /*) ;;\n', '  case "/${DBT_V4_MAIN_WS:-}" in\n    /*) ;;\n'),
   # la copie principale nommée ; les orphelines
@@ -165,11 +168,37 @@ M = [
   ("sceau-sans-flux", "L", '  [ -z "$F" ] || E4="profiles/v4-$F.env"\n', '  :\n'),
   ("verdict-sans-flux", "L", '  if [ -n "${3:-}" ]; then [[ "$3" =~ $DBT_V4_FLUX_RE ]] || return 1; X="GLOBAL-V4 FLUX $3"; fi\n', '  :\n'),
   ("verdict-motif-libre", "L", '[[ "$3" =~ $DBT_V4_FLUX_RE ]] || return 1; X=', 'X='),
-  ("garde-fou-verdict-sans-flux", "R", '  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}" \\\n', '  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" \\\n'),
+  ("garde-fou-verdict-sans-flux", "R", '  dbt_hooks_v4_verdict "$WS/$PF" "$S" "${DBT_V4_FLUX:-}" \\\n', '  dbt_hooks_v4_verdict "$WS/$PF" "$S" \\\n'),
+  # les réglages du garde-fou (verrou 3) : au moins aussi stricts dans un flux que dans sa copie principale
+  ("strict-ignore", "L", '  _dbt_flux_strict_problem "$DBT_V4_MAIN_WS"\n}\n', '}\n'),
+  ("strict-never-build-plus-permissif", "L", '    [ -z "$X" ] || echo "DBT_SANDBOX_NEVER_BUILD here lacks', '    true || echo "DBT_SANDBOX_NEVER_BUILD here lacks'),
+  ("strict-compile-ok-plus-permissif", "L", '    [ -z "$X" ] || echo "DBT_HOOKS_COMPILE_OK here names', '    true || echo "DBT_HOOKS_COMPILE_OK here names'),
+  ("strict-ouvertures-plus-permissives", "L", '    [ "${!W:-0}" = 1 ] && [ "$M" != 1 ] \\\n', '    false && [ "$M" != 1 ] \\\n'),
+  ("strict-defauts-herites-du-flux", "L", '    DBT_SANDBOX_NEVER_BUILD=""; DBT_HOOKS_COMPILE_OK=""; DBT_HOOKS_REVIEWED=0; DBT_HOOKS_REVIEWED_V2=0\n    DBT_ALLOW_RUN_OPERATION=0\n', ''),
+  # aucun hook dans les espaces de la copie principale (v1/v2/global) depuis une copie qui ne l'est pas
+  ("invite-hooks-ouverts", "R", '  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && guest_space "$V"; then\n    guest_hooks_guard "$V"\n  elif',
+                                '  if false; then\n    guest_hooks_guard "$V"\n  elif'),
+  ("invite-hooks-orphelin-ouvert", "R", '  case "$(dbt_v4_role)" in flux|orphan) return 0 ;; esac\n  return 1\n}\n', '  case "$(dbt_v4_role)" in flux) return 0 ;; esac\n  return 1\n}\n'),
+  ("invite-hooks-v4-aussi", "R", '  dbt_is_v4 "${1:-}" && return 1\n  case "$(dbt_v4_role)" in flux|orphan) return 0 ;; esac\n',
+                                 '  case "$(dbt_v4_role)" in flux|orphan) return 0 ;; esac\n'),
+  ("invite-hooks-liens-non-lus", "R", '  H="$(dbt_hook_sources_deep "$PROJ")"\n', '  H="$(dbt_hook_sources "$PROJ")"\n'),
+  ("invite-hooks-paquets-non-installes", "R", '  dbt_packages_unchecked "$PROJ" \\\n    && refuse "$WHO:', '  false \\\n    && refuse "$WHO:'),
+  ("invite-hooks-lien-pendant-ignore", "L", '      printf \'%s\\n\' "${L#"$PROJ"/} (a link to no directory: its hooks cannot be read)"; continue\n', '      continue\n'),
+  ("doctor-invite-hooks-comme-principal", "D", '  if ! dbt_is_v4 "$V" && case "$(dbt_v4_role)" in flux|orphan) true ;; *) false ;; esac; then\n',
+                                               '  if false; then\n'),
+  # la preuve des hooks de global-v4 d'un flux : un fichier à lui
+  ("preuve-fichier-commun", "L", '  if [ -z "$P" ] || [ -z "$F" ]; then printf \'%s\' "$P"; return 0; fi\n', '  printf \'%s\' "$P"; return 0\n'),
+  ("preuve-garde-fou-fichier-principal", "R", '  PF="$(dbt_hooks_v4_proof_path)"\n', '  PF="$DBT_HOOKS_V4_PROOF"\n'),
+  ("preuve-doctor-fichier-principal", "D", '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then\n',
+                                           '        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}"; then\n'),
+  # la ligne harmonisée : séparée de la ligne ISO dans BigQuery seulement, pas dans git — dit
+  ("ligne-h-git-doctor-muet", "D", '            [ "$DBT_V4_FLUX" != H ] || ko "flux H: the two lines are separated', '            true || ko "flux H: the two lines are separated'),
+  ("ligne-h-git-setup-muet", "L", '             [ "$DBT_V4_FLUX" != H ] || echo "  WARNING: flux H — separated', '             true || echo "  WARNING: flux H — separated'),
+  ("flux-git-partage-doctor-muet", "D", '            info "git is shared: this copy', '            true "git is shared: this copy'),
   # le doctor
   ("doctor-flux-muet", "D", '  FPB="$(dbt_v4_flux_problem)"\n', '  FPB=""\n'),
-  ("doctor-verdict-sans-flux", "D", '        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}"; then\n',
-                                    '        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S"; then\n'),
+  ("doctor-verdict-sans-flux", "D", '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then\n',
+                                    '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S"; then\n'),
   ("doctor-orpheline-muette", "D", '    orphan) while IFS= read -r L; do\n', '    orphan-jamais) while IFS= read -r L; do\n'),
   ("doctor-role-flux-muet", "D", '    flux)   ok "this copy is flux', '    flux-jamais)   ok "this copy is flux'),
 ]

@@ -282,6 +282,7 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
     && pass "FLEET: dbt.conf documente le flux sans en déclarer (jamais dans dbt.conf)" || bad "FLEET: dbt.conf et le flux"
   grep -qx 'DBT_V4_MAIN_WS=""' "$D/.devcontainer/dbt.conf" && grep -q 'The MAIN working copy is NAMED' "$D/.devcontainer/dbt.conf" \
     && pass "FLEET: dbt.conf documente la copie principale (DBT_V4_MAIN_WS, vide au rendu : à nommer avant toute v4)" || bad "FLEET: dbt.conf sans DBT_V4_MAIN_WS"
+  # shellcheck disable=SC2034  # DBT_WS : lu par le dbt.conf sourcé
   ( set -eu; DBT_WS="$D"; . "$D/.devcontainer/dbt.conf"; [ -z "${DBT_V4_MAIN_WS-x}" ] ) \
     && pass "FLEET: dbt.conf se source sous set -eu, DBT_V4_MAIN_WS vide" || bad "FLEET: dbt.conf ne se source pas proprement"
   sh_ok=1

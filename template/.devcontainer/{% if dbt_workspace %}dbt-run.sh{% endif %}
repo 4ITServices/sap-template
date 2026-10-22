@@ -68,7 +68,9 @@
 #     harmonized line), v4/ and
 #     global-v4/ run on profiles/v4-<FLUX>.env and write only under
 #     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*, byte by byte), and v1/, v2/,
-#     global/ run an allowlist only (parse, ls, compile, show, deps); in the
+#     global/ run an allowlist only (parse, ls, compile, show, deps) and no
+#     hook at all — whatever dbt.conf approves (compile and show only for a
+#     project that declares none: a hook there writes the main copy's space); in the
 #     MAIN copy (DBT_V4_MAIN_WS, its real path), the v4 never writes a flux's
 #     space (<DBT_BQ_DATASET_PREFIX_V4>_<A999> or _H, = or _*, any case: the
 #     ISO line never writes the harmonized line's space); a copy that
@@ -147,7 +149,8 @@ orphan_refuse() {
 # role_guard V ARGS… — (run_dbt, after flux_guard) what a working copy that is not the main one runs (dbt_v4_role):
 #   orphan  nothing in the v4 space (v4/, global-v4/);
 #   flux, orphan  in the v1/v2/global spaces — the main copy's, shared with every other flux — the commands of
-#           DBT_FLUX_READ_CMDS only (dbt_read_only_args: an allowlist; parse, ls, compile, show, deps);
+#           DBT_FLUX_READ_CMDS only (dbt_read_only_args: an allowlist; parse, ls, compile, show, deps), and no hook
+#           (guest_hooks_guard: dbt v2 runs hooks on compile and show);
 #   a flux's v4 space: its own guards (offenders, space_check).
 # The main copy, a single product, a fleet without a v4: nothing changes.
 role_guard() {
@@ -165,6 +168,42 @@ role_guard() {
            "The v1/v2/global spaces belong to the main copy: build, test or operate there. Here, the command first: $DBT_FLUX_READ_CMDS."
   fi
   orphan_refuse "\`dbt $*\` under $(_dbt_show "$V")"
+}
+
+# guest_space V — this working copy is not the main one (a flux, an orphan: dbt_v4_role), and V is one of the main
+# copy's spaces (v1/, v2/, global/: everything but the v4 space)
+guest_space() {
+  dbt_is_v4 "${1:-}" && return 1
+  case "$(dbt_v4_role)" in flux|orphan) return 0 ;; esac
+  return 1
+}
+
+# guest_hooks_guard V — (run_dbt: a command that may run hooks, in guest_space V) a copy that is not the main one runs
+# NO hook in the main copy's spaces. A hook writes where its project writes — there, the main copy's datasets
+# (DATASET_PREFIX of profiles/dbt.env), shared with every other copy: `just v2 <product> compile` in a flux would run
+# that product's on-run-start hooks against the main copy's v2 space. The hook approvals of dbt.conf —
+# DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 (.devcontainer/hooks.approved), DBT_HOOKS_REVIEWED — are the main copy's:
+# they are never read here. A command of the allowlist that runs hooks (dbt v2: compile, show) passes only for a project
+# whose packages are installed and that declares no hook at all — in its files, its installed packages, or the files of
+# a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
+guest_hooks_guard() {
+  local V="$1" WHO H
+  if [ "$(dbt_v4_role)" = flux ]; then WHO="flux $DBT_V4_FLUX"; else WHO="orphan copy"; fi
+  dbt_packages_unchecked "$PROJ" \
+    && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed:" \
+              "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"
+  H="$(dbt_hook_sources_deep "$PROJ")"
+  [ -z "$H" ] && return 0
+  {
+    echo "⛔ $WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` refused under $(_dbt_show "$V") — it would run this project's hooks, and they would write"
+    echo "   where the project writes: the main copy's space (DATASET_PREFIX=${DATASET_PREFIX:-?}), shared with every other copy."
+    echo "   A copy that is not the main one runs no hook outside its v4 space: DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 and"
+    echo "   DBT_HOOKS_REVIEWED are the main copy's approvals, never this copy's. Declared in (under ${PROJ#"$WS"/}/):"
+    printf '%s\n' "$H" | head -n 12 | sed 's/^/     /'
+    [ "$(printf '%s\n' "$H" | wc -l)" -gt 12 ] && echo "     … ($(printf '%s\n' "$H" | wc -l) files)"
+    echo "   Here: parse or ls (no hook runs). Compile or show it in the main copy${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)}."
+  } >&2
+  exit 1
 }
 
 # check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
@@ -787,12 +826,12 @@ hooks_compile_ok() {
 # hooks_v4_proof_ok NAME — a name of the v4 space listed in DBT_HOOKS_COMPILE_OK: the v4 has no approved-hooks list, so
 # its compile/show runs only while the proof of its hooks (DBT_HOOKS_V4_PROOF, a file of the workspace) holds for the
 # files on disk — its one verdict line carries the seal the guard recomputes here (dbt_hooks_v4_seal,
-# dbt_hooks_v4_verdict). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
+# dbt_hooks_v4_verdict; in a flux, its own file: dbt_hooks_v4_proof_path). Refused (exit): a v4/<product> (no seal of its own), an argument the seal cannot see (UNSEALED,
 # collected by run_dbt: --vars overrides the vars of the sealed dbt_project.yml — elementary's disable_* among them —,
 # --profile or DBT_PROFILE another profile than the sealed one), no proof named, a state that cannot be sealed, a proof
 # whose seal no longer matches.
 hooks_v4_proof_ok() {
-  local NAME="$1" S
+  local NAME="$1" S PF
   [ "$NAME" = global-v4 ] \
     || refuse "$NAME is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own (only global-v4 has one):" \
               "\`dbt ${CMD_HOOKS:-compile}\` refused. Remove it from DBT_HOOKS_COMPILE_OK (.devcontainer/dbt.conf)."
@@ -809,13 +848,15 @@ hooks_v4_proof_ok() {
     || refuse "global-v4: its hooks cannot be sealed — a package declared in a form the seal does not read, a link or a special" \
               "file in macros/, vendor/ or an installed package, or dbt_packages/ not exactly what package-lock.yml locks:" \
               "\`dbt ${CMD_HOOKS:-compile}\` refused. Install its packages (no hook runs): $JCMD deps; then prove its hooks again."
-  # a proof holds for one flux only (or for the main copy only): its verdict line names the flux, and the seal covers it
-  dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}" \
-    || refuse "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) —" \
+  # a proof holds for one flux only (or for the main copy only): it is a file of its own (dbt_hooks_v4_proof_path), its
+  # verdict line names the flux, and the seal covers it
+  PF="$(dbt_hooks_v4_proof_path)"
+  dbt_hooks_v4_verdict "$WS/$PF" "$S" "${DBT_V4_FLUX:-}" \
+    || refuse "global-v4: the proof of its hooks ($PF) does not hold for the files on disk (seal now $S${DBT_V4_FLUX:+, flux $DBT_V4_FLUX}) —" \
               "something that decides which hooks run, or what they do, changed since it was written, or it has no single" \
               "verdict line « $(dbt_hooks_v4_verdict_line '<hex>' "${DBT_V4_FLUX:-}") »: \`dbt ${CMD_HOOKS:-compile}\` refused." \
-              "Prove its hooks again (the tool that writes $DBT_HOOKS_V4_PROOF$( [ -n "${DBT_V4_FLUX:-}" ] && echo ", in this flux's copy")), then compile."
-  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF${DBT_V4_FLUX:+, flux $DBT_V4_FLUX})" >&2
+              "Prove its hooks again (the tool that writes $PF$( [ -n "${DBT_V4_FLUX:-}" ] && echo ", in this flux's copy: DBT_HOOKS_V4_PROOF with -$DBT_V4_FLUX")), then compile."
+  echo "· hooks: global-v4 — the proof of its hooks holds (seal $S, $PF${DBT_V4_FLUX:+, flux $DBT_V4_FLUX})" >&2
 }
 
 # DBT_HOOKS_REVIEWED_V2 — the v2 worktrees and global/ only (v1 keeps the origin's hooks; the v4 space has no
@@ -922,7 +963,10 @@ run_dbt() {
            "Read the macro first; to allow it, set DBT_ALLOW_RUN_OPERATION=1 in .devcontainer/dbt.conf."
   fi
 
-  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
+  # a copy that is not the main one, in the main copy's spaces: no hook, whatever dbt.conf approves (guest_hooks_guard)
+  if [ -n "$CMD_HOOKS$CMD_WRITE" ] && guest_space "$V"; then
+    guest_hooks_guard "$V"
+  elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_compile_ok "$V"; then
     echo "· hooks: \`dbt $CMD_HOOKS\` allowed for $(hooks_compile_name "$V") (DBT_HOOKS_COMPILE_OK in dbt.conf)" >&2
   elif [ -n "$CMD_HOOKS$CMD_WRITE" ] && [ "${DBT_HOOKS_REVIEWED:-0}" != "1" ] && hooks_v2_ok "$V"; then
     HOOKS_CHECK=1   # against the approved hooks, once the manifest is fresh (below)

@@ -45,7 +45,7 @@
 # line) —, never by dbt.conf nor by an exported variable. Its
 # v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
 # profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
-# flux, not the v1/v2/global spaces (no build there). The MAIN copy is named,
+# flux, not the v1/v2/global spaces (no build, no hook there). The MAIN copy is named,
 # never guessed: DBT_V4_MAIN_WS (dbt.conf) is its real path, and it is never a
 # flux. In a fleet with a v4, a copy that is neither the main one nor a flux (a
 # clone, a flux whose flux.conf was erased by `git clean -X`) has no v4 space
@@ -1323,13 +1323,22 @@ _dbt_under_v4() {
 #     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX>, never committed either) and write under that prefix (= or _*) only;
 #   - v1/, v2/ and global/ build nothing (their spaces belong to the main copy): only the commands of
 #     DBT_FLUX_READ_CMDS run there — parse, ls, compile, show, deps (dbt_read_only_args, dbt-run.sh);
-#   - its dbt.conf gives the main copy's sandbox, prefixes and engine pins (_DBT_FLUX_SHARED), read from the main
-#     copy's dbt.conf (DBT_V4_MAIN_WS), or every dbt command is refused (_dbt_flux_main_problem);
+#   - its dbt.conf gives the main copy's sandbox, prefixes and engine pins (_DBT_FLUX_SHARED), and guard settings at
+#     least as strict as the main copy's (_DBT_FLUX_STRICT: DBT_SANDBOX_NEVER_BUILD, the hook approvals,
+#     DBT_ALLOW_RUN_OPERATION), read from the main copy's dbt.conf (DBT_V4_MAIN_WS), or every dbt command is refused
+#     (_dbt_flux_main_problem);
+#   - no hook runs in its v1/, v2/, global/ (dbt-run.sh, guest_hooks_guard): whatever dbt.conf approves there is the
+#     main copy's;
 #   - its `just setup` sets up this copy only: the container's state — engines, ~/.bashrc, the global git settings —
 #     stays the main copy's (_dbt_owns_container);
 #   - the seal of global-v4's hook proof covers profiles/v4-<FLUX>.env (its path, its prefix) instead of
-#     profiles/v4.env, and the verdict line names the flux: a proof holds for one flux only (dbt_hooks_v4_seal,
-#     dbt_hooks_v4_verdict).
+#     profiles/v4.env, the verdict line names the flux, and the proof is a file of its own, DBT_HOOKS_V4_PROOF with
+#     -<FLUX> before its extension: a proof holds for one flux only, and the main copy's stays where it is
+#     (dbt_hooks_v4_seal, dbt_hooks_v4_verdict, dbt_hooks_v4_proof_path).
+# What a flux does NOT separate: git. Its worktrees follow the same branches of the products as the main copy's (v4,
+# v2): a commit pushed from a flux reaches the main copy at its next `just sync` — the harmonized line's convergences
+# would reach the ISO line. Until the harmonized line has branches of its own, nothing is committed on v4 from flux H
+# (just doctor says so), nor on v2 from any flux (dbt v2 deps rewrites package-lock.yml there).
 # Without flux.conf, in the MAIN copy — the one DBT_V4_MAIN_WS (dbt.conf) names by its real path — nothing changes,
 # but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or
 # <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*): the main copy's v4 — the ISO line — never writes the harmonized line's.
@@ -1457,22 +1466,66 @@ dbt_v4_role() {
 # dbt.conf says otherwise would carve its space from another layout, or ask for engines it does not get.
 _DBT_FLUX_SHARED="DBT_BQ_PROJECT DBT_BQ_DATASET_PREFIX DBT_BQ_DATASET_PREFIX_V4 DBT_V4_MAIN_WS DBT_V1_PINS DBT_V2_VERSION"
 
-# _dbt_conf_values DIR — the values of _DBT_FLUX_SHARED that DIR/.devcontainer/dbt.conf gives, from their defaults
-# (dbt_load_conf), one NAME=VALUE per line; return 1: no such file. Sourced in a subshell: nothing leaks here.
+# The guard settings a flux may only TIGHTEN, read from the main copy's dbt.conf too (_dbt_flux_strict_problem): the
+# write guard and the hooks (verrou 3 of a fleet). A flux never builds a node the main copy never builds
+# (DBT_SANDBOX_NEVER_BUILD: every name of the main copy's, maybe more), never opens a hook the main copy keeps closed
+# (DBT_HOOKS_COMPILE_OK: no name the main copy's does not list; DBT_HOOKS_REVIEWED, DBT_HOOKS_REVIEWED_V2: 1 only where
+# the main copy says 1), never runs a macro the main copy refuses (DBT_ALLOW_RUN_OPERATION: likewise). A flux that
+# lives long, on a branch of its own (the harmonized line), may lag behind its main copy: tighter passes, looser
+# refuses every dbt command — e.g. a table the main copy has added to DBT_SANDBOX_NEVER_BUILD since.
+_DBT_FLUX_STRICT="DBT_SANDBOX_NEVER_BUILD DBT_HOOKS_COMPILE_OK DBT_HOOKS_REVIEWED DBT_HOOKS_REVIEWED_V2 DBT_ALLOW_RUN_OPERATION"
+
+# _dbt_conf_values DIR [NAMES] — the values of NAMES (default: _DBT_FLUX_SHARED) that DIR/.devcontainer/dbt.conf gives,
+# from their defaults (dbt_load_conf), one NAME=VALUE per line; return 1: no such file. Sourced in a subshell: nothing
+# leaks here, and nothing of this shell leaks there (every name of _DBT_FLUX_SHARED and _DBT_FLUX_STRICT is reset).
 _dbt_conf_values() {
   local C="${1:-}/.devcontainer/dbt.conf"
   [ -f "$C" ] || return 1
   (
+    _DBT_CV_NAMES="${2:-$_DBT_FLUX_SHARED}"; readonly _DBT_CV_NAMES
     DBT_BQ_PROJECT=""; DBT_BQ_DATASET_PREFIX=""; DBT_BQ_DATASET_PREFIX_V4=""; DBT_V4_MAIN_WS=""; DBT_V1_PINS=""
     DBT_V2_VERSION="latest"
+    DBT_SANDBOX_NEVER_BUILD=""; DBT_HOOKS_COMPILE_OK=""; DBT_HOOKS_REVIEWED=0; DBT_HOOKS_REVIEWED_V2=0
+    DBT_ALLOW_RUN_OPERATION=0
     # shellcheck disable=SC1090
     . "$C" >/dev/null 2>&1
-    for V in $_DBT_FLUX_SHARED; do printf '%s=%s\n' "$V" "${!V:-}"; done
+    for V in $_DBT_CV_NAMES; do printf '%s=%s\n' "$V" "${!V:-}"; done
   )
 }
 
+# _dbt_kv NAME < NAME=VALUE lines — the VALUE of NAME (the first line of it)
+_dbt_kv() { LC_ALL=C awk -v n="${1:-}" 'index($0, n "=") == 1 { print substr($0, length(n) + 2); exit }'; }
+
+# _dbt_flux_strict_problem MAIN — (a flux) the settings of _DBT_FLUX_STRICT where this copy's dbt.conf is looser than
+# the main copy's (MAIN/.devcontainer/dbt.conf), one reason per line; nothing: as strict, or stricter
+_dbt_flux_strict_problem() {
+  local S M W X
+  local -a WL=()
+  S="$(_dbt_conf_values "${1:-}" "$_DBT_FLUX_STRICT")" || return 0
+  # the lists are split into words, never globbed (read -a): a name is compared as written
+  M="$(_dbt_kv DBT_SANDBOX_NEVER_BUILD <<< "$S")"
+  if [ "$M" != "${DBT_SANDBOX_NEVER_BUILD:-}" ]; then
+    read -r -a WL <<< "$M"
+    X=""; for W in ${WL[@]+"${WL[@]}"}; do case " ${DBT_SANDBOX_NEVER_BUILD:-} " in *" $W "*) ;; *) X="$X $W" ;; esac; done
+    [ -z "$X" ] || echo "DBT_SANDBOX_NEVER_BUILD here lacks what the main copy's names ($1:$X): a flux never builds a node the main copy never builds — add them to .devcontainer/dbt.conf (or bring this copy up to date with the main copy)"
+  fi
+  M="$(_dbt_kv DBT_HOOKS_COMPILE_OK <<< "$S")"
+  if [ "$M" != "${DBT_HOOKS_COMPILE_OK:-}" ]; then
+    read -r -a WL <<< "${DBT_HOOKS_COMPILE_OK:-}"
+    X=""; for W in ${WL[@]+"${WL[@]}"}; do case " $M " in *" $W "*) ;; *) X="$X $W" ;; esac; done
+    [ -z "$X" ] || echo "DBT_HOOKS_COMPILE_OK here names what the main copy's does not ($X, not listed in $1): a flux never opens a hook the main copy keeps closed — remove them from .devcontainer/dbt.conf"
+  fi
+  for W in DBT_HOOKS_REVIEWED DBT_HOOKS_REVIEWED_V2 DBT_ALLOW_RUN_OPERATION; do
+    M="$(_dbt_kv "$W" <<< "$S")"
+    [ "${!W:-0}" = 1 ] && [ "$M" != 1 ] \
+      && echo "$W=1 here, '$M' in the main copy's dbt.conf ($1): a flux never opens what the main copy keeps closed — set it back to $M"
+  done
+  return 0
+}
+
 # _dbt_flux_main_problem — (a flux) why its main copy does not vouch for it, one reason per line: no main copy named,
-# the main copy not there, or a shared setting (_DBT_FLUX_SHARED) that differs between the two dbt.conf
+# the main copy not there, a shared setting (_DBT_FLUX_SHARED) that differs between the two dbt.conf, or a guard
+# setting (_DBT_FLUX_STRICT) looser here than there
 _dbt_flux_main_problem() {
   local M H V
   case "${DBT_V4_MAIN_WS:-}" in
@@ -1484,11 +1537,13 @@ _dbt_flux_main_problem() {
     return 0
   fi
   H="$(for V in $_DBT_FLUX_SHARED; do printf '%s=%s\n' "$V" "${!V:-}"; done)"
-  [ "$M" = "$H" ] && return 0
-  diff <(printf '%s\n' "$H") <(printf '%s\n' "$M") 2>/dev/null | LC_ALL=C sed -nE 's/^< ([A-Z0-9_]+)=(.*)$/\1 \2/p' \
-    | while read -r V X; do
-        echo "$V differs from the main copy's ($DBT_V4_MAIN_WS: '$(printf '%s\n' "$M" | LC_ALL=C sed -n "s/^$V=//p")', here: '$X'): a flux shares its sandbox, prefixes and engines with the main copy — align .devcontainer/dbt.conf"
-      done
+  if [ "$M" != "$H" ]; then
+    diff <(printf '%s\n' "$H") <(printf '%s\n' "$M") 2>/dev/null | LC_ALL=C sed -nE 's/^< ([A-Z0-9_]+)=(.*)$/\1 \2/p' \
+      | while read -r V X; do
+          echo "$V differs from the main copy's ($DBT_V4_MAIN_WS: '$(printf '%s\n' "$M" | LC_ALL=C sed -n "s/^$V=//p")', here: '$X'): a flux shares its sandbox, prefixes and engines with the main copy — align .devcontainer/dbt.conf"
+        done
+  fi
+  _dbt_flux_strict_problem "$DBT_V4_MAIN_WS"
 }
 
 # _dbt_flux_vestiges — the fluxes, other than its own, this copy shows traces of: a profiles/v4-<A999>.env or
@@ -1939,6 +1994,25 @@ dbt_hook_sources() {
   return 0
 }
 
+# dbt_hook_sources_deep PROJECT_DIR — dbt_hook_sources, plus the files of every LOCAL package the project links in
+# dbt_packages/ (a member of an assembly, a vendored package), as dbt_packages/<package>/<file>: a hook declared in a
+# member's model is read too, where dbt_hook_sources reads a package's dbt_project.yml only. A link that resolves to no
+# directory is listed as such (its hooks cannot be read). For the copies that are not the main one (dbt-run.sh,
+# guest_hooks_guard), where any hook refuses: fail-closed.
+dbt_hook_sources_deep() {
+  local PROJ="${1:-}" L T F
+  [ -d "$PROJ" ] || return 0
+  dbt_hook_sources "$PROJ"
+  for L in "$PROJ"/dbt_packages/* "$PROJ"/dbt_modules/*; do
+    [ -L "$L" ] || continue
+    if ! T="$(readlink -f -- "$L" 2>/dev/null)" || [ ! -d "$T" ]; then
+      printf '%s\n' "${L#"$PROJ"/} (a link to no directory: its hooks cannot be read)"; continue
+    fi
+    dbt_hook_sources "$T" | while IFS= read -r F; do printf '%s\n' "${L#"$PROJ"/}/$F"; done
+  done
+  return 0
+}
+
 # dbt_hook_prints MANIFEST — one line per hook dbt would run from this manifest:
 #   <fingerprint> <TAB> <unique_id> <TAB> <kind>   (kind: pre-hook, post-hook, operation)
 # The fingerprint covers the hook's text AND where each source() it names resolves: the same text writes
@@ -2091,6 +2165,23 @@ dbt_hooks_v4_verdict() {
 # of the fleet prints, and what dbt_hooks_v4_verdict accepts
 dbt_hooks_v4_verdict_line() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${2:+ FLUX $2}" "${1:-}"; }
 
+# dbt_hooks_v4_proof_path [FLUX] — the proof of global-v4's hooks THIS copy reads, from the workspace root: the main
+# copy's is DBT_HOOKS_V4_PROOF; a flux's (FLUX, default DBT_V4_FLUX) is its own file, the same path with -<FLUX> before
+# the extension of its last component (docs/global-v4/HOOKS_V4.md -> docs/global-v4/HOOKS_V4-H.md; no extension:
+# -<FLUX> appended). Each verdict needs ONE verdict line in its file (dbt_hooks_v4_verdict): the harmonized line's
+# proof written into the main copy's file would refuse the main copy's compile the day the two branches meet. Empty
+# while DBT_HOOKS_V4_PROOF is.
+dbt_hooks_v4_proof_path() {
+  local P="${DBT_HOOKS_V4_PROOF:-}" F="${1-${DBT_V4_FLUX:-}}" D="" B
+  if [ -z "$P" ] || [ -z "$F" ]; then printf '%s' "$P"; return 0; fi
+  case "$P" in */*) D="${P%/*}/" ;; esac
+  B="${P##*/}"
+  case "$B" in
+    ?*.*) printf '%s%s-%s.%s' "$D" "${B%.*}" "$F" "${B##*.}" ;;
+    *)    printf '%s%s-%s' "$D" "$B" "$F" ;;
+  esac
+}
+
 # -----------------------------------------------------------------------------
 # Lifecycle entry point
 # -----------------------------------------------------------------------------
@@ -2171,7 +2262,8 @@ dbt_process() {
   _dbt_load_token
   case "$(dbt_v4_role)" in
     flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})"
-             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes" ;;
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes"
+             [ "$DBT_V4_FLUX" != H ] || echo "  WARNING: flux H — separated from the ISO line in BigQuery only, not in git: its v4 worktrees follow the products' branch v4, the ISO line's. Commit and push nothing on v4 from this copy until the harmonized line has branches of its own" ;;
     refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
     orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
   esac

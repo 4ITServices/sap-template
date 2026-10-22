@@ -1575,6 +1575,88 @@ mv "$MAINW/.devcontainer/dbt.conf" "$W/main-dbtconf"
 O="$(FRUN v4 delta parse)"; has "$O" "has no .devcontainer/dbt.conf" && ! has "$O" "ARGS=" && pass "flux : la copie principale absente (pas de dbt.conf) → toute commande refusée" || bad "flux sans copie principale ($O)"
 mv "$W/main-dbtconf" "$MAINW/.devcontainer/dbt.conf"
 
+echo "== flux : les réglages du garde-fou (verrou 3) au moins aussi stricts que ceux de la copie principale =="
+# un flux qui vit longtemps (la ligne harmonisée) peut retarder sur sa copie principale : plus strict passe, plus
+# permissif refuse toute commande dbt — ex. une table que la copie principale a ajoutée depuis à DBT_SANDBOX_NEVER_BUILD
+# strict VAR PRINCIPAL FLUX refus|accepte — VAR vaut PRINCIPAL dans le dbt.conf de la copie principale (« - » : absent),
+# FLUX dans celui du flux
+strict() { local V="$1" M="$2" F="$3" E="$4" O
+  cp "$FW/.devcontainer/dbt.conf" "$W/strict-fw"; cp "$MAINW/.devcontainer/dbt.conf" "$W/strict-main"
+  sed -i "/^$V=/d" "$FW/.devcontainer/dbt.conf" "$MAINW/.devcontainer/dbt.conf"
+  [ "$M" = - ] || echo "$V=\"$M\"" >> "$MAINW/.devcontainer/dbt.conf"
+  echo "$V=\"$F\"" >> "$FW/.devcontainer/dbt.conf"
+  O="$(FRUN v4 delta parse)"
+  if [ "$E" = refus ]; then
+    has "$O" "cannot be trusted" && has "$O" "$V" && ! has "$O" "ARGS=" \
+      && pass "flux : $V « $F », copie principale « $M » — plus permissif : toute commande refusée" || bad "flux : $V « $F » / « $M » accepté ($O)"
+  else
+    grep -q 'PFX=JDOE_V4_D005$' <<<"$O" && pass "flux : $V « $F », copie principale « $M » — aussi strict, ou plus : accepté" || bad "flux : $V « $F » / « $M » refusé ($O)"
+  fi
+  cp "$W/strict-fw" "$FW/.devcontainer/dbt.conf"; cp "$W/strict-main" "$MAINW/.devcontainer/dbt.conf"; }
+strict DBT_SANDBOX_NEVER_BUILD "delta.a" "" refus
+strict DBT_SANDBOX_NEVER_BUILD "delta.a delta.b" "delta.b" refus
+strict DBT_SANDBOX_NEVER_BUILD "delta.a" "delta.b delta.a" accepte
+strict DBT_SANDBOX_NEVER_BUILD "" "delta.a" accepte
+strict DBT_HOOKS_COMPILE_OK "" "global-v4" refus
+strict DBT_HOOKS_COMPILE_OK - "global-v4" refus
+strict DBT_HOOKS_COMPILE_OK "global-v4" "global-v4 v4/delta" refus
+strict DBT_HOOKS_COMPILE_OK "global-v4 delta" "global-v4" accepte
+strict DBT_HOOKS_COMPILE_OK "global-v4" "" accepte
+for V in DBT_HOOKS_REVIEWED DBT_HOOKS_REVIEWED_V2 DBT_ALLOW_RUN_OPERATION; do
+  strict "$V" 0 1 refus; strict "$V" - 1 refus; strict "$V" 1 0 accepte; strict "$V" 1 1 accepte
+done
+cp "$MAINW/.devcontainer/dbt.conf" "$W/strict-main"; echo 'DBT_SANDBOX_NEVER_BUILD="delta.a"' >> "$MAINW/.devcontainer/dbt.conf"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "❌ flux D005: DBT_SANDBOX_NEVER_BUILD here lacks what the main copy's names ($MAINW: delta.a)" && pass "…et doctor le dit (la table que la copie principale ne construit jamais)" || bad "doctor : réglage plus permissif ($(grep -i 'NEVER_BUILD' <<<"$O"))"
+O="$(STUB_LS_FILE="$W/ls-v4ok.jsonl" FRUN v4 delta build -s a)"; has "$O" "cannot be trusted" && ! has "$O" "ARGS=" && pass "…\`v4 delta build -s a\` refusé avant toute résolution" || bad "build sous un réglage plus permissif ($O)"
+cp "$W/strict-main" "$MAINW/.devcontainer/dbt.conf"
+
+echo "== flux : aucun hook dans les espaces de la copie principale (v1/v2/global), quoi qu'approuve dbt.conf =="
+# dbt v2 exécute les on-run-start au compile et au show. Dans un flux, ceux de v2/ ou de global/ écriraient l'espace de
+# la copie principale (DATASET_PREFIX=JDOE) : refusés, même listés dans DBT_HOOKS_COMPILE_OK, sous DBT_HOOKS_REVIEWED_V2
+# ou DBT_HOOKS_REVIEWED — les approbations de la copie principale, jamais celles d'une autre copie
+printf "{{ config(post_hook='select 1') }}\nselect 1\n" > "$FW/v2/delta/dbt/models/hooked.sql"
+cp "$FW/.devcontainer/dbt.conf" "$W/dbtconf-avant-hooks"
+printf 'x\ty\tz\n' > "$FW/.devcontainer/hooks.approved"
+printf 'DBT_HOOKS_COMPILE_OK="delta global"\nDBT_HOOKS_REVIEWED_V2=1\n' >> "$FW/.devcontainer/dbt.conf"
+ASFLUX
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+for C in "v2 delta compile" "v2 delta show -s a" "v2 delta --quiet compile -s a"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN $C)"
+  has "$O" "flux D005: \`dbt" && has "$O" "runs no hook outside its v4 space" && has "$O" "models/hooked.sql" && has "$O" "DATASET_PREFIX=JDOE)" && ! has "$O" "ARGS=" \
+    && pass "flux : \`$C\` refusé — le hook de delta écrirait l'espace de la copie principale (DBT_HOOKS_COMPILE_OK=delta, DBT_HOOKS_REVIEWED_V2=1 n'y font rien)" || bad "flux : $C sous hooks ($O)"
+done
+for C in "v2 delta parse" "v2 delta ls" "v2 delta deps"; do
+  # shellcheck disable=SC2086
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN $C)"; ! has "$O" "⛔" && { has "$O" "ARGS=" || has "$O" "JDOE_DELTA__X"; } && pass "…\`$C\` accepté (aucun hook ne tourne)" || bad "flux : $C sous hooks refusé ($O)"
+done
+O="$(FRUN v2 beta compile)"; has "$O" "ARGS=compile" && ! has "$O" "⛔" && pass "flux : \`v2 beta compile\` accepté (beta ne déclare aucun hook)" || bad "flux : compile sans hook ($O)"
+O="$(FRUN v1 delta compile)"; has "$O" "ARGS=compile" && pass "flux : \`v1 delta compile\` accepté (dbt Core n'exécute aucun hook au compile)" || bad "flux : v1 compile ($O)"
+printf "{{ config(pre_hook='select 1') }}\nselect 1\n" > "$FW/v2/alpha/dbt/models/hooked_a.sql"
+O="$(FRUN global compile)"; has "$O" "runs no hook outside its v4 space" && has "$O" "dbt_packages/alpha/models/hooked_a.sql" && ! has "$O" "ARGS=" \
+  && pass "flux : \`global compile\` refusé — le hook d'un modèle d'un paquet local lié (alpha) est lu, DBT_HOOKS_COMPILE_OK=global n'y fait rien" || bad "flux : global compile sous hooks ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "-> refused in this copy, which is not the main one" && has "$O" "dbt_packages/alpha/models/hooked_a.sql" && pass "doctor (flux) : les hooks de v2/delta et de global/ refusés ici, quoi qu'approuve dbt.conf" || bad "doctor : hooks d'une copie de flux ($(grep -A1 'hooks in' <<<"$O" | head -6))"
+NOFLUX; ASMAIN
+O="$(FRUN v2 delta compile)"; has "$O" "ARGS=compile" && has "$O" "allowed for delta (DBT_HOOKS_COMPILE_OK" && pass "copie principale : \`v2 delta compile\` accepté sous DBT_HOOKS_COMPILE_OK=delta, comme avant" || bad "principale : v2 compile ($O)"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && pass "copie principale : \`global compile\` accepté sous DBT_HOOKS_COMPILE_OK=global, comme avant" || bad "principale : global compile ($O)"
+SETMAIN ""
+O="$(FRUN v2 delta compile)"; has "$O" "orphan copy: \`dbt compile\` refused under v2/delta/" && ! has "$O" "ARGS=" && pass "copie orpheline : \`v2 delta compile\` refusé (hooks), même sous DBT_HOOKS_COMPILE_OK=delta" || bad "orpheline : v2 compile sous hooks ($O)"
+ASFLUX; FLUX 'DBT_V4_FLUX=D005\n'
+rm -f "$FW/v2/alpha/dbt/models/hooked_a.sql"
+O="$(FRUN global compile)"; has "$O" "ARGS=compile" && pass "flux : sans ce hook, \`global compile\` accepté" || bad "flux : global compile sans hook ($O)"
+ln -sfn ../../v2/nulle-part "$FW/global/dbt_packages/fantome"
+O="$(FRUN global compile)"; has "$O" "dbt_packages/fantome (a link to no directory" && ! has "$O" "ARGS=" && pass "flux : un paquet local lié à rien : \`global compile\` refusé (ses hooks ne se lisent pas)" || bad "flux : lien pendant ($O)"
+rm -f "$FW/global/dbt_packages/fantome"
+mv "$FW/global/dbt_packages" "$W/global-pkgs"; mkdir "$FW/global/dbt_packages"
+O="$(FRUN global compile)"; has "$O" "flux D005" && has "$O" "packages are not installed" && ! has "$O" "ARGS=" && pass "flux : paquets de global/ non installés : \`global compile\` refusé (leurs hooks ne se lisent pas)" || bad "flux : paquets non installés ($O)"
+rmdir "$FW/global/dbt_packages"; mv "$W/global-pkgs" "$FW/global/dbt_packages"
+printf 'DBT_HOOKS_REVIEWED=1\n' >> "$FW/.devcontainer/dbt.conf"; ASFLUX
+O="$(FRUN v2 delta compile)"; has "$O" "runs no hook outside its v4 space" && ! has "$O" "ARGS=" && pass "flux : \`v2 delta compile\` refusé même sous DBT_HOOKS_REVIEWED=1" || bad "flux : REVIEWED=1 ouvre les hooks ($O)"
+cp "$W/dbtconf-avant-hooks" "$FW/.devcontainer/dbt.conf"; ASFLUX
+rm -f "$FW/.devcontainer/hooks.approved" "$FW/v2/delta/dbt/models/hooked.sql"
+
 echo "== flux : un nom de flux qui se lirait comme un paquet de l'espace v4 =="
 mkdir -p "$FW/global-v4/dbt_packages/d005_utils"
 O="$(FRUN v4 delta parse)"; has "$O" "flux D005 reads as a package of the v4 space (d005_utils)" && ! has "$O" "ARGS=" && pass "paquet d005_utils dans global-v4 : le flux D005 est refusé" || bad "collision nom de paquet ($O)"
@@ -1617,6 +1699,7 @@ ASFLUX; FLUX 'DBT_V4_FLUX=H\n'; O="$(life "$FW" start)"
   && grep -qx 'DATASET_PREFIX=JDOE_V4_H' "$FW/profiles/v4-H.env" && test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4-H.env")" \
   && pass "flux.conf DBT_V4_FLUX=H, la ligne harmonisée : JDOE_V4_H, profiles/v4-H.env, le .env de v4/delta y pointe" || bad "flux H ($(LIBF dbt_v4_prefix) $(LIBF dbt_v4_role))"
 has "$O" "flux H: the HARMONIZED line" && pass "…et just setup le dit" || bad "setup muet sur la ligne harmonisée ($(grep -i flux <<<"$O" | head -3))"
+has "$O" "WARNING: flux H — separated from the ISO line in BigQuery only, not in git" && pass "…et qu'elle n'est séparée de la ligne ISO que dans BigQuery, pas dans git (branche v4 commune)" || bad "setup muet sur git et la ligne harmonisée ($(grep -i 'flux H' <<<"$O" | head -3))"
 O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "just v4 delta (ligne harmonisée) → DATASET_PREFIX=JDOE_V4_H" || bad "v4 delta sous H ($O)"
 for X in JDOE_V4_H_DELTA__X JDOE_V4_H JDOE_V4_H_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
   O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "ligne harmonisée : écriture v4 sous $X acceptée" || bad "ligne harmonisée : $X refusé ($O)"
@@ -1640,6 +1723,8 @@ rmdir "$FW/global-v4/dbt_packages/hr"; rmdir "$FW/global-v4/dbt_packages" 2>/dev
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
 has "$O" "✅ this copy is flux H; the main copy is $MAINW" && has "$O" "flux H is the HARMONIZED line" && has "$O" "✅ profiles/v4-H.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_H" \
   && pass "doctor : la ligne harmonisée (flux H), sa copie principale, son environnement" || bad "doctor H ($(grep -iE 'flux|this copy' <<<"$O"))"
+has "$O" "❌ flux H: the two lines are separated in BigQuery only, not in git" && has "$O" "commit and push nothing on v4 from this copy" \
+  && pass "doctor : la ligne harmonisée n'est pas séparée dans git — dit comme un problème (rien à committer sur v4 d'ici)" || bad "doctor H et git ($(grep -i 'git' <<<"$O" | head -3))"
 printf 'VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau 0123456789abcdef0123\n' > "$W/verdict-h.md"
 [ "$(LIBF dbt_hooks_v4_verdict_line abc H)" = "VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau abc" ] \
   && LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 H >/dev/null && ! LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 >/dev/null \
@@ -1694,19 +1779,35 @@ printf 'packages:\n  - local: ../v4/delta/dbt\n' > "$G/packages.yml"
 printf 'packages:\n- local: ../v4/delta/dbt\n  name: delta\nsha1_hash: 0\n' > "$G/package-lock.yml"
 ln -sfn ../../v4/delta/dbt "$G/dbt_packages/delta"
 printf 'DBT_HOOKS_COMPILE_OK="global-v4"\nDBT_HOOKS_V4_PROOF="docs/hooks-v4.md"\n' >> "$FW/.devcontainer/dbt.conf"
-VLINE() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${2:+ FLUX $2}" "$1" > "$FW/docs/hooks-v4.md"; }
+ASFLUX   # la copie principale aux mêmes réglages (un flux ne peut que les resserrer)
+# VLINEAT FICHIER SCEAU [FLUX] — une ligne de verdict dans FICHIER ; VLINE SCEAU [FLUX] — dans la preuve que CETTE copie
+# lit (dbt_hooks_v4_proof_path : docs/hooks-v4.md pour la copie principale, docs/hooks-v4-<FLUX>.md pour un flux)
+VLINEAT() { printf 'VERDICT HOOKS GLOBAL-V4%s : PREUVE OK ; TÉMOINS OK ; sceau %s\n' "${3:+ FLUX $3}" "$2" > "$FW/$1"; }
+VLINE() { VLINEAT "$(LIBF dbt_hooks_v4_proof_path)" "$@"; }
 NOFLUX; SM="$(SEAL)"
 FLUX 'DBT_V4_FLUX=D005\n'; S5="$(SEAL)"
 FLUX 'DBT_V4_FLUX=D006\n'; S6="$(SEAL)"
 FLUX 'DBT_V4_FLUX=D005\n'
 [[ "$S5" =~ ^[0-9a-f]{20}$ ]] && [ "$S5" != "$SM" ] && [ "$S5" != "$S6" ] && pass "sceau : un par flux (principal $SM, D005 $S5, D006 $S6)" || bad "sceaux ($SM $S5 $S6)"
 [ "$(LIBF dbt_hooks_v4_verdict_line abc D005)" = "VERDICT HOOKS GLOBAL-V4 FLUX D005 : PREUVE OK ; TÉMOINS OK ; sceau abc" ] && pass "ligne de verdict d'un flux : « VERDICT HOOKS GLOBAL-V4 FLUX D005 : … »" || bad "ligne de verdict ($(LIBF dbt_hooks_v4_verdict_line abc D005))"
-VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $S5, docs/hooks-v4.md, flux D005" && pass "flux D005, preuve du flux D005 : compile accepté, et dit pourquoi" || bad "preuve du flux ($O)"
+[ "$(LIBF dbt_hooks_v4_proof_path)" = docs/hooks-v4-D005.md ] && pass "flux D005 : sa preuve est un fichier à lui, docs/hooks-v4-D005.md (DBT_HOOKS_V4_PROOF, -D005 avant l'extension)" || bad "chemin de la preuve du flux ($(LIBF dbt_hooks_v4_proof_path))"
+# shellcheck disable=SC2034  # lues par dbt_hooks_v4_proof_path, dans le même sous-shell
+PP() { ( source "$FW/.devcontainer/lib-dbt.sh"; DBT_HOOKS_V4_PROOF="$1"; DBT_V4_FLUX="$2"; dbt_hooks_v4_proof_path ); }
+[ "$(PP docs/flotte/HOOKS_V4.md H)" = docs/flotte/HOOKS_V4-H.md ] && [ "$(PP a.b/preuve D005)" = a.b/preuve-D005 ] && [ "$(PP x.y.md D005)" = x.y-D005.md ] \
+  && [ "$(PP .preuve H)" = .preuve-H ] && [ "$(PP docs/p.md '')" = docs/p.md ] && [ -z "$(PP '' H)" ] \
+  && pass "dbt_hooks_v4_proof_path : -<FLUX> avant l'extension du dernier composant (un point dans un dossier ne compte pas) ; sans flux, DBT_HOOKS_V4_PROOF ; vide, vide" || bad "dbt_hooks_v4_proof_path ($(PP a.b/preuve D005) $(PP x.y.md D005) $(PP .preuve H))"
+VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $S5, docs/hooks-v4-D005.md, flux D005" && pass "flux D005, preuve du flux D005 (son fichier) : compile accepté, et dit pourquoi" || bad "preuve du flux ($O)"
 VLINE "$S5"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict sans « FLUX D005 » (celui de la copie principale), même au sceau du flux : refusé" || bad "verdict principal dans le flux ($O)"
 VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la copie principale : refusée dans le flux" || bad "preuve principale dans le flux ($O)"
 VLINE "$S5" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…verdict d'un autre flux (D006) au sceau de D005 : refusé" || bad "verdict d'un autre flux ($O)"
 VLINE "$S6" D006; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D006 : refusée dans D005" || bad "preuve d'un autre flux ($O)"
-VLINE "$S5" D005
+# chaque copie lit SA preuve : la bonne ligne du flux, mais dans le fichier de la copie principale, ne vaut rien ici ;
+# et les deux preuves tiennent ensemble dans un même arbre (le jour où la branche du flux revient sur main)
+rm -f "$FW/docs/hooks-v4-D005.md"; VLINEAT docs/hooks-v4.md "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && has "$O" "docs/hooks-v4-D005.md" && ! has "$O" "ARGS=compile" \
+  && pass "…la ligne du flux D005 au bon sceau, mais dans le fichier de la copie principale (docs/hooks-v4.md) : refusée, et son fichier nommé" || bad "preuve du flux dans le fichier principal ($O)"
+VLINEAT docs/hooks-v4.md "$SM"; VLINE "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "…la preuve de la copie principale et celle du flux, chacune dans son fichier : le flux compile sous la sienne" || bad "deux preuves, le flux ($O)"
 cp "$FW/profiles/v4.env" "$W/v4-env-sauve"; echo "ELEMENTARY=1" >> "$FW/profiles/v4.env"
 [ "$(SEAL)" = "$S5" ] && pass "sceau du flux : indépendant de profiles/v4.env (l'environnement principal, que le flux ne lit pas)" || bad "sceau du flux et v4.env"
 cp "$W/v4-env-sauve" "$FW/profiles/v4.env"
@@ -1714,18 +1815,22 @@ echo "ELEMENTARY=1" >> "$FW/profiles/v4-D005.env"
 O="$(FRUN global-v4 compile)"; [ "$(SEAL)" != "$S5" ] && has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…profiles/v4-D005.env retouché : sceau changé, compile refusé" || bad "env du flux hors du sceau ($O)"
 cp "$W/v4-D005.env" "$FW/profiles/v4-D005.env"
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
-has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (seal $S5, docs/hooks-v4.md, flux D005)" && pass "doctor : preuve du flux valable, dite" || bad "doctor preuve flux ($(grep global-v4 <<<"$O"))"
+has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (seal $S5, docs/hooks-v4-D005.md, flux D005)" && pass "doctor : preuve du flux valable (son fichier), dite" || bad "doctor preuve flux ($(grep global-v4 <<<"$O"))"
 has "$O" "✅ flux D005 (.devcontainer/flux.conf)" && has "$O" "✅ profiles/v4-D005.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_D005" && pass "doctor : le flux, son environnement" || bad "doctor flux ($(grep -i flux <<<"$O"))"
 has "$O" "✅ this copy is flux D005; the main copy is $MAINW" && pass "doctor : la copie de flux et sa copie principale, dites" || bad "doctor rôle flux ($(grep -i 'this copy' <<<"$O"))"
+has "$O" "git is shared: this copy's worktrees follow the products' branches the main copy follows" && ! has "$O" "flux H: the two lines" \
+  && pass "doctor (flux D005) : git partagé avec la copie principale, dit ; pas l'alerte de la ligne harmonisée" || bad "doctor flux et git ($(grep -i 'git' <<<"$O" | head -3))"
 has "$O" "✅ v4/delta/: .env -> profiles/v4-D005.env" && has "$O" "✅ global-v4/.env -> profiles/v4-D005.env" && pass "doctor : .env de la v4 et de global-v4 sur l'environnement du flux" || bad "doctor .env flux ($(grep '\.env' <<<"$O"))"
 FLUX 'DBT_V4_FLUX=H\n'; life "$FW" start >/dev/null; SH="$(SEAL)"
 [[ "$SH" =~ ^[0-9a-f]{20}$ ]] && [ "$SH" != "$SM" ] && [ "$SH" != "$S5" ] && [ "$SH" != "$S6" ] && pass "sceau de la ligne harmonisée (flux H) : le sien ($SH)" || bad "sceau H ($SH)"
-VLINE "$SH" H; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SH, docs/hooks-v4.md, flux H" && pass "ligne harmonisée, sa preuve (VERDICT … FLUX H) : compile de global-v4 accepté" || bad "preuve H ($O)"
+VLINE "$SH" H; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SH, docs/hooks-v4-H.md, flux H" && pass "ligne harmonisée, sa preuve (VERDICT … FLUX H) : compile de global-v4 accepté" || bad "preuve H ($O)"
 VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la ligne ISO (la copie principale) : refusée dans la ligne harmonisée" || bad "preuve ISO sous H ($O)"
 VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D005 : refusée dans la ligne harmonisée" || bad "preuve D005 sous H ($O)"
 FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null
 NOFLUX; ASMAIN; life "$FW" start >/dev/null
-O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "flux retiré : la preuve du flux D005 ne vaut pas pour la copie principale" || bad "preuve du flux hors du flux ($O)"
+O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SM, docs/hooks-v4.md)" && pass "flux retiré : la copie principale compile sous SA preuve (docs/hooks-v4.md), restée là pendant le flux" || bad "deux preuves, la principale ($O)"
+VLINEAT docs/hooks-v4.md "$S5" D005
+O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D005 recopiée dans son fichier : refusée" || bad "preuve du flux hors du flux ($O)"
 [ "$(SEAL)" = "$SM" ] && pass "…et le sceau principal est celui d'avant le flux" || bad "sceau principal changé"
 VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && pass "…sa propre preuve : compile accepté" || bad "preuve principale ($O)"
 O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "✅ no flux (.devcontainer/flux.conf absent)" && has "$O" "✅ this copy is the MAIN one" && pass "doctor : copie principale, pas de flux, dit" || bad "doctor sans flux ($(grep -iE 'flux|this copy' <<<"$O"))"
