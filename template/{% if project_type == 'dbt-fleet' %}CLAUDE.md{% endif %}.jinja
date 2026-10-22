@@ -1,0 +1,223 @@
+# {{ project_name }} — Instructions Claude Code (SYNKRONIC)
+
+## Contexte Projet
+
+**Nom** : `{{ project_name }}`
+**Type** : `dbt-fleet`
+**Description** : {{ project_description }}
+**Stack** : une flotte de data products dbt BigQuery — dbt Core commun (venv `/opt/dbt-v1`) et dbt v2 (`~/.local/bin/dbt`), gcloud/bq, uv, just
+
+## Ce que contient ce dépôt
+
+Plusieurs projets dbt repris de leurs dépôts d'origine (déclarés dans
+`.devcontainer/products.conf`), chacun en deux versions, plus un projet qui
+réunit leurs v2 pour le refactoring croisé :
+
+| Dossier | Branche | Moteur | Rôle |
+|---|---|---|---|
+| `v1/<produit>/` | `<produit>/v1` | dbt Core commun — `dbt1` | le projet d'origine : la référence |
+| `v2/<produit>/` | `<produit>/v2` | dbt v2 — `dbtf` | la migration, puis le refactoring du produit |
+| `global/` | `main` | dbt v2 | les v2 marqués `GLOBAL` en packages locaux, et les modèles partagés |
+
+**Ce dépôt est un coordinateur.** Sa branche `main` porte l'outillage,
+`products.conf` et `global/` — l'effort du dbt global. Les branches de chaque
+produit vivent dans **le dépôt dédié du produit** (colonne `HOME` de
+`products.conf`, remote `home-<produit>`) ; les worktrees `v1/<produit>/` et
+`v2/<produit>/` les suivent : un `git push` depuis un worktree part dans le
+dépôt du produit, jamais ici. Chaque worktree a son propre `git status`.
+
+Branches, dans le dépôt de chaque produit :
+
+- `upstream-<branche>` — le miroir exact du dépôt d'origine (lu ici par le remote `up-<produit>`, en lecture seule) ; `just upstream-pull <produit>` le rafraîchit ;
+- `v1` — part du miroir ; n'y committer que ce que la migration exige côté 1.x ;
+- `v2` — part de `v1` ; migration, puis refactoring.
+
+Localement, elles s'appellent `<produit>/v1` et `<produit>/v2`. Un produit dont
+`HOME` vaut `-` garde ses branches dans ce dépôt (`<produit>/…` sur `origin`).
+
+Le dépôt d'un produit reste utilisable seul (gabarit `dbt-project`, son propre
+container), et une autre session y travaille souvent. Les deux voient les mêmes
+branches : `just sync` (aussi lancé à chaque démarrage) récupère les dépôts des
+produits et avance les worktrees propres ; un worktree modifié, en avance ou
+divergent est signalé, jamais touché.
+
+**Le canal avec les produits, c'est git.** `just sync` affiche les sujets des
+commits reçus — lis-les, c'est par leurs messages que les sessions des produits
+parlent — et nomme les branches d'un dépôt de produit que ce coordinateur ne
+suit pas : une `v3` ouverte là-bas est un changement de structure à remonter à
+l'utilisateur, pas à absorber. Dans l'autre sens, le `CLAUDE.md` d'un produit a
+une section « Coordination » qui explique ce dépôt et ses règles (réponse copier
+`fleet_coordinator`, posée par `just product-new` ; pour un produit plus ancien,
+`copier update --data fleet_coordinator=<url de ce dépôt>` dans son dépôt).
+
+**Une seule version de dbt Core pour toutes les v1** (`DBT_V1_PINS`, dans
+`.devcontainer/dbt.conf`) : dbt Power User n'a qu'un interpréteur par fenêtre.
+Un produit qui épingle une autre version tourne quand même sur celle-ci ;
+`just doctor` liste les montées de version à committer dans `<produit>/v1`, une
+fois le SQL compilé vérifié identique.
+
+## Règles absolues
+
+1. **Aucun push vers un dépôt d'origine.** Les verrous git (le verrou 4, ci-dessous)
+   arrêtent tout push **par git** ; ils ne voient pas ssh lancé hors de git avec la
+   même clé : n'écrire vers une origine par aucun moyen, ne jamais retirer ni
+   contourner un verrou. Livrer une branche à l'origine est une décision humaine,
+   prise hors session.
+2. **BigQuery — écriture confinée au bac à sable**
+{%- if bq_sandbox_project %} : le seul projet où l'on écrit est `{{ bq_sandbox_project }}`
+{%- if bq_dataset_prefix %}, dans des datasets préfixés `{{ bq_dataset_prefix }}`{% endif %}.
+{%- else %} déclaré dans `.devcontainer/dbt.conf` (`DBT_BQ_PROJECT`). Tant qu'il est
+   vide, aucune écriture n'est possible.
+{%- endif %}
+   Partout ailleurs : lecture seule stricte (`SELECT`, `bq ls/show`, `--dry_run`,
+   `INFORMATION_SCHEMA`). Les droits IAM du compte ne protègent de rien : c'est
+   cette règle qui protège. En cas de doute sur la cible d'une écriture : demander.
+3. **dbt s'invoque par `just v1 <produit> …`, `just v2 <produit> …`, `just global …`**
+   (ou `dbt` depuis le dossier du projet, qui passe par le même garde-fou).
+   `dbt1` et `dbtf` sont les moteurs bruts, sans garde-fou d'écriture.
+4. **Un moteur par worktree** : jamais dbt v2 dans `v1/`, jamais dbt Core dans
+   `v2/` ni dans `global/` — chacun écrit son `target/manifest.json`.
+5. **`v1/<produit>/` reste fidèle à l'origine.** Le refactoring se fait dans
+   `v2/` et `global/`.
+6. **Un modèle partagé vit dans `global/`**, pas dans un produit : un produit ne
+   lit jamais le code d'un autre produit par un chemin de fichier. Déplacer un
+   modèle d'un produit vers `global/` = deux commits dans deux dépôts (le retrait
+   dans le dépôt du produit, l'ajout ici) : même identifiant dans les deux messages.
+7. Ne jamais committer `.env`, `.mcp.json`, `*.pem`.
+8. Activer TOUJOURS après `setObjectSource` (MCP ADT).
+
+## Les verrous (ne jamais en retirer un)
+
+| # | Verrou | Où |
+|---|---|---|
+| 1 | `DBT_PROFILES_DIR` → `profiles/` pour TOUT processus du container : les `profiles.yml` embarqués dans les produits (ils visent les vrais projets) ne sont jamais lus. Profil absent du hub = erreur, pas repli. | `devcontainer.json` (`containerEnv`), `~/.bashrc` |
+| 2 | Hub `profiles/profiles.yml` : un profil par nom demandé par les produits et par `global/`, tous vers le bac à sable. Le cycle de vie ajoute ceux qui manquent. | `profiles/` |
+| 3 | Garde-fou de `dbt-run.sh` : une écriture exige une sélection dont chaque nœud se résout dans le bac à sable, et dont aucun n'est dans `DBT_SANDBOX_NEVER_BUILD` (tables aux lignes protégées en production) ; dans `global/`, aucune table écrite par deux nœuds. `run-operation` refusé. Tant que `DBT_HOOKS_REVIEWED` vaut 0, toute commande qui exécuterait des hooks (projet ou packages) est refusée — sous dbt v2, `compile` et `show` compris — sauf, pour ces deux seules commandes, les produits listés dans `DBT_HOOKS_COMPILE_OK` (hooks relus ; ceux d'elementary exigent `ELEMENTARY=0`). `DBT_HOOKS_REVIEWED_V2=1` ouvre la v2 (et `global/`) — pas la v1 — aux seuls hooks approuvés : `.devcontainer/hooks.approved`, écrit par `just hooks-approve` (texte du hook et résolution de ses sources) ; un hook nouveau ou modifié est refusé. | `.devcontainer/dbt-run.sh`, `dbt.conf` |
+| 4 | Aucun push **par git** vers un hôte d'origine : `pushInsteadOf` global (13 préfixes par hôte, pour `git push`) + `remote.up-<produit>.pushurl DISABLED` + `core.sshCommand` = la garde ssh (`.devcontainer/git-ssh-garde.sh`, copiée dans `~/.local/libexec/` : un `git checkout` d'un commit antérieur ne l'emporte pas) — vers un hôte reconnu par son nom (autre utilisateur, casse, point final, alias ssh lu par `ssh -G` : HostName, HostKeyAlias, ProxyJump, ProxyCommand, CanonicalDomains) ou, pour une écriture, par son adresse (IP sous toute écriture, `::ffff:`, autre nom du serveur), seules les lectures `git-upload-pack` / `git-upload-archive` passent, `git send-pack` compris ; sans terminal, en `BatchMode` + pour un hôte lu en ssh, pas de https : un proxy mort (`http.<url>.proxy` = 127.0.0.1:9), puis un quitteur (aucune fenêtre). La lecture et GitHub ne sont pas touchés. **Limites** (« aucun push par git » n'est pas « aucun push ») : la clé qui écrit reste à la portée de tout processus — ssh hors de git, `personal_access_token` de gitlab-shell puis un push https avec ce jeton —, un tunnel pur, https sur un autre port, un contournement délibéré de la configuration (`GIT_SSH_COMMAND`, `-c core.sshCommand=…`, `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, `NO_PROXY`, `ext::`) ; seul un accès en lecture seule côté serveur les couvre. `just doctor` éprouve chaque couche hors ligne et signale ce qu'il voit dans l'environnement. | `.devcontainer/lib-dbt.sh`, `git-ssh-garde.sh` |
+
+Les boutons Run/Build/Preview des extensions dbt n'ont que les verrous 1, 2 et 4.
+
+## Le verrou (`.devcontainer/products.lock`)
+
+Les worktrees suivent toujours le dernier état des produits ; le verrou garde
+la trace des versions avec lesquelles `global/` a été validé — ce qu'un
+sous-module enregistrerait, sans son « bump » à chaque commit.
+
+- `just lock` écrit le commit exact de chaque `v1`/`v2`. Il refuse un commit
+  qui n'est pas poussé dans le dépôt du produit (personne d'autre ne pourrait
+  le rejouer) et un worktree qui n'est pas sur sa branche.
+- **Le verrou se committe avec le changement de `global/` qu'il accompagne** :
+  `git log -p .devcontainer/products.lock` dit alors, pour chaque état de
+  `global/`, avec quelles versions des produits il a été validé. Un modèle
+  déplacé d'un produit vers `global/` : pousser le retrait dans le produit,
+  puis `just lock`, puis committer l'ajout dans `global/` et le verrou ensemble.
+- `just lock-status` (et `just doctor`, et la fin de `just sync`) montre ce qui
+  a bougé depuis le verrou.
+- Rejouer un état passé : `git checkout <commit du coordinateur>`, puis
+  `just lock-checkout` (worktrees détachés aux commits verrouillés ; la garde
+  ssh du verrou 4 tourne depuis sa copie de `~/.local/libexec/`, la lecture
+  ssh continue — mais un `just setup` lancé sur un commit d'avant la garde la
+  retirerait jusqu'au retour sur la branche), et
+  `just lock-release` pour revenir sur les branches.
+
+## Le projet global
+
+`global/packages.yml` contient un bloc géré : un `local:` par produit marqué
+`GLOBAL` dans `products.conf` (et dont la v2 existe). dbt v2 installe les
+packages locaux en **liens symboliques** : ce que l'on modifie dans
+`v2/<produit>/` est vu tout de suite par `global/`.
+
+Nommage des datasets dans `global/` (`macros/generate_schema_name.sql`) : un
+espace de noms par produit, `<PREFIXE>_<PACKAGE>__<dataset>`, pour que deux
+produits qui portent les mêmes noms en production ne s'écrasent pas dans le bac
+à sable. ⚠ Un produit qui définit sa propre `generate_schema_name` la garde
+pour ses nœuds (constaté avec dbt 2.0.6) : elle doit lire `DATASET_PREFIX`
+pour tomber sous le préfixe personnel. `just destinations global` montre ce qui
+ne le fait pas, et les tables écrites par deux nœuds.
+
+`dispatch` et `flags` d'un package sont ignorés : seuls ceux de `global/`
+comptent. Un produit qui dépend d'un `dispatch` (macros de package qui
+surchargent celles de dbt) se comporte autrement dans `global/` que seul.
+
+## Cycle de travail
+
+```bash
+just doctor                         # état de toute la flotte
+just products                       # produits et worktrees
+just v1 <produit> parse             # dbt Core commun, hors ligne
+just v2 <produit> parse             # dbt v2, hors ligne
+just global parse                   # les v2 réunis
+just destinations <produit>         # v1 vs v2 : où chaque modèle serait écrit
+just destinations global            # espaces de noms et collisions du global
+just sync [<produit>]               # dépôts des produits -> worktrees (avance rapide, propres seulement)
+just lock / lock-status             # verrouiller les versions des produits / voir les écarts au verrou
+just upstream-pull [<produit>]      # nouveautés de l'origine (lecture seule) + miroir
+just product-new <nom> <url-gitlab> [branche] [dossier] [global]   # crée le dépôt dédié, privé
+```
+
+Git se fait dans le worktree concerné : `cd v2/<produit> && git commit && git push`
+— le push part dans le dépôt du produit. `global/` se committe ici, sur `main`.
+Avant de travailler sur un produit : `just sync <produit>`. Reprendre l'origine :
+`cd v1/<produit> && git merge up-<produit>/<branche>`, puis
+`cd ../../v2/<produit> && git merge <produit>/v1`.
+
+## Migration v1 → v2 d'un produit (méthode)
+
+1. **v1 sans dépréciation**, sur la version commune :
+   `just v1 <produit> parse --show-all-deprecations --no-partial-parse`.
+2. **Corrections mécaniques** : `uvx dbt-autofix deprecations --path v2/<produit>/<dossier>`,
+   puis RELIRE le diff. Piège vérifié : dbt-autofix range sous `config:` une clé
+   jusque-là ignorée, qui devient alors ACTIVE. `just destinations <produit>`
+   après chaque passe : zéro écart inattendu.
+3. `just v2 <produit> parse` puis `compile`, comparés à v1.
+4. Seulement alors : `GLOBAL yes` dans `products.conf`, puis `just setup`.
+
+## Les deux extensions dbt
+
+- **dbt (dbt Labs)** pilote dbt v2 : `v2/*` et `global/`. Un serveur de langage
+  par projet, démarré à l'ouverture d'un de ses fichiers.
+- **dbt Power User** pilote dbt Core et ne voit que `v1/` (`dbt.allowListFolders`).
+
+⚠ L'extension officielle exécute de vraies requêtes BigQuery :
+`Ctrl/Cmd+Entrée` (« dbt: Preview File »), et « Compare (Beta) » lance un
+`dbt run` sans le dire (constaté sur 0.111.0). Pour les éviter : passer par
+`just`.
+
+## MCP SAP
+
+| Serveur | Emplacement | Transport | Usage |
+|---|---|---|---|
+| `sap-adt-mcp` | `/opt/sap-adt-mcp` (via `.devcontainer/mcp-servers.conf`) | streamable-http `127.0.0.1:8000/mcp` | ADT REST API — vues CDS, activation, transports |
+{%- if enable_ecc_stack %}
+| `sap-adt-ecc` | `/opt/sap-adt-mcp` (2ᵉ instance, si `.env.ecc` existe) | streamable-http `127.0.0.1:8001/mcp` | idem, ciblant SAP ECC EHP8 (NW 7.50) |
+{%- endif %}
+
+## Pièges connus
+
+- **`~/.gitconfig`, `~/.bashrc`, les deux moteurs vivent dans le FS du
+  container** : reposés par les hooks à chaque rebuild (`just setup` les rejoue).
+- **Les worktrees n'existent que dans le container** : leurs liens git sont des
+  chemins du container, verrouillés contre le `prune`.
+- **`dbt` dans un terminal est une fonction shell** (moteur et produit selon le
+  dossier). Dans un script : `dbt1`, `dbtf`, ou `bash .devcontainer/dbt-run.sh`.
+- **dbt v2 `deps` (et son premier `parse`) réécrit `package-lock.yml`** : un
+  changement à committer dans la branche v2 du produit.
+- **Sous dbt v2, `compile` et `show` exécutent les hooks `on-run-start`**.
+- **`profiles/dbt.env` sert toute la flotte** ; `profiles/env/<produit>.env`
+  le complète pour un produit (chargé par `just`, et lu par dbt v2 via le
+  `.env` de son dossier).
+- **`maximum_bytes_billed` ne plafonne pas le DDL.**
+
+## Commandes essentielles
+
+```bash
+just doctor / setup               # diagnostiquer / reposer l'environnement
+just products / sync              # la flotte, la mise à jour
+just lock / lock-status           # le verrou des versions (+ lock-checkout / lock-release)
+just product-new / product-add    # ingérer un produit
+just v1 … / just v2 … / just global …
+just destinations [<produit>|global]
+just upstream-pull [<produit>]
+just gcp-login / gcp-whoami
+just                              # lister toutes les recettes
+```

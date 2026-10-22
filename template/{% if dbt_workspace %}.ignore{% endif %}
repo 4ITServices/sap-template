@@ -1,0 +1,7 @@
+# v1/ and v2/ are hidden from git by .gitignore (they are worktrees of this
+# repository, not content of its tooling branch). Tools built on ripgrep —
+# VS Code search and Quick Open, Claude Code's Grep/Glob — skip what
+# .gitignore ignores: this file gives them the dbt code back. Inside each
+# worktree its own .gitignore still applies (target/, dbt_packages/, logs/).
+!/v1/
+!/v2/

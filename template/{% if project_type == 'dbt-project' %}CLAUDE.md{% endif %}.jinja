@@ -1,0 +1,205 @@
+{%- set sub = ('/' ~ dbt_project_subdir) if (dbt_project_subdir and dbt_project_subdir != '.') else '' -%}
+# {{ project_name }} — Instructions Claude Code (SYNKRONIC)
+
+## Contexte Projet
+
+**Nom** : `{{ project_name }}`
+**Type** : `dbt-project`
+**Description** : {{ project_description }}
+**Stack** : dbt Core 1.x (venv `/opt/dbt-v1`) et dbt v2 (`~/.local/bin/dbt`) côte à côte, BigQuery, gcloud/bq, uv, just
+
+## Ce que contient ce dépôt
+
+Reprise du projet dbt `{{ upstream_repo_url }}` (branche `{{ upstream_branch }}`) pour le
+migrer de dbt Core 1.x vers dbt v2, puis le refactorer.
+
+La branche `main` ne porte QUE l'outillage (devcontainer, `justfile`, hub de
+profils). Le code dbt vit dans deux **worktrees git de ce même dépôt**, ignorés
+par `main` :
+
+| Dossier | Branche | Moteur | Rôle |
+|---|---|---|---|
+| `v1/` | `v1` | dbt Core 1.x — `dbt1` | le projet d'origine : la référence |
+| `v2/` | `v2` | dbt v2 — `dbtf` | la migration, puis le refactoring |
+
+Le projet dbt est dans `v1{{ sub }}/` et `v2{{ sub }}/`
+{%- if not dbt_project_subdir %} (ou le sous-dossier qui contient `dbt_project.yml` : `just doctor` l'affiche){% endif %}.
+Un `git status` à la racine ne voit que l'outillage ; chaque worktree a son
+propre `git status`, sa branche et ses commits.
+
+Branches :
+
+- `upstream/{{ upstream_branch }}` — le dépôt d'origine, en lecture seule (remote `upstream`).
+- `upstream-{{ upstream_branch }}` (sur `origin`) — son miroir exact ; `just upstream-pull` le rafraîchit.
+- `v1` — part du miroir ; n'y committer que ce que la migration exige côté 1.x
+  (dépréciations).
+- `v2` — part de `v1` ; tout le travail de migration et de refactoring.
+
+{% if fleet_coordinator -%}
+## Coordination — ce produit fait partie d'une flotte
+
+Ce dépôt est **suivi par un coordinateur** : {{ fleet_coordinator }}
+(gabarit `dbt-fleet`). À lire avant de travailler ici.
+
+**Son rôle.** Le coordinateur réunit les v2 de plusieurs data products dans un
+projet dbt v2, `global/`, où chaque produit entre comme **package local**. C'est
+là que vit le **refactoring croisé** : les modèles partagés entre produits, et
+ce qui suppose de voir plusieurs produits ensemble (une clé commune, une table
+source lue par plusieurs produits, un modèle consommé par un autre produit).
+
+**Sa mécanique.**
+- Il travaille sur **les mêmes branches que toi** : ses dossiers `v1/<produit>/`
+  et `v2/<produit>/` suivent les branches `v1` et `v2` de CE dépôt. Un commit
+  qu'il pousse arrive ici ; un commit poussé ici, il le récupère par `just sync`.
+- Il garde dans `.devcontainer/products.lock` le commit exact de chaque produit
+  avec lequel `global/` a été validé. Ce fichier référence des commits d'ici.
+- Ses conventions s'appliquent ici : un seul `profiles/dbt.env` pour toute la
+  flotte, et `DATASET_PREFIX` dont la valeur ne porte pas le « _ » final — la
+  macro de nommage l'ajoute.
+
+**Ce que cela impose ici.**
+1. `git pull` avant de travailler, `git push` après : la branche est partagée.
+2. **Jamais de réécriture d'historique publié** sur `v1`/`v2` (force-push,
+   rebase de commits poussés) : le verrou du coordinateur pointe ces commits.
+3. Un travail qui concerne plusieurs produits se prépare ici mais **se fait dans
+   le `global/` du coordinateur** : le signaler à l'utilisateur plutôt que le
+   mener seul dans ce produit.
+4. **Les changements de structure se disent** (dans le message de commit, et à
+   l'utilisateur) : nouvelle branche de travail (le coordinateur ne suit que
+   `v1` et `v2`), modèle renommé ou supprimé alors qu'un autre produit le lit,
+   changement de convention partagée. Les messages de commit sont le canal :
+   `just sync`, côté coordinateur, affiche ceux qu'il reçoit et nomme les
+   branches d'ici qu'il ne suit pas.
+5. Les règles et la mécanique complètes : le `CLAUDE.md` du coordinateur.
+
+{% endif -%}
+## Règles absolues
+
+1. **Aucun push vers le dépôt d'origine.** Les verrous git (le verrou 4, plus bas)
+   arrêtent tout push **par git** ; ils ne voient pas ssh lancé hors de git avec la
+   même clé : n'écrire vers l'origine par aucun moyen, ne jamais retirer ni
+   contourner un verrou. Livrer une branche à l'origine est une décision humaine,
+   prise hors session.
+2. **BigQuery — écriture confinée au bac à sable**
+{%- if bq_sandbox_project %} : le seul projet où l'on écrit est `{{ bq_sandbox_project }}`
+{%- if bq_dataset_prefix %}, dans des datasets préfixés `{{ bq_dataset_prefix }}`{% endif %}.
+{%- else %} déclaré dans `.devcontainer/dbt.conf` (`DBT_BQ_PROJECT`). Tant qu'il est
+   vide, aucune écriture n'est possible.
+{%- endif %}
+   Partout ailleurs : lecture seule stricte (`SELECT`, `bq ls/show`, `--dry_run`,
+   `INFORMATION_SCHEMA`). Les droits IAM du compte ne protègent de rien : c'est
+   cette règle qui protège. En cas de doute sur la cible d'une écriture : demander.
+3. **dbt s'invoque par `just v1 …` / `just v2 …`** (ou `dbt` depuis `v1/` ou
+   `v2/`, qui passe par le même garde-fou). `dbt1` et `dbtf` sont les moteurs
+   bruts, sans garde-fou d'écriture : jamais pour un `run`/`build`/`seed`/`snapshot`.
+4. **Un moteur par worktree.** Jamais dbt v2 dans `v1/`, jamais dbt Core dans
+   `v2/` : chacun écrit son `target/manifest.json`, et l'autre le lirait.
+5. **`v1/` reste fidèle à l'origine.** Le refactoring se fait dans `v2/`.
+6. Ne jamais committer `.env`, `.mcp.json`, `*.pem`.
+7. Activer TOUJOURS après `setObjectSource` (MCP ADT).
+
+## Les verrous (ne jamais en retirer un)
+
+| # | Verrou | Où |
+|---|---|---|
+| 1 | `DBT_PROFILES_DIR` → `profiles/` pour TOUT processus du container. dbt résout `--profiles-dir` > env > cwd > `~/.dbt` : les `profiles.yml` embarqués dans `v1/` et `v2/` (ils visent les vrais projets) ne sont jamais lus. Profil absent du hub = erreur, pas repli. | `devcontainer.json` (`containerEnv`), `~/.bashrc` |
+| 2 | Hub `profiles/profiles.yml` : le target porte le nom que voient les macros (`target.name`), mais projet et dataset sont ceux du bac à sable. | `profiles/` |
+| 3 | Garde-fou d'écriture de `dbt-run.sh` : un `run`/`build`/`seed`/`snapshot` exige une sélection, et chaque nœud sélectionné doit se résoudre dans le bac à sable (`dbt ls`), sans être dans `DBT_SANDBOX_NEVER_BUILD` (tables aux lignes protégées en production). `run-operation` refusé. Tant que `DBT_HOOKS_REVIEWED` vaut 0, toute commande qui exécuterait des hooks (ceux du projet ET ceux des packages installés) est refusée : `run`, `build`, `seed`, `snapshot`, `test`, `source freshness`, et sous dbt v2 aussi `compile` et `show` — ces deux-là seulement s'ouvrent par `DBT_HOOKS_COMPILE_OK="project"` une fois les hooks relus (ceux d'elementary exigent `ELEMENTARY=0`). `DBT_HOOKS_REVIEWED_V2=1` ouvre la v2 (et `global/`) — pas la v1 — aux seuls hooks approuvés : `.devcontainer/hooks.approved`, écrit par `just hooks-approve` (texte du hook et résolution de ses sources) ; un hook nouveau ou modifié est refusé. | `.devcontainer/dbt-run.sh`, `dbt.conf` |
+| 4 | Aucun push **par git** vers l'hôte d'origine : `url."DISABLED://".pushInsteadOf` global (13 préfixes, pour `git push`) + `remote.upstream.pushurl DISABLED` + `core.sshCommand` = la garde ssh (`.devcontainer/git-ssh-garde.sh`, copiée dans `~/.local/libexec/`) — vers l'hôte reconnu par son nom (alias ssh compris) ou, pour une écriture, par son adresse, seules les lectures `git-upload-pack` / `git-upload-archive` passent, `git send-pack` compris + pas de https pour l'hôte lu en ssh : un proxy mort (127.0.0.1:9), puis un quitteur (aucune fenêtre). La lecture et les autres hôtes ne sont pas touchés. **Limites** : la clé qui écrit reste à la portée de tout processus (ssh hors de git, `personal_access_token` de gitlab-shell), un tunnel pur, un contournement délibéré de la configuration (`GIT_SSH_COMMAND`, `-c`, `GIT_CONFIG_*`, `NO_PROXY`) — seul un accès en lecture seule côté serveur les couvre ; `just doctor` signale ce qu'il voit. | `.devcontainer/lib-dbt.sh`, `git-ssh-garde.sh` (rejoués à chaque démarrage) |
+
+Les boutons Run/Build des extensions dbt n'ont que les verrous 1, 2 et 4 :
+ils ne passent pas par `dbt-run.sh`. Pour écrire : `just v1 …` / `just v2 …`.
+
+## Cycle de travail
+
+```bash
+just doctor                       # état du container (à coller tel quel en cas de souci)
+just v1 parse                     # dbt Core 1.x, hors ligne
+just v2 parse                     # dbt v2, hors ligne
+just v1 compile -s mon_modele     # lit BigQuery, n'écrit rien
+just v2 run -s mon_modele         # écriture : sélection obligatoire, destination contrôlée
+just destinations                 # où v1 et v2 écriraient chaque modèle, et leurs écarts
+just upstream-pull                # nouveautés de l'origine (lecture seule) + miroir sur origin
+```
+
+Git se fait dans le worktree concerné : `cd v2 && git status`, `git commit`,
+`git push -u origin v2`. Reprendre des nouveautés de l'origine :
+`cd v1 && git merge upstream/{{ upstream_branch }}`, puis `cd ../v2 && git merge v1`.
+
+## Migration v1 → v2 (méthode)
+
+1. **v1 sans dépréciation.** `just v1 parse --show-all-deprecations` : toute
+   dépréciation de dbt Core 1.x doit être résolue avant de changer de moteur.
+2. **Corrections mécaniques.** `uvx dbt-autofix deprecations --path v2{{ sub }}`,
+   puis RELIRE le diff. Piège vérifié : dbt-autofix range sous `config:` les
+   clés qu'il ne reconnaît pas ; une clé jusque-là ignorée (ex. un `dataset:`
+   resté au niveau du modèle) devient alors ACTIVE et déplace la table.
+   Rejouer `just destinations` après chaque passe : zéro écart inattendu.
+3. **v2 parse** : `just v2 parse` jusqu'à zéro erreur.
+4. **v2 compile puis build** sur une sélection, comparée à v1 (mêmes sources,
+   mêmes destinations, mêmes données).
+5. Packages : vérifier la compatibilité v2 de chacun (`require-dbt-version`
+   contenant 2.0.0, ou badge du hub) avant de s'appuyer dessus.
+
+`static_analysis: strict` débloque le lignage colonne de l'extension
+officielle ; il se vise une fois le projet propre en `baseline`.
+
+## Les deux extensions dbt
+
+- **dbt (dbt Labs)** pilote dbt v2 — c'est elle qui sert pour `v2/`.
+- **dbt Power User** pilote dbt Core 1.x et ne voit que `v1/`
+  (`dbt.allowListFolders` dans `.vscode/settings.json`).
+
+L'extension officielle n'a pas de filtre de dossier : ouvrir un `.sql` de
+`v1/` y lance aussi son analyse v2 (diagnostics v2 dans Problèmes, et dbt v2
+peut alors écrire dans le `target/` de v1). Pour travailler longuement sur une version, ouvrir son
+dossier dans une fenêtre dédiée (`code v1` ou `code v2`) : les réglages posés
+dans `v1/.vscode/` et `v2/.vscode/` n'y laissent qu'une extension active.
+
+## MCP SAP
+
+| Serveur | Emplacement | Transport | Usage |
+|---|---|---|---|
+| `sap-adt-mcp` | `/opt/sap-adt-mcp` (installé via `.devcontainer/mcp-servers.conf`) | streamable-http `127.0.0.1:8000/mcp` | ADT REST API — lecture/écriture d'objets ABAP (vues CDS), activation, transports |
+{%- if enable_ecc_stack %}
+| `sap-adt-ecc` | `/opt/sap-adt-mcp` (2ᵉ instance, lancée si `.env.ecc` existe) | streamable-http `127.0.0.1:8001/mcp` | idem, ciblant SAP ECC EHP8 (NW 7.50) |
+{%- endif %}
+
+Il sert à créer côté SAP les vues CDS miroir de vues du projet dbt v2. Les
+credentials SAP vivent dans `.env` ; `.mcp.json` ne contient aucun secret.
+Self-healing : si l'install a échoué (token GitHub manquant au premier build),
+un simple restart du container répare.
+
+## Pièges connus
+
+- **`~/.gitconfig`, `~/.bashrc`, les deux moteurs vivent dans le FS du
+  container** : reposés par les hooks à chaque rebuild (`just setup` les rejoue).
+  Ne pas les « installer à la main » ailleurs.
+- **`v1/` et `v2/` n'existent que dans le container** : leurs liens git sont
+  des chemins du container, verrouillés contre le `prune`. Depuis l'hôte, seul
+  l'outillage (`main`) est manipulable.
+- **`dbt` dans un terminal est une fonction shell** (moteur selon le dossier).
+  Dans un script ou une recette : `dbt1`, `dbtf`, ou `bash .devcontainer/dbt-run.sh`.
+- **`profiles/dbt.env` n'atteint pas `dbt1` nu.** dbt v2 lit le `.env` du
+  dossier du projet (un lien vers `profiles/dbt.env`), dbt Core 1.x non : seul
+  `just v1 …` (ou `dbt` dans `v1/`) lui donne ces variables. Un `env_var()` qui
+  retombe sur sa valeur par défaut change les sources lues, sans erreur.
+- **Après un rebuild, « Reload Window »** : les extensions dbt démarrent avant
+  que le hook ait reposé les moteurs.
+- **dbt v2 `deps` réécrit `package-lock.yml`** (il re-résout les versions) :
+  c'est un changement à committer dans `v2`, pas un effet de bord à ignorer.
+- **`maximum_bytes_billed` ne plafonne pas le DDL.** Essai court avant course longue.
+- **Sous dbt v2, `compile` et `show` exécutent les hooks `on-run-start`** (dbt Core,
+  non). Un `compile` n'est donc en lecture seule que si le projet et ses packages
+  n'ont aucun hook : `just doctor` le dit, section `[hooks]`.
+
+## Commandes essentielles
+
+```bash
+just doctor / setup               # diagnostiquer / reposer l'environnement
+just v1 … / just v2 …             # dbt gardé, par moteur
+just destinations                 # destinations résolues v1 vs v2
+just upstream-pull                # origine → miroir (lecture seule)
+just gcp-login / gcp-whoami       # auth BigQuery
+just                              # lister toutes les recettes
+```

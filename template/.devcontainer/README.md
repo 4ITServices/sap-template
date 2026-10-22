@@ -6,11 +6,16 @@
 devcontainer.json
   ├── initializeCommand      mkdir ~/.claude or ~/.claude-profiles/<profile> (host-side, before build)
   ├── onCreateCommand        git config + claude dirs (once, at image creation)
+  │                            └── dbt engines (lib-dbt.sh dbt_engines) — dbt-project only:
+  │                                done before the editor connects, so the dbt extensions
+  │                                find /opt/dbt-v1/bin/python and ~/.local/bin/dbt at once
   ├── postCreateCommand  →   post-create.sh (once, after build)
   │                            ├── MCP servers install (lib-mcp.sh ← mcp-servers.conf)
+  │                            ├── dbt workspace (lib-dbt.sh ← dbt.conf) — dbt-project only
   │                            └── post-create-project.sh (if exists)
   └── postStartCommand   →   post-start.sh (every container start)
                                ├── MCP servers self-heal + launch (lib-mcp.sh ← mcp-servers.conf)
+                               ├── dbt workspace self-heal (lib-dbt.sh ← dbt.conf) — dbt-project only
                                └── post-start-project.sh (if exists)
 ```
 
@@ -23,6 +28,9 @@ devcontainer.json
 | `post-start.sh` | template | `copier update` |
 | `lib-mcp.sh` | template | `copier update` (MCP lifecycle engine) |
 | `tmux-session.sh` | template | `copier update` (integrated-terminal tmux launcher) |
+| `lib-dbt.sh`, `dbt-run.sh`, `dbt-doctor.sh`, `features/google-cloud-cli/` | template | `copier update` (dbt-project and dbt-fleet — dbt workspace engine) |
+| `dbt.conf`, `upstream_known_hosts` | **project** | developer (dbt workspaces — `dbt.conf` is seeded once from the copier answers, `_skip_if_exists`; the pinned host keys are scanned once, then reviewed and committed) |
+| `products.conf`, `global/` seeds | **project** | developer (dbt-fleet — seeded once; the lifecycle only rewrites the managed block of `global/packages.yml`) |
 | `mcp-servers.conf` | **project** | developer (`_skip_if_exists` — seeded once, never overwritten; to opt out, comment out every line — a *deleted* file is re-seeded by the next `copier update`) |
 | `post-create-project.sh` | **project** | developer (never overwritten by template) |
 | `post-start-project.sh` | **project** | developer (never overwritten by template) |
@@ -102,6 +110,200 @@ Self-healing: if the first build could not clone (typically an empty
 **restart** the container — post-start repairs the install, no rebuild
 needed. Broken half-clones are detected (not a valid git work tree) and
 re-cloned. Install/build details are logged to `/tmp/<NAME>.log`.
+
+## dbt workspace (`project_type: dbt-project`)
+
+The container takes over an existing dbt project (the *upstream* repository)
+and keeps two versions of it side by side: the original on dbt Core 1.x and
+its migration to dbt v2. The repository's `main` branch only carries the
+tooling; the dbt code lives in two git worktrees of the same repository,
+ignored by `main`:
+
+| Path | Branch | Engine | Command |
+|---|---|---|---|
+| `v1/` | `v1` (starts at the upstream branch) | dbt Core 1.x, venv `/opt/dbt-v1` built from the pins the project ships | `dbt1`, `just v1 …` |
+| `v2/` | `v2` (starts at `v1`) | dbt v2, `~/.local/bin/dbt` (official installer) | `dbtf`, `just v2 …` |
+
+`lib-dbt.sh` (template-owned) drives everything from `dbt.conf`
+(project-owned), on create and again on every start, since both engines,
+`~/.gitconfig` and `~/.bashrc` live in the container filesystem:
+
+1. **Upstream access, read-only.** The upstream host key is pinned in
+   `.devcontainer/upstream_known_hosts` (`~/.ssh` is mounted read-only, so ssh
+   cannot record it). `https://<upstream host>/` is fetched over SSH (private
+   dbt packages). **No push by git** reaches that host, in three layers:
+   a global `url."DISABLED://".pushInsteadOf` covers `git push` to explicit
+   URLs and submodules (13 prefixes per host: `git@`, `ssh://`, `https://`,
+   and `git+ssh://`, `ssh+git://`, `:22`, no user, `http://`, `:443`) and
+   `remote.upstream.pushurl` is `DISABLED`; git's `core.sshCommand` is the ssh
+   push guard, `.devcontainer/git-ssh-garde.sh` copied to
+   `~/.local/libexec/` (a checkout of an older commit cannot take it away):
+   to an upstream host only `git-upload-pack` / `git-upload-archive` go
+   through, `git send-pack` included — the host is recognised by name
+   (another user, upper case, a trailing dot, an `~/.ssh/config` alias read
+   by `ssh -G`: HostName, HostKeyAlias, ProxyJump, ProxyCommand,
+   CanonicalDomains) and, for a write, by address (`getent ahosts`: an IP
+   address in any writing, an IPv4-mapped `::ffff:` one, another name of the
+   same server); a read from a host recognised by name, without a terminal,
+   gets `BatchMode=yes` (no passphrase nor host-key question); an upstream
+   host read over ssh gets no
+   https: `http.https://<host>.proxy` is a dead proxy (127.0.0.1:9 — it holds
+   against a reset of the credential helpers, a password in the URL, an
+   `http.extraHeader`), with a credential quitter behind it (no prompt).
+   Reads are unchanged, every other host (GitHub) goes through untouched.
+   `DBT_UPSTREAM_PUSH_LOCK=0` lifts all of it.
+   **Limits — "no push by git" is not "no push".** The key that can write
+   stays available to every process of the container (the agent): ssh run
+   outside git (a `git-receive-pack` typed by hand, gitlab-shell's
+   `personal_access_token` then an https push carrying that token) is never
+   seen. Nor are a pure tunnel (`ssh -L`, socat… to 127.0.0.1, without a
+   HostKeyAlias naming the host), a master connection shared through a fixed
+   `ControlPath`, https on another port (`:8443`) or under another name, an
+   upstream host that does not resolve (offline: an IP address is refused, a
+   name cannot be compared). Nor a deliberate override of git's
+   configuration: an exported `GIT_SSH_COMMAND`, `git -c core.sshCommand=…`,
+   `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, some repository's own
+   `core.sshCommand`, `ext::` with `protocol.ext.allow=always`,
+   `GIT_CONFIG_GLOBAL=/dev/null` or another `HOME` (only the remote's pushurl
+   is left), a `NO_PROXY` covering the host (the quitter is left); under
+   these the pushInsteadOf prefixes still hold for `git push`, never for
+   `git send-pack`. `GIT_SSH` alone does not: git prefers `core.sshCommand`.
+   The real cover is server-side — a read-only access for the container (a
+   read-only deploy key, or an account with the Reporter role). `just doctor`
+   proves each layer offline and reports what it sees in the environment.
+   For night jobs: `GIT_TERMINAL_PROMPT=0` and an empty `GIT_ASKPASS`.
+2. **Worktrees.** Branches come from `origin` when already published, else
+   `v1` is created from the upstream branch (fetched once) and `v2` from
+   `v1`. The worktrees are **locked**: their git links are container paths
+   that do not exist on the host, and an unlocked worktree would be dropped by
+   a `git worktree prune` or an automatic gc run host-side. `git worktree
+   repair` runs on every start, so renaming the workspace folder is harmless.
+   Nothing is ever pushed or deleted by the hooks.
+3. **Engines.** dbt v2 must sit at `~/.local/bin/dbt`: it is the only path the
+   official dbt extension looks at without a `dbt.dbtPath` override, and where
+   it can keep the binary in step with itself. It is installed once per build
+   and never upgraded on a restart. dbt Core is only reachable as `dbt1`. In
+   an interactive shell `dbt` is a function that picks the engine from the
+   directory.
+4. **Profile hub.** `containerEnv` sets `DBT_PROFILES_DIR` to
+   `<workspace>/profiles` for every process — terminals, both dbt extensions,
+   hooks, `docker exec`. The `profiles.yml` shipped inside the worktrees
+   target the real projects and are never read; a profile missing from the hub
+   is an error. `profiles/profiles.yml` is seeded once from `dbt.conf`
+   (`DBT_BQ_*`) and then project-owned; with no sandbox declared, none is
+   generated and dbt stays locked.
+5. **Write guard** (`dbt-run.sh`, behind `just v1|v2` and the `dbt` function).
+   A `run`/`build`/`seed`/`snapshot` needs an explicit selection, and every
+   selected node must resolve (`dbt ls`, offline) to `DBT_BQ_PROJECT` — and to
+   a dataset starting with `DBT_BQ_DATASET_PREFIX` when set. `run-operation`
+   is refused. Hooks — the project's own and those declared by its installed
+   packages (elementary ships on-run-start/end hooks) — block every command
+   that would execute them until `DBT_HOOKS_REVIEWED=1`. Which commands those
+   are depends on the engine: dbt Core runs them for run, build, seed,
+   snapshot, test and source freshness (its `RunTask` family); dbt v2 also for
+   compile and show. parse and ls run none under either engine, which is why
+   the guard can use `dbt ls` to resolve destinations. The raw engines and the
+   extensions' Run/Build buttons only get the hub, not this guard.
+
+BigQuery authentication uses the host's `~/.config/gcloud` (bind mount):
+`gcloud auth login` + `gcloud auth application-default login` once, valid for
+every container mounting it. gcloud comes from a **local** feature
+(`features/google-cloud-cli`): the public `ghcr.io/dhoeric` one is abandoned
+and fails on current Debian images (`apt-key` is gone).
+
+Editors: the official dbt extension drives dbt v2; dbt Power User drives dbt
+Core through `/opt/dbt-v1/bin/python` and is restricted to `v1/`
+(`dbt.allowListFolders`). The official extension has no folder filter and
+both bind `Ctrl/Cmd+Enter`; for one extension per window, open `v1/` or `v2/`
+alone (`code v1`) — `lib-dbt.sh` seeds a `.vscode/settings.json` in each
+worktree for that. `.ignore` at the root gives the worktrees back to
+ripgrep-based search (VS Code, Claude Code), which `.gitignore` hides.
+
+`just doctor` checks all of the above and repairs nothing; `just setup`
+replays the lifecycle.
+
+### A fleet of data products (`project_type: dbt-fleet`)
+
+The same engine, for several data products in one repository, so that they
+can be refactored together. `.devcontainer/products.conf` (project-owned)
+declares them, one per line: `NAME URL [BRANCH] [SUBDIR] [GLOBAL]`.
+
+| Path | Branch | Engine |
+|---|---|---|
+| `v1/<product>/` | `<product>/v1` | dbt Core, ONE version for every product (`DBT_V1_PINS` in `dbt.conf`) |
+| `v2/<product>/` | `<product>/v2` | dbt v2 |
+| `global/` | `main` | dbt v2 — the v2 of the products flagged `GLOBAL`, as local packages |
+
+Per product: remote `up-<product>` (the upstream: fetch-only, push-locked,
+one lock per upstream host). Its branches live either in **its own
+repository** — column `HOME`, remote `home-<product>`, the coordinator
+model: the worktrees track its `v1`/`v2` (`push.default=upstream`, so `git
+push` goes there), its mirror is `upstream-<branch>`, and this repository only
+holds `main` — or here (`HOME -`: `<product>/v1`, `<product>/v2`,
+`<product>/upstream` on origin). A product repository is a plain dbt-project
+repository, usable alone. `just sync` (also run at each start, unless
+`DBT_SYNC_ON_START=0`) fetches every home and fast-forwards the clean
+worktrees; dirty, ahead or diverged ones are reported, never touched. It
+prints the subjects of the commits it brings in and names the branches of a
+product repository that are not followed here (a `v3` opened there). The
+product side learns about the coordinator from the « Coordination » section
+of its `CLAUDE.md` (copier answer `fleet_coordinator`, set by
+`just product-new`). Hooks
+fetch the homes with the workspace token (`GITHUB_PERSONAL_ACCESS_TOKEN`,
+`.env`) for that invocation only. The rest is the single-product machinery,
+product by product: pinned host keys, locked and self-repairing worktrees,
+the profile hub (one profile per name asked by a product or by `global/`,
+appended when missing), the write guard.
+
+- **One dbt Core for all the v1.** dbt Power User has one interpreter per
+  window, so a fleet shares one venv. A product that pins another version
+  runs on the shared one; `just doctor` lists the bumps to commit in its v1
+  branch. Measured before choosing 1.11.11: two products pinned on 1.9.8 and
+  1.10.18 produce byte-identical manifests (nodes, relations, configs,
+  dependencies, code) under 1.11.11 — `compile` needs credentials, so the
+  compiled SQL is to be compared in the container.
+- **`global/`**: the lifecycle rewrites the managed block of
+  `global/packages.yml` with one `local:` entry per `GLOBAL yes` product
+  whose v2 exists. dbt v2 installs local packages as **symlinks** (checked
+  with 2.0.6): an edit in `v2/<product>/` is seen by `global/` at once.
+  Dataset naming there (`global/macros/generate_schema_name.sql`) gives each
+  product its own namespace, `<PREFIX>_<PACKAGE>__<dataset>`. dbt v2 applies
+  it to the packages that define no `generate_schema_name`; a package that
+  ships its own keeps it for its nodes. `dispatch` and `flags` of a package
+  are ignored — only those of `global/` count. Writes in `global/` are also
+  refused when a selected relation is written by two nodes;
+  `just destinations global` lists such collisions.
+- **The lock**: `.devcontainer/products.lock` (`just lock`) records the
+  exact commit of every product's v1 and v2 — pushed commits only, worktrees
+  on their branches. Committed with the change of `global/` it goes with, it
+  says which product versions each state of `global/` was validated with:
+  the one thing submodules would record, without a pointer commit for every
+  product commit. `just lock-status`, `just doctor` and the end of `just sync`
+  report the drift; `just lock-checkout` replays a locked state (detached
+  worktrees), `just lock-release` goes back to the branches.
+- **Ingesting a product**: `just product-new <name> <url> [branch] [subdir]
+  [global]` renders a dbt-project repository from the same template version
+  (with the fleet's sandbox answers), fills it from upstream (`main`,
+  `upstream-<branch>`, `v1` = `v2` = the upstream branch, its hub seeded),
+  creates `<github_org>/<DBT_PRODUCT_REPO_PREFIX><name>` — private, checked
+  before anything is pushed — then declares it. `just product-add … [home]`
+  declares a product whose repository exists.
+
+### Starting a new dbt-project repository
+
+1. `copier copy gh:4ITServices/sap-template <dir> --data project_type=dbt-project`
+   and answer the upstream URL, branch and sandbox questions.
+2. `git init -b main`, commit, create the (private) repository, push `main`.
+3. Open the container. The hooks scan and pin the upstream host key, fetch the
+   upstream branch (it needs the SSH key and, if any, the VPN) and create
+   `v1/` and `v2/`. Check the fingerprints, review the seeded hub, then commit
+   `.devcontainer/upstream_known_hosts` and `profiles/profiles.yml` on `main`.
+4. Publish the three branches to `origin` — the hooks never push:
+   `just upstream-pull` (the `upstream-<branch>` mirror), then
+   `git -C v1 push -u origin v1` and `git -C v2 push -u origin v2`.
+
+A later clone gets everything from `origin`: its first start needs no access
+to the upstream.
 
 ## Project-specific scripts
 

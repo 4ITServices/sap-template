@@ -1,0 +1,21 @@
+# =============================================================================
+# {{ project_name }} — global project (dbt v2): the products' v2 together
+#
+# Each product of .devcontainer/products.conf flagged GLOBAL comes in as a
+# LOCAL package (packages.yml, managed block). dbt v2 links local packages,
+# so every edit made in v2/<product>/ is seen here at once. The models that
+# several products share — the cross-product refactoring — live in this
+# project; each product keeps its own models until they move here.
+#
+# PROJECT-OWNED after the first render: edit it freely.
+# =============================================================================
+name: {{ project_slug }}
+version: "1.0.0"
+config-version: 2
+
+# declared in profiles/profiles.yml (the lifecycle appends it when missing)
+profile: {{ project_name }}
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+clean-targets: ["target", "dbt_packages"]

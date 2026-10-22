@@ -1,0 +1,108 @@
+# {{ project_name }} — flotte dbt : v1 = dbt Core commun, v2 = dbt v2, global = les v2 réunis, v4 / global-v4 = l'espace v4
+# ⚠ Arguments POSITIONNELS : `just v1 <produit> parse`, `just global parse`
+
+set positional-arguments
+
+# Lister les recettes disponibles
+default:
+    @just --list
+
+# --- Container ----------------------------------------------------------------
+
+# État de santé du container — ne répare rien (--deep : parse de tous les projets + jeton Google)
+doctor *args:
+    @-bash .devcontainer/dbt-doctor.sh "$@"
+
+# (Re)poser worktrees, moteurs, verrous git, projet global et hub de profils — idempotent
+setup:
+    @bash -c 'source .devcontainer/lib-dbt.sh && dbt_process "$PWD" create'
+
+# --- Data products ------------------------------------------------------------
+
+# Les produits de la flotte et l'état de leurs worktrees
+products:
+    @bash .devcontainer/dbt-run.sh products
+
+# Récupérer les dépôts des produits et avancer les worktrees propres (aussi fait à chaque démarrage)
+sync product='':
+    @bash .devcontainer/dbt-run.sh sync "$@"
+
+# --- Le verrou (.devcontainer/products.lock) ----------------------------------
+
+# Verrouiller le commit exact de chaque v1/v2 (poussés seulement) — à committer avec le changement de global/
+lock product='':
+    @bash .devcontainer/dbt-run.sh lock "$@"
+
+# Où en est chaque worktree par rapport au verrou
+lock-status:
+    @bash .devcontainer/dbt-run.sh lock-status
+
+# Rejouer l'état verrouillé (worktrees détachés aux commits du verrou)
+lock-checkout product='':
+    @bash .devcontainer/dbt-run.sh lock-checkout "$@"
+
+# Remettre les worktrees sur leurs branches après un lock-checkout
+lock-release product='':
+    @bash .devcontainer/dbt-run.sh lock-release "$@"
+
+# --- Ingestion ----------------------------------------------------------------
+
+# Nouveau produit, avec son propre dépôt GitHub créé (privé) : just product-new <nom> <url-gitlab> [branche] [dossier-dbt] [global]
+product-new name url branch='main' subdir='-' global='no':
+    @bash .devcontainer/dbt-run.sh product-new "$@"
+
+# Produit dont le dépôt existe déjà : just product-add <nom> <url-gitlab> [branche] [dossier] [global] [url-du-dépôt-produit]
+product-add name url branch='main' subdir='-' global='no' home='-':
+    @bash .devcontainer/dbt-run.sh product-add "$@"
+
+# Produit « né ici » (sans origine, v4 seule) dont le dépôt porte une branche v4 : just referent-add <nom> <url-du-dépôt> [dossier]
+referent-add name home subdir='-':
+    @bash .devcontainer/dbt-run.sh referent-add "$@"
+
+# --- dbt (voie gardée : hub de profils imposé, écritures contrôlées) ----------
+
+# dbt Core commun sur v1/<produit>/ : just v1 <produit> parse
+v1 product *args:
+    @bash .devcontainer/dbt-run.sh v1 "$@"
+
+# dbt v2 sur v2/<produit>/ : just v2 <produit> parse
+v2 product *args:
+    @bash .devcontainer/dbt-run.sh v2 "$@"
+
+# dbt v2 sur global/ (les v2 des produits en packages locaux) : just global parse
+global *args:
+    @bash .devcontainer/dbt-run.sh global "$@"
+
+# dbt v2 sur v4/<produit>/ (DBT_V4_PRODUCTS, référents) — préfixe DBT_BQ_DATASET_PREFIX_V4 : just v4 <produit> parse
+v4 product *args:
+    @bash .devcontainer/dbt-run.sh v4 "$@"
+
+# dbt v2 sur global-v4/ (l'assemblage de l'espace v4, mêmes refus que global/) : just global-v4 parse
+global-v4 *args:
+    @bash .devcontainer/dbt-run.sh global-v4 "$@"
+
+# Approuver les hooks relus de global/ (DBT_HOOKS_REVIEWED_V2 n'exécute que ceux-là)
+hooks-approve target='':
+    @bash .devcontainer/dbt-run.sh hooks-approve "$@"
+
+# Où v1, v2 (et v4) écrivent chaque modèle (hors ligne) — un produit, tous, « global » ou « global-v4 » (collisions)
+destinations target='':
+    @bash .devcontainer/dbt-run.sh destinations "$@"
+
+# --- Dépôts d'origine (lecture seule) -----------------------------------------
+
+# Récupérer la branche d'origine d'un produit (ou de tous) et rafraîchir son miroir sur origin
+upstream-pull product='':
+    @bash .devcontainer/dbt-run.sh upstream-pull "$@"
+
+# --- GCP / BigQuery -----------------------------------------------------------
+
+# Auth GCP : CLI (bq) puis ADC (dbt oauth) — conservée côté hôte (~/.config/gcloud)
+gcp-login:
+    gcloud auth login
+    gcloud auth application-default login
+
+# Qui est connecté (CLI + ADC)
+gcp-whoami:
+    @gcloud auth list 2>/dev/null || echo "gcloud non connecté"
+    @gcloud auth application-default print-access-token >/dev/null 2>&1 && echo "ADC (dbt oauth) : OK" || echo "ADC (dbt oauth) : absent ou expiré"

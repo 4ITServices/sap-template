@@ -1,0 +1,9 @@
+{
+  "id": "google-cloud-cli",
+  "version": "1.0.0",
+  "name": "Google Cloud CLI (local, signed keyring)",
+  "description": "Installs gcloud + bq + gsutil from Google's official apt repository with the modern 'gpg --dearmor' keyring. Replaces ghcr.io/dhoeric/features/google-cloud-cli, abandoned (v1.0.1, May 2023) and broken since apt-key was removed from the Debian base image.",
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils"
+  ]
+}
