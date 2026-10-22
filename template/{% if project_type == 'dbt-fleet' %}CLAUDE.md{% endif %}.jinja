@@ -58,9 +58,11 @@ fois le SQL compilé vérifié identique.
 
 ## Règles absolues
 
-1. **Aucun push vers un dépôt d'origine.** Deux verrous git par hôte le rendent
-   impossible ; ne jamais les retirer ni les contourner. Livrer une branche à
-   l'origine est une décision humaine, prise hors session.
+1. **Aucun push vers un dépôt d'origine.** Les verrous git (le verrou 4, ci-dessous)
+   arrêtent tout push **par git** ; ils ne voient pas ssh lancé hors de git avec la
+   même clé : n'écrire vers une origine par aucun moyen, ne jamais retirer ni
+   contourner un verrou. Livrer une branche à l'origine est une décision humaine,
+   prise hors session.
 2. **BigQuery — écriture confinée au bac à sable**
 {%- if bq_sandbox_project %} : le seul projet où l'on écrit est `{{ bq_sandbox_project }}`
 {%- if bq_dataset_prefix %}, dans des datasets préfixés `{{ bq_dataset_prefix }}`{% endif %}.
@@ -91,7 +93,7 @@ fois le SQL compilé vérifié identique.
 | 1 | `DBT_PROFILES_DIR` → `profiles/` pour TOUT processus du container : les `profiles.yml` embarqués dans les produits (ils visent les vrais projets) ne sont jamais lus. Profil absent du hub = erreur, pas repli. | `devcontainer.json` (`containerEnv`), `~/.bashrc` |
 | 2 | Hub `profiles/profiles.yml` : un profil par nom demandé par les produits et par `global/`, tous vers le bac à sable. Le cycle de vie ajoute ceux qui manquent. | `profiles/` |
 | 3 | Garde-fou de `dbt-run.sh` : une écriture exige une sélection dont chaque nœud se résout dans le bac à sable, et dont aucun n'est dans `DBT_SANDBOX_NEVER_BUILD` (tables aux lignes protégées en production) ; dans `global/`, aucune table écrite par deux nœuds. `run-operation` refusé. Tant que `DBT_HOOKS_REVIEWED` vaut 0, toute commande qui exécuterait des hooks (projet ou packages) est refusée — sous dbt v2, `compile` et `show` compris — sauf, pour ces deux seules commandes, les produits listés dans `DBT_HOOKS_COMPILE_OK` (hooks relus ; ceux d'elementary exigent `ELEMENTARY=0`). `DBT_HOOKS_REVIEWED_V2=1` ouvre la v2 (et `global/`) — pas la v1 — aux seuls hooks approuvés : `.devcontainer/hooks.approved`, écrit par `just hooks-approve` (texte du hook et résolution de ses sources) ; un hook nouveau ou modifié est refusé. | `.devcontainer/dbt-run.sh`, `dbt.conf` |
-| 4 | Push vers chaque hôte d'origine impossible, même par URL explicite : `pushInsteadOf` global + `remote.up-<produit>.pushurl DISABLED`. | `.devcontainer/lib-dbt.sh` |
+| 4 | Aucun push **par git** vers un hôte d'origine : `pushInsteadOf` global (13 préfixes par hôte, pour `git push`) + `remote.up-<produit>.pushurl DISABLED` + `core.sshCommand` = la garde ssh (`.devcontainer/git-ssh-garde.sh`, copiée dans `~/.local/libexec/` : un `git checkout` d'un commit antérieur ne l'emporte pas) — vers un hôte reconnu par son nom (autre utilisateur, casse, point final, alias ssh lu par `ssh -G` : HostName, HostKeyAlias, ProxyJump, ProxyCommand, CanonicalDomains) ou, pour une écriture, par son adresse (IP sous toute écriture, `::ffff:`, autre nom du serveur), seules les lectures `git-upload-pack` / `git-upload-archive` passent, `git send-pack` compris ; sans terminal, en `BatchMode` + pour un hôte lu en ssh, pas de https : un proxy mort (`http.<url>.proxy` = 127.0.0.1:9), puis un quitteur (aucune fenêtre). La lecture et GitHub ne sont pas touchés. **Limites** (« aucun push par git » n'est pas « aucun push ») : la clé qui écrit reste à la portée de tout processus — ssh hors de git, `personal_access_token` de gitlab-shell puis un push https avec ce jeton —, un tunnel pur, https sur un autre port, un contournement délibéré de la configuration (`GIT_SSH_COMMAND`, `-c core.sshCommand=…`, `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, `NO_PROXY`, `ext::`) ; seul un accès en lecture seule côté serveur les couvre. `just doctor` éprouve chaque couche hors ligne et signale ce qu'il voit dans l'environnement. | `.devcontainer/lib-dbt.sh`, `git-ssh-garde.sh` |
 
 Les boutons Run/Build/Preview des extensions dbt n'ont que les verrous 1, 2 et 4.
 
@@ -112,7 +114,10 @@ sous-module enregistrerait, sans son « bump » à chaque commit.
 - `just lock-status` (et `just doctor`, et la fin de `just sync`) montre ce qui
   a bougé depuis le verrou.
 - Rejouer un état passé : `git checkout <commit du coordinateur>`, puis
-  `just lock-checkout` (worktrees détachés aux commits verrouillés), et
+  `just lock-checkout` (worktrees détachés aux commits verrouillés ; la garde
+  ssh du verrou 4 tourne depuis sa copie de `~/.local/libexec/`, la lecture
+  ssh continue — mais un `just setup` lancé sur un commit d'avant la garde la
+  retirerait jusqu'au retour sur la branche), et
   `just lock-release` pour revenir sur les branches.
 
 ## Le projet global
