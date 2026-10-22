@@ -40,7 +40,9 @@
 # A FLUX is a working copy of the fleet where v4 work runs in parallel with the
 # main copy (one redescente, one simulation…): declared by an untracked,
 # git-ignored .devcontainer/flux.conf — one line DBT_V4_FLUX=<A999>, a capital
-# letter and three digits —, never by dbt.conf nor by an exported variable. Its
+# letter and three digits, or DBT_V4_FLUX=H, the HARMONIZED line (a v4 where
+# every deviation is brought back to one standard, beside the main copy's ISO
+# line) —, never by dbt.conf nor by an exported variable. Its
 # v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
 # profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
 # flux, not the v1/v2/global spaces (no build there). The MAIN copy is named,
@@ -1279,7 +1281,7 @@ dbt_ensure_global() {
 _DBT_PREFIX_LINE_RE='^[[:space:]]*(export[[:space:]]+)?DATASET_PREFIX[[:space:]]*='
 
 # _dbt_v4_prefix_ok — DBT_BQ_DATASET_PREFIX_V4 is <DBT_BQ_DATASET_PREFIX>_<letters, digits, _>, and no `_`-separated
-# segment of what follows <DBT_BQ_DATASET_PREFIX>_ has a flux's shape, <A999> (any case): JDOE_V4_D005 would be the
+# segment of what follows <DBT_BQ_DATASET_PREFIX>_ has a flux's shape, <A999> or H (any case): JDOE_V4_D005 would be the
 # space of flux D005 seen from the main copy, and a flux D006 under it would write JDOE_V4_D005_D006_…, inside D005's
 _dbt_v4_prefix_ok() {
   local S X LC_ALL=C
@@ -1311,6 +1313,10 @@ _dbt_under_v4() {
 # fleet: under one prefix they would build — and prove against — the same tables. A copy declares its flux in
 # .devcontainer/flux.conf, ONE line (blank lines and # comments aside)
 #   DBT_V4_FLUX=<A999>        a capital letter and three digits (D005, S001) — never a package's name (DWH_…, DBT_…)
+#   DBT_V4_FLUX=H             the HARMONIZED line: a long-lived copy whose v4 is the main copy's (the ISO line: every
+#                             output equal to production) plus one convergence per deviation (outputs may deviate,
+#                             one implementation per concept) — its own space, <DBT_BQ_DATASET_PREFIX_V4>_H, where the
+#                             ISO line never writes, and the only one it writes
 # The file belongs to the working copy: parsed, never sourced; ignored by git and untracked, or every dbt command is
 # refused (dbt_v4_flux_problem). Then:
 #   - v4/ and global-v4/ run on profiles/v4-<FLUX>.env (generated from profiles/dbt.env, DATASET_PREFIX =
@@ -1325,7 +1331,8 @@ _dbt_under_v4() {
 #     profiles/v4.env, and the verdict line names the flux: a proof holds for one flux only (dbt_hooks_v4_seal,
 #     dbt_hooks_v4_verdict).
 # Without flux.conf, in the MAIN copy — the one DBT_V4_MAIN_WS (dbt.conf) names by its real path — nothing changes,
-# but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*).
+# but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or
+# <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*): the main copy's v4 — the ISO line — never writes the harmonized line's.
 # Spaces are disjoint: a flux name is followed by `_` or the end, and the main space is what no flux can name. Writes
 # are accepted byte by byte (BigQuery dataset names are case-sensitive), refused in any case.
 # The main copy is named, never inferred from a missing file (flux.conf is ignored by git: `git clean -X` erases it):
@@ -1337,8 +1344,9 @@ _dbt_under_v4() {
 # _dbt_flux_consts — the flux syntax, explicit classes ([A-Z] may match lowercase letters under some locales). Set when
 # the lib is sourced, and by dbt_load_conf before dbt.conf: dbt.conf changing one is an error (_dbt_flux_changed).
 _dbt_flux_consts() {
-  DBT_V4_FLUX_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]$'
-  _DBT_FLUX_LINE_RE='^DBT_V4_FLUX=([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789])$'
+  # <A999> (a work run in parallel) or H (the harmonized line) — H alone: no other single letter is a flux
+  DBT_V4_FLUX_RE='^([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]|H)$'
+  _DBT_FLUX_LINE_RE='^DBT_V4_FLUX=([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789][0123456789][0123456789]|H)$'
   # a blank or comment line: space, tab, CR, VT, FF — spelled out ([[:space:]] would follow the locale: U+2003 is a
   # space under C.UTF-8, not under C)
   _DBT_FLUX_BLANK_RE=$'^[ \t\r\v\f]*(#.*)?$'
@@ -1366,7 +1374,8 @@ _dbt_upper() { printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]'; }
 
 # _dbt_flux_parse FILE — prints the flux FILE declares (nothing when there is no FILE), or returns 1: FILE is not a
 # regular file (a link included, even dangling), holds a NUL byte (bash's read would drop it: D0<NUL>05 is not D005),
-# or holds anything but ONE line DBT_V4_FLUX=<A999>, blank lines and # comments aside (a CRLF line is not one; the last
+# or holds anything but ONE line DBT_V4_FLUX=<A999> or DBT_V4_FLUX=H, blank lines and # comments aside (a CRLF line is
+# not one; the last
 # line counts even without its newline). Read byte by byte (LC_ALL=C: any byte in a comment, whatever the locale — as
 # the Python mirror of the fleet reads it). Parsed, never sourced.
 _dbt_flux_parse() {
@@ -1399,7 +1408,7 @@ _dbt_flux_read() {
     return 0
   fi
   if ! F="$(_dbt_flux_parse "$DBT_V4_FLUX_FILE")"; then
-    DBT_V4_FLUX_ERR=".devcontainer/flux.conf is not a regular file holding one line DBT_V4_FLUX=<A999> (a capital letter, three digits; blank lines and # comments aside)"
+    DBT_V4_FLUX_ERR=".devcontainer/flux.conf is not a regular file holding one line DBT_V4_FLUX=<A999> (a capital letter, three digits) or DBT_V4_FLUX=H (the harmonized line; blank lines and # comments aside)"
     return 0
   fi
   if [ -n "$F" ] && ! dbt_is_fleet; then
@@ -1482,7 +1491,8 @@ _dbt_flux_main_problem() {
       done
 }
 
-# _dbt_flux_vestiges — the fluxes, other than its own, this copy shows traces of: a profiles/v4-<A999>.env, or a .env
+# _dbt_flux_vestiges — the fluxes, other than its own, this copy shows traces of: a profiles/v4-<A999>.env or
+# profiles/v4-H.env, or a .env
 # of the v4 space (v4/<member>/…, global-v4/) that links to one — even dangling: `git clean -X` erases the file and
 # leaves the link
 _dbt_flux_vestiges() {
@@ -1494,7 +1504,7 @@ _dbt_flux_vestiges() {
       [ -L "$P/.env" ] && basename "$(readlink "$P/.env")"
     done
     [ -L "$DBT_WS/global-v4/.env" ] && basename "$(readlink "$DBT_WS/global-v4/.env")"
-  ) 2>/dev/null | LC_ALL=C sed -nE 's/^v4-([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789]{3})\.env$/\1/p' \
+  ) 2>/dev/null | LC_ALL=C sed -nE 's/^v4-([ABCDEFGHIJKLMNOPQRSTUVWXYZ][0123456789]{3}|H)\.env$/\1/p' \
     | LC_ALL=C grep -vxF -- "${DBT_V4_FLUX:-@}" | LC_ALL=C sort -u
 }
 
@@ -2160,7 +2170,8 @@ dbt_process() {
   fi
   _dbt_load_token
   case "$(dbt_v4_role)" in
-    flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})" ;;
+    flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})"
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes" ;;
     refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
     orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
   esac

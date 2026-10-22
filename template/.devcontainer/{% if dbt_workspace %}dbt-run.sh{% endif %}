@@ -64,12 +64,14 @@
 #     everything else never there — the DATASET_PREFIX in force and the .env
 #     the dbt extension reads are checked on every command, parse included
 #   - keeps the fluxes apart (lib-dbt.sh, "a flux"): in a working copy that
-#     declares one (.devcontainer/flux.conf, DBT_V4_FLUX=<A999>), v4/ and
+#     declares one (.devcontainer/flux.conf, DBT_V4_FLUX=<A999>, or H for the
+#     harmonized line), v4/ and
 #     global-v4/ run on profiles/v4-<FLUX>.env and write only under
 #     <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*, byte by byte), and v1/, v2/,
 #     global/ run an allowlist only (parse, ls, compile, show, deps); in the
 #     MAIN copy (DBT_V4_MAIN_WS, its real path), the v4 never writes a flux's
-#     space (<DBT_BQ_DATASET_PREFIX_V4>_<A999>, = or _*, any case); a copy that
+#     space (<DBT_BQ_DATASET_PREFIX_V4>_<A999> or _H, = or _*, any case: the
+#     ISO line never writes the harmonized line's space); a copy that
 #     is neither (an ORPHAN: a clone, a flux whose flux.conf was erased) runs no
 #     v4 command and the same allowlist elsewhere. A declaration that cannot be
 #     trusted — or a flux whose dbt.conf differs from the main copy's on the
@@ -130,7 +132,7 @@ flux_guard() {
   mapfile -t WHY <<< "$PB"
   refuse "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: this working copy's flux cannot be trusted — every dbt command is refused:" \
          "${WHY[@]}" \
-         "A flux is .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999>, ignored by git (no flux: remove the file); then: just setup"
+         "A flux is .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999> (or H, the harmonized line), ignored by git (no flux: remove the file); then: just setup"
 }
 
 # orphan_refuse WHAT — an ORPHAN copy (dbt_v4_role: a fleet with a v4, neither the main copy nor a flux) has no v4 space
@@ -139,7 +141,7 @@ orphan_refuse() {
   mapfile -t WHY < <(dbt_v4_orphan_why)
   refuse "orphan copy: $1 refused — this working copy is neither the main copy (DBT_V4_MAIN_WS) nor a flux: it has no v4 space," \
          "and its v1/v2/global build nothing (they are the main copy's spaces)." "${WHY[@]}" \
-         "A flux: .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999>, ignored by git. The main copy: DBT_V4_MAIN_WS=\"<its real path>\" in .devcontainer/dbt.conf. Then: just setup"
+         "A flux: .devcontainer/flux.conf, one line DBT_V4_FLUX=<A999> (or H, the harmonized line), ignored by git. The main copy: DBT_V4_MAIN_WS=\"<its real path>\" in .devcontainer/dbt.conf. Then: just setup"
 }
 
 # role_guard V ARGS… — (run_dbt, after flux_guard) what a working copy that is not the main one runs (dbt_v4_role):
@@ -740,7 +742,8 @@ space_check() {
 # project, outside DBT_BQ_DATASET_PREFIX — and, the v4 space, for v4/ and global-v4/ outside this copy's v4 space,
 # for everything else inside the v4 space (DBT_BQ_DATASET_PREFIX_V4, = or _*, every flux's included). This copy's v4
 # space: in a flux, <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*); else DBT_BQ_DATASET_PREFIX_V4 (= or _*) minus every
-# flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> (= or _*). Without a v4 prefix, a v4 node always offends
+# flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*: the harmonized line's, never
+# written by the main copy's ISO line). Without a v4 prefix, a v4 node always offends
 # (fail-closed). BigQuery dataset names are case-sensitive: a write is ACCEPTED byte by byte (the exact prefix, then
 # `_` or the end: JDOE_V4_d005_x is not under JDOE_V4_D005) and REFUSED in any case (the v4 space for v1/v2/global, a
 # flux's shape for the main copy). The flux shape spelled byte by byte (mawk, any locale).
@@ -752,7 +755,8 @@ offenders() {
     function exact(s, f) { return s == f || index(s, f "_") == 1 }
     function anycase(s, f) { return exact(toupper(s), toupper(f)) }
     function fluxlike(s,   r) { s = toupper(s); if (index(s, q "_") != 1) return 0
-      r = substr(s, length(q) + 2); return r ~ /^[A-Z][0-9][0-9][0-9]$/ || r ~ /^[A-Z][0-9][0-9][0-9]_/ }
+      r = substr(s, length(q) + 2); if (r == "H" || index(r, "H_") == 1) return 1
+      return r ~ /^[A-Z][0-9][0-9][0-9]$/ || r ~ /^[A-Z][0-9][0-9][0-9]_/ }
     function here(s) { if (fx != "") return exact(s, qx "_" fx); return exact(s, qx) && !fluxlike(s) }
     NF>=4 && ($2!=p || (x!="" && index($3,x)!=1) || (v4 && (qx=="" || !here($3))) || (!v4 && qx!="" && anycase($3,qx))) {
       print "   " $1 " " $4 " -> " $2 "." $3 }'
@@ -969,7 +973,7 @@ run_dbt() {
       if dbt_is_v4 "$V" && [ -n "${DBT_V4_FLUX:-}" ]; then
         echo "   (allowed for the v4 space of flux $DBT_V4_FLUX: project $DBT_BQ_PROJECT, dataset $(dbt_v4_prefix) or $(dbt_v4_prefix)_* — never the main v4 space nor another flux's):" >&2
       elif dbt_is_v4 "$V"; then
-        echo "   (allowed for the v4 space: project $DBT_BQ_PROJECT, dataset $DBT_BQ_DATASET_PREFIX_V4 or ${DBT_BQ_DATASET_PREFIX_V4}_* — never a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999> or ${DBT_BQ_DATASET_PREFIX_V4}_<A999>_*):" >&2
+        echo "   (allowed for the v4 space: project $DBT_BQ_PROJECT, dataset $DBT_BQ_DATASET_PREFIX_V4 or ${DBT_BQ_DATASET_PREFIX_V4}_* — never a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999>[_*], nor the harmonized line's, ${DBT_BQ_DATASET_PREFIX_V4}_H[_*]):" >&2
       else
         echo "   (allowed: project $DBT_BQ_PROJECT${DBT_BQ_DATASET_PREFIX:+, dataset starting with $DBT_BQ_DATASET_PREFIX}${DBT_BQ_DATASET_PREFIX_V4:+, never $DBT_BQ_DATASET_PREFIX_V4 nor ${DBT_BQ_DATASET_PREFIX_V4}_* — the v4 space}):" >&2
       fi

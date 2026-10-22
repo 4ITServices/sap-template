@@ -74,7 +74,8 @@ logs/
 # Anonymous usage id that dbt writes next to the profiles it reads
 profiles/.user.yml
 {%- if project_type == "dbt-fleet" %}
-# A flux — a working copy where v4 work runs in parallel with the main copy:
+# A flux — a working copy where v4 work runs in parallel with the main copy, or
+# the harmonized line (flux H):
 # its declaration and its generated environment belong to that copy only. The
 # guard refuses every dbt command while git would commit them.
 /.devcontainer/flux.conf

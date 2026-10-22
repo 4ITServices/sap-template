@@ -82,7 +82,11 @@ DBT_TARGET_NAME="{{ dbt_target_name }}"
 # DBT_V4_FLUX=<A999> (a capital letter, three digits), ignored by git. Its v4/
 # and global-v4/ then write under <DBT_BQ_DATASET_PREFIX_V4>_<A999> only
 # (profiles/v4-<A999>.env), its v1/v2/global build nothing, and this copy never
-# writes there. Never set DBT_V4_FLUX here: every dbt command would be refused.
+# writes there. DBT_V4_FLUX=H is the HARMONIZED line: a long-lived copy whose
+# v4 is this copy's (the ISO line, outputs equal to production) plus one
+# convergence per deviation, under <DBT_BQ_DATASET_PREFIX_V4>_H — where this
+# copy never writes. Never set DBT_V4_FLUX here: every dbt command would be
+# refused.
 # The MAIN working copy is NAMED, by its real path in the container (e.g.
 # "/workspaces/<folder>"): the one copy whose v4 writes the main v4 space and
 # that writes the container's state (engines, ~/.bashrc, global git settings).

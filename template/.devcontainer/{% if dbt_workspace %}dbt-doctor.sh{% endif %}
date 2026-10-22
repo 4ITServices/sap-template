@@ -370,7 +370,8 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
   # which working copy this is (dbt_v4_role): the main one is named (DBT_V4_MAIN_WS), never inferred from a missing file
   case "$(dbt_v4_role)" in
     main)   ok "this copy is the MAIN one (DBT_V4_MAIN_WS=\"$DBT_V4_MAIN_WS\", dbt.conf): the main v4 space, and the container's state (engines, ~/.bashrc, global git settings)" ;;
-    flux)   ok "this copy is flux $DBT_V4_FLUX; the main copy is $DBT_V4_MAIN_WS — it keeps the container's state (engines, ~/.bashrc, global git settings)" ;;
+    flux)   ok "this copy is flux $DBT_V4_FLUX; the main copy is $DBT_V4_MAIN_WS — it keeps the container's state (engines, ~/.bashrc, global git settings)"
+            [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else" ;;
     orphan) while IFS= read -r L; do
               ko "ORPHAN copy — $L" "every v4 command is refused and v1/v2/global build nothing until this copy is the main one (DBT_V4_MAIN_WS) or a flux (.devcontainer/flux.conf); then: just setup"
             done < <(dbt_v4_orphan_why) ;;
@@ -395,7 +396,7 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
   FPB="$(dbt_v4_flux_problem)"
   if [ -n "$FPB" ]; then
     while IFS= read -r L; do
-      ko "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: $L" "fix .devcontainer/flux.conf (one line DBT_V4_FLUX=<A999>, ignored by git) or remove it — until then every dbt command is refused"
+      ko "flux${DBT_V4_FLUX:+ $DBT_V4_FLUX}: $L" "fix .devcontainer/flux.conf (one line DBT_V4_FLUX=<A999> or DBT_V4_FLUX=H, ignored by git) or remove it — until then every dbt command is refused"
     done <<< "$FPB"
   elif [ -n "${DBT_V4_FLUX:-}" ]; then
     ok "flux $DBT_V4_FLUX (.devcontainer/flux.conf): v4/ and global-v4/ write under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* only — never the main v4 space nor another flux's; v1/, v2/ and global/ build nothing here"
@@ -406,7 +407,7 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
       ko "${E4F#"$WS"/} missing or stale" "just setup (never commit it)"
     fi
   elif _dbt_v4_prefix_ok && [ "$(dbt_v4_role)" = main ]; then
-    ok "no flux (.devcontainer/flux.conf absent): the main v4 space — a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999> / ${DBT_BQ_DATASET_PREFIX_V4}_<A999>_*, is never written from here"
+    ok "no flux (.devcontainer/flux.conf absent): the main v4 space — a flux's, ${DBT_BQ_DATASET_PREFIX_V4}_<A999> / ${DBT_BQ_DATASET_PREFIX_V4}_<A999>_*, and the harmonized line's, ${DBT_BQ_DATASET_PREFIX_V4}_H / ${DBT_BQ_DATASET_PREFIX_V4}_H_*, are never written from here"
   fi
   # the reverse: no project outside the v4 space reads an env of the v4 space (profiles/v4.env, profiles/v4-<flux>.env)
   E4="$(readlink -f "$(dbt_v4_env_file)")"; LEAK=""

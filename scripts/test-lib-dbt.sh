@@ -1611,6 +1611,70 @@ FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
 O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "orphan copy" && ! has "$O" "ARGS=" && pass "…et l'écriture sous l'espace principal JDOE_V4 refusée" || bad "ex-flux vers l'espace principal ($O)"
 ASMAIN; life "$FW" start >/dev/null
 
+echo "== la ligne harmonisée : le flux H (JDOE_V4_H) — elle n'écrit que là, et la ligne ISO (la copie principale) jamais là =="
+ASFLUX; FLUX 'DBT_V4_FLUX=H\n'; O="$(life "$FW" start)"
+[ "$(LIBF dbt_v4_prefix)" = JDOE_V4_H ] && [ "$(LIBF dbt_v4_env_file)" = "$FW/profiles/v4-H.env" ] && [ "$(LIBF dbt_v4_role)" = flux ] \
+  && grep -qx 'DATASET_PREFIX=JDOE_V4_H' "$FW/profiles/v4-H.env" && test "$(readlink -f "$FW/v4/delta/dbt/.env")" = "$(readlink -f "$FW/profiles/v4-H.env")" \
+  && pass "flux.conf DBT_V4_FLUX=H, la ligne harmonisée : JDOE_V4_H, profiles/v4-H.env, le .env de v4/delta y pointe" || bad "flux H ($(LIBF dbt_v4_prefix) $(LIBF dbt_v4_role))"
+has "$O" "flux H: the HARMONIZED line" && pass "…et just setup le dit" || bad "setup muet sur la ligne harmonisée ($(grep -i flux <<<"$O" | head -3))"
+O="$(FRUN v4 delta parse)"; grep -q 'PFX=JDOE_V4_H$' <<<"$O" && pass "just v4 delta (ligne harmonisée) → DATASET_PREFIX=JDOE_V4_H" || bad "v4 delta sous H ($O)"
+for X in JDOE_V4_H_DELTA__X JDOE_V4_H JDOE_V4_H_delta__x; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && has "$O" "ARGS=run -s a" && pass "ligne harmonisée : écriture v4 sous $X acceptée" || bad "ligne harmonisée : $X refusé ($O)"
+done
+for X in JDOE_V4_DELTA__X JDOE_V4 JDOE_V4_D005_DELTA__X JDOE_V4_HR_X JDOE_V4_HDELTA__X JDOE_V4_h_delta__x jdoe_v4_H_X JDOE_DELTA__X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "flux H" && ! has "$O" "ARGS=" && pass "ligne harmonisée : écriture v4 sous $X refusée (la ligne ISO, un flux, une borne, une autre casse, la v2)" || bad "ligne harmonisée : $X accepté ($O)"
+done
+FJ JDOE_V4_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN global-v4 run -s a)"; has "$O" "outside the sandbox" && ! has "$O" "ARGS=" && pass "ligne harmonisée : global-v4 sous l'espace de la ligne ISO (JDOE_V4_*) refusé" || bad "global-v4 H vers ISO ($O)"
+FJ JDOE_DELTA__X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "a flux writes only its v4 space" && ! has "$O" "ARGS=" \
+  && pass "ligne harmonisée : \`v2 delta run\` refusé (la v2 est commune aux deux lignes : la copie principale seule y écrit)" || bad "v2 run sous H ($O)"
+O="$(FRUN v2 delta parse)"; has "$O" "ARGS=parse" && pass "…\`v2 delta parse\` accepté (lecture)" || bad "v2 parse sous H ($O)"
+# un paquet de l'espace v4 qui se lirait comme H : refusé ; hr, non (borne « _ »)
+mkdir -p "$FW/global-v4/dbt_packages/h_utils"
+O="$(FRUN v4 delta parse)"; has "$O" "flux H reads as a package of the v4 space (h_utils)" && ! has "$O" "ARGS=" && pass "paquet h_utils dans global-v4 : la ligne harmonisée refusée (ses datasets seraient les siens)" || bad "collision H ($O)"
+rmdir "$FW/global-v4/dbt_packages/h_utils"; mkdir -p "$FW/global-v4/dbt_packages/hr"
+O="$(FRUN v4 delta parse)"; has "$O" "PFX=JDOE_V4_H" && pass "…un paquet hr ne se lit pas comme H : accepté" || bad "borne H, paquet ($O)"
+rmdir "$FW/global-v4/dbt_packages/hr"; rmdir "$FW/global-v4/dbt_packages" 2>/dev/null
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"
+has "$O" "✅ this copy is flux H; the main copy is $MAINW" && has "$O" "flux H is the HARMONIZED line" && has "$O" "✅ profiles/v4-H.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_H" \
+  && pass "doctor : la ligne harmonisée (flux H), sa copie principale, son environnement" || bad "doctor H ($(grep -iE 'flux|this copy' <<<"$O"))"
+printf 'VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau 0123456789abcdef0123\n' > "$W/verdict-h.md"
+[ "$(LIBF dbt_hooks_v4_verdict_line abc H)" = "VERDICT HOOKS GLOBAL-V4 FLUX H : PREUVE OK ; TÉMOINS OK ; sceau abc" ] \
+  && LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 H >/dev/null && ! LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 >/dev/null \
+  && ! LIBF dbt_hooks_v4_verdict "$W/verdict-h.md" 0123456789abcdef0123 D005 >/dev/null \
+  && pass "verdict de la ligne harmonisée (« … FLUX H : … ») : valable pour H, ni pour la copie principale ni pour un autre flux" || bad "verdict H"
+# la déclaration : H seul, en capitale
+refusenv "minuscule h"                'DBT_V4_FLUX=h\n'
+refusenv "H suivi d'un chiffre"       'DBT_V4_FLUX=H1\n'
+refusenv "HH"                         'DBT_V4_FLUX=HH\n'
+refusenv "H_"                         'DBT_V4_FLUX=H_\n'
+refusenv "une autre lettre seule (G)" 'DBT_V4_FLUX=G\n'
+# la ligne harmonisée effacée (git clean -X) : orpheline, jamais la ligne ISO — et elle dit qu'elle était H
+FLUX 'DBT_V4_FLUX=H\n'; life "$FW" start >/dev/null; NOFLUX
+[ -f "$FW/profiles/v4-D005.env" ] && mv "$FW/profiles/v4-D005.env" "$W/v4-D005.env.cote"
+O="$(life "$FW" start)"
+has "$O" "ORPHAN" && has "$O" "this copy WAS flux H" && pass "flux.conf effacé de la ligne harmonisée, just setup : copie orpheline, « this copy WAS flux H » — jamais la ligne ISO" || bad "ex-ligne H ($(grep -iE 'orphan|flux' <<<"$O" | head -4))"
+[ -f "$W/v4-D005.env.cote" ] && mv "$W/v4-D005.env.cote" "$FW/profiles/v4-D005.env"
+# la ligne ISO : la copie principale n'écrit jamais l'espace de la ligne harmonisée
+ASMAIN; life "$FW" start >/dev/null
+for X in JDOE_V4_H_DELTA__X JDOE_V4_H JDOE_V4_h_delta__x JDOE_V4_h; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"
+  has "$O" "outside the sandbox" && has "$O" "nor the harmonized line's" && ! has "$O" "ARGS=" && pass "ligne ISO (copie principale) : écriture v4 sous $X refusée (l'espace de la ligne harmonisée, toute casse)" || bad "ligne ISO : $X accepté ($O)"
+done
+for X in JDOE_V4_HR_X JDOE_V4_HDELTA__X JDOE_V4_DELTA__H JDOE_V4_DELTA__H_X; do FJ "$X" a > "$W/ls-f.jsonl"
+  O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v4 delta run -s a)"; has "$O" "all inside the sandbox" && pass "ligne ISO : écriture v4 sous $X acceptée (pas l'espace de la ligne harmonisée)" || bad "ligne ISO : $X refusé ($O)"
+done
+FJ JDOE_V4_H_X a > "$W/ls-f.jsonl"
+O="$(STUB_LS_FILE="$W/ls-f.jsonl" FRUN v2 delta run -s a)"; has "$O" "never JDOE_V4" && pass "v2 sous JDOE_V4_H_X : refusé (l'espace v4, ligne harmonisée comprise)" || bad "v2 vers H ($O)"
+O="$( (cd "$FW" && bash .devcontainer/dbt-doctor.sh) 2>/dev/null)"; has "$O" "and the harmonized line's, JDOE_V4_H / JDOE_V4_H_*, are never written from here" && pass "doctor : la copie principale dit qu'elle n'écrit jamais l'espace de la ligne harmonisée" || bad "doctor ISO et H ($(grep -i 'no flux' <<<"$O"))"
+sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4_H"/' "$FW/.devcontainer/dbt.conf"
+O="$(FRUN v4 delta parse)"; has "$O" "every v4 command is refused" && pass "DBT_BQ_DATASET_PREFIX_V4='JDOE_V4_H' (l'espace de la ligne harmonisée pris pour l'espace principal) : v4 refusée" || bad "préfixe v4 JDOE_V4_H accepté ($O)"
+sed -i 's/^DBT_BQ_DATASET_PREFIX_V4=.*/DBT_BQ_DATASET_PREFIX_V4="JDOE_V4"/' "$FW/.devcontainer/dbt.conf"
+PFXOK JDOE_V4_HR && PFXOK JDOE_V4_HD005 && ! PFXOK JDOE_H_V4 && ! PFXOK JDOE_V4_h \
+  && pass "_dbt_v4_prefix_ok : un segment H (toute casse) refusé ; HR, HD005 acceptés" || bad "_dbt_v4_prefix_ok et H"
+
 echo "== flux : destinations dans un flux =="
 printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__JDOE_RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_V4_D005_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v4.jsonl"
 printf '%s\n%s\n' '{"database":"sandbox-prj","schema":"JDOE_DELTA__RUN","name":"m","resource_type":"model"}' '{"database":"sandbox-prj","schema":"JDOE_DELTA__STG","name":"s","resource_type":"model"}' > "$W/d-v2.jsonl"
@@ -1654,6 +1718,12 @@ has "$O" "✅ global-v4: compile/show allowed — the proof of its hooks holds (
 has "$O" "✅ flux D005 (.devcontainer/flux.conf)" && has "$O" "✅ profiles/v4-D005.env = profiles/dbt.env with DATASET_PREFIX=JDOE_V4_D005" && pass "doctor : le flux, son environnement" || bad "doctor flux ($(grep -i flux <<<"$O"))"
 has "$O" "✅ this copy is flux D005; the main copy is $MAINW" && pass "doctor : la copie de flux et sa copie principale, dites" || bad "doctor rôle flux ($(grep -i 'this copy' <<<"$O"))"
 has "$O" "✅ v4/delta/: .env -> profiles/v4-D005.env" && has "$O" "✅ global-v4/.env -> profiles/v4-D005.env" && pass "doctor : .env de la v4 et de global-v4 sur l'environnement du flux" || bad "doctor .env flux ($(grep '\.env' <<<"$O"))"
+FLUX 'DBT_V4_FLUX=H\n'; life "$FW" start >/dev/null; SH="$(SEAL)"
+[[ "$SH" =~ ^[0-9a-f]{20}$ ]] && [ "$SH" != "$SM" ] && [ "$SH" != "$S5" ] && [ "$SH" != "$S6" ] && pass "sceau de la ligne harmonisée (flux H) : le sien ($SH)" || bad "sceau H ($SH)"
+VLINE "$SH" H; O="$(FRUN global-v4 compile)"; has "$O" "ARGS=compile" && has "$O" "seal $SH, docs/hooks-v4.md, flux H" && pass "ligne harmonisée, sa preuve (VERDICT … FLUX H) : compile de global-v4 accepté" || bad "preuve H ($O)"
+VLINE "$SM"; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve de la ligne ISO (la copie principale) : refusée dans la ligne harmonisée" || bad "preuve ISO sous H ($O)"
+VLINE "$S5" D005; O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "…la preuve du flux D005 : refusée dans la ligne harmonisée" || bad "preuve D005 sous H ($O)"
+FLUX 'DBT_V4_FLUX=D005\n'; life "$FW" start >/dev/null
 NOFLUX; ASMAIN; life "$FW" start >/dev/null
 O="$(FRUN global-v4 compile)"; has "$O" "does not hold" && ! has "$O" "ARGS=compile" && pass "flux retiré : la preuve du flux D005 ne vaut pas pour la copie principale" || bad "preuve du flux hors du flux ($O)"
 [ "$(SEAL)" = "$SM" ] && pass "…et le sceau principal est celui d'avant le flux" || bad "sceau principal changé"

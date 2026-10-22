@@ -283,6 +283,22 @@ and commit messages; this changelog starts at v0.8.12.
   `just doctor` checks a guest's lock even under `DBT_UPSTREAM_PUSH_LOCK=0`.
   Tests: 783 offline checks in `scripts/test-lib-dbt.sh` (775 after the
   rebase on `main`); 7 more mutants, all killed.
+- **The harmonized line: flux `H`.** Besides `<A999>` (a work run in
+  parallel), `.devcontainer/flux.conf` may declare `DBT_V4_FLUX=H`: the
+  HARMONIZED line, a long-lived working copy whose v4 is the main copy's (the
+  ISO line, every output equal to production) plus one convergence per
+  deviation (outputs may deviate, one implementation per concept). Its `v4/`
+  and `global-v4/` write under `<DBT_BQ_DATASET_PREFIX_V4>_H` (`=` or `_*`,
+  byte by byte) only — never the ISO line's space, never another flux's —,
+  its `v1/`, `v2/`, `global/` run the read-only allowlist (the v2 is common to
+  both lines), its hook proof is its own (`VERDICT HOOKS GLOBAL-V4 FLUX H : …`,
+  sealed on `profiles/v4-H.env`). The main copy — the ISO line — never writes
+  `<DBT_BQ_DATASET_PREFIX_V4>_H` nor `…_H_*`, in any case (`JDOE_V4_HR_x`
+  stays its own). `H` alone: `h`, `HH`, `H1`, `H_` or any other single letter
+  are refused; a package of the v4 space named `h` or `h_…` refuses the
+  flux; `DBT_BQ_DATASET_PREFIX_V4` may not hold an `H` segment.
+  Tests: 826 offline checks in `scripts/test-lib-dbt.sh`; 7 more
+  mutants (103 in all), all killed.
 
 ### Fixed (on the unreleased dbt-project type)
 
