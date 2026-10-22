@@ -4,24 +4,37 @@
 # sap-template: git-push-garde-h (marker: lib-dbt.sh replaces an installed hook only when it carries this line)
 # Updated by `copier update` — do not edit in projects.
 #
-# The harmonized line (flux H: .devcontainer/flux.conf, DBT_V4_FLUX=H) is a working copy of the fleet whose v4 copies
-# follow branches of their own, v4-h (<product>/v4-h when the product's branches live in this repository), beside the
-# main copy's ISO line (v4). lib-dbt.sh installs this file, byte for byte, as <git common dir>/hooks/pre-push of that
-# copy (dbt_ensure_push_guard_h) — never in the main copy — and refuses every dbt command of the copy while git would
-# not run it (_dbt_push_guard_h_problem). It stays when flux.conf is erased: an ex-H copy keeps refusing.
+# The harmonized line (flux H: .devcontainer/flux.conf, DBT_V4_FLUX=H) is a working copy of the fleet — a CLONE, with
+# a git repository of its own — whose v4 copies follow branches of their own, v4-h (<product>/v4-h when the product's
+# branches live in this repository), beside the main copy's ISO line (v4). lib-dbt.sh installs this file, byte for
+# byte, as <git dir>/hooks/pre-push of that copy (dbt_ensure_push_guard_h) — never in the main copy, never in a
+# repository the copy shares — and refuses every dbt command of the copy while git would not run it
+# (_dbt_push_guard_h_problem). It stays when flux.conf is erased: an ex-H copy keeps refusing.
 #
 # git runs it before every `git push` of that copy, its worktrees included: $1 = the remote's name (or the URL pushed
-# to), one line per ref on stdin: <local ref> <local oid> <remote ref> <remote oid>. It refuses the whole push when:
+# to), $2 = its URL, one line per ref on stdin: <local ref> <local oid> <remote ref> <remote oid>. It refuses the whole
+# push when:
 #   - a ref updated, created or deleted is a branch of the ISO line, or of the generations both lines share:
 #     v1, v2, v4 — or <x>/v1, <x>/v2, <x>/v4 (a product whose branches live in this repository) — on any remote:
-#     the harmonized line writes its v4-h branches only (committer-redescente.sh's `push home-<p> HEAD:v4`, run
-#     from here, would mix the two lines for good: published history is never rewritten);
+#     the harmonized line writes its v4-h branches only;
+#   - a ref updated, created or deleted is the main copy's own branch: main or master, on any remote, or the
+#     remote's default branch as last fetched (refs/remotes/<remote>/HEAD) — the main copy never sees a file of the
+#     harmonized line (its lock products-h.lock, its global-v4 bridge), so none is ever pushed there from here;
 #   - a v4-h branch (or <x>/v4-h) is CREATED anywhere but at the published v4 of the same remote, as last fetched
 #     (refs/remotes/<remote>/v4, <remote>/<x>/v4) — the opening, and only it:
 #       git push home-<product> home-<product>/v4:refs/heads/v4-h
 #     (pushed to a URL rather than a remote: no published v4 to compare with, refused);
-#   - a v4-h branch is DELETED, or updated by anything but a fast-forward.
-# Any other ref (the coordinator's own branches on origin, a tag) is left to git.
+#   - a v4-h branch is DELETED, or updated by anything but a fast-forward;
+#   - a commit a v4-h update brings that is not in the published v4 (as last fetched) carries a `Redescente:` line: a
+#     redescente belongs to the ISO line — committed on v4, it reaches v4-h by a merge of v4, never on v4-h alone. Case:
+#     the coordinator's committer-redescente.sh, run in this copy, commits « Redescente: Dnnn » on <product>/v4-h and
+#     pushes HEAD:v4-h — from proofs read in a directory every copy of the container shares (/tmp/redescentes-v4/).
+# Any other ref (the harmonized line's own coordinator branch on origin, a tag) is left to git.
+# git-lfs: when the copy's pre-push hook was git-lfs's own (a clone of a repository that tracks files in LFS gets it),
+# lib-dbt.sh puts this guard in its place, and the guard runs it: `git lfs pre-push` on the same arguments and input,
+# once the push is accepted — the LFS objects still leave with their commits. Without git-lfs on the PATH, in a
+# repository configured for it, the push is refused as git-lfs's own hook would (exit 2). `git lfs install` may then
+# say « Hook already exists: pre-push »: expected, this guard is that hook.
 # Not covered — a guard against accidents, not against a deliberate bypass: `git push --no-verify`, a hooks path
 # given at push time (-c core.hooksPath=…, GIT_CONFIG_*), `git send-pack`, a push from outside git with the same key.
 # Offline: it reads this repository only.
@@ -32,6 +45,10 @@ REMOTE="${1:-}"
 BAD=""
 # an all-zero object name (SHA-1 or SHA-256): the ref does not exist on that side
 nul() { case "${1:-}" in *[!0]*|"") return 1 ;; esac; return 0; }
+# the input, read once: judged here, then handed to git-lfs's pre-push (below)
+IN="$(cat)"
+# the remote's default branch, as last fetched — the main copy's branch there
+DEF="$(git symbolic-ref -q --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null)"; DEF="${DEF#"$REMOTE"/}"
 
 while read -r LREF LOID RREF ROID _; do
   [ -n "${RREF:-}" ] || continue
@@ -41,26 +58,51 @@ while read -r LREF LOID RREF ROID _; do
     v1|v2|v4|*/v1|*/v2|*/v4)
       BAD="$BAD"$'\n'"   $RREF: a branch of the ISO line or of the generations both lines share — the harmonized line pushes its v4-h branches only"
       continue ;;
+    main|master)
+      BAD="$BAD"$'\n'"   $RREF: the main copy's branch (the ISO line's coordinator) — the harmonized line never writes it"
+      continue ;;
     v4-h|*/v4-h) ;;
-    *) continue ;;
+    *)
+      [ -n "$DEF" ] && [ "$B" = "$DEF" ] \
+        && BAD="$BAD"$'\n'"   $RREF: the default branch of $REMOTE (refs/remotes/$REMOTE/HEAD), the main copy's — the harmonized line never writes it"
+      continue ;;
   esac
+  P="$(git rev-parse -q --verify "refs/remotes/$REMOTE/${B%-h}^{commit}" 2>/dev/null)"
   if nul "$LOID"; then
     BAD="$BAD"$'\n'"   $RREF: deleting the harmonized line's branch — published history is never rewritten"
   elif nul "$ROID"; then
     # created: only at the published v4 of the same remote (its v4-h starts from there, and nowhere else)
-    P="$(git rev-parse -q --verify "refs/remotes/$REMOTE/${B%-h}^{commit}" 2>/dev/null)"
     [ -n "$P" ] && [ "$P" = "$LOID" ] \
       || BAD="$BAD"$'\n'"   $RREF: created from ${LREF:-?} (${LOID:0:9}), not at the published v4 (refs/remotes/$REMOTE/${B%-h}: ${P:-none}) — open it with: git push $REMOTE $REMOTE/${B%-h}:refs/heads/$B"
   elif ! git cat-file -e "$ROID^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$ROID" "$LOID" 2>/dev/null; then
     BAD="$BAD"$'\n'"   $RREF: not a fast-forward of ${ROID:0:9} — published history is never rewritten (fetch, then merge)"
+  elif ! L="$(git rev-list "$LOID" --not "$ROID" ${P:+"$P"} 2>/dev/null)"; then
+    BAD="$BAD"$'\n'"   $RREF: the commits it brings cannot be listed — refused"
+  else
+    # what it brings that the published v4 does not hold: never a redescente (the ISO line's, on v4 only)
+    X=""
+    for C in $L; do
+      git log -1 --format=%B "$C" 2>/dev/null | grep -qiE '^[[:space:]]*redescente[[:space:]]*:' && X="$X ${C:0:9}"
+    done
+    [ -z "$X" ] \
+      || BAD="$BAD"$'\n'"   $RREF: commit(s)$X carry « Redescente: » and are not in the published v4 (refs/remotes/$REMOTE/${B%-h}: ${P:-none}) — a redescente is the ISO line's: committed on v4 from the main copy, it reaches v4-h by a merge of v4"
   fi
-done
+done <<< "$IN"
 
 if [ -n "$BAD" ]; then
   {
     echo "⛔ push refused by the harmonized line's push guard (flux H — .devcontainer/git-push-garde-h.sh, pre-push):$BAD"
-    echo "   This copy's v4 work goes to v4-h only; v1, v2 and v4 belong to the main copy (the ISO line)."
+    echo "   This copy's v4 work goes to v4-h only; v1, v2, v4 and the main copy's branch belong to the main copy (the ISO line)."
   } >&2
   exit 1
+fi
+# git-lfs's pre-push, which this guard took the place of: on the same arguments and input
+if command -v git-lfs >/dev/null 2>&1; then
+  printf '%s' "${IN:+$IN$'\n'}" | git lfs pre-push "$@"
+  exit $?
+fi
+if [ -n "$(git config --get-regexp '^(lfs|filter\.lfs)\.' 2>/dev/null | head -1)" ]; then
+  printf >&2 "\n%s\n\n" "This repository is configured for Git LFS but 'git-lfs' was not found on your path: the LFS objects would not leave with their commits — push refused (the harmonized line's push guard runs git-lfs's pre-push)."
+  exit 2
 fi
 exit 0

@@ -45,13 +45,17 @@
 # line) —, never by dbt.conf nor by an exported variable. Its
 # v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
 # profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
-# flux, not the v1/v2/global spaces (no build, no hook there). The harmonized
-# line is apart in git too: its v4 worktrees follow branches of their own,
-# <product>/v4-h (v4-h where the product's branches live), opened THERE from the
-# published v4 — a v4 copy on any other branch is refused —, no push of it
-# reaches v1, v2 nor v4 (a pre-push hook, git-push-garde-h.sh), its lock is
-# .devcontainer/products-h.lock, and clone, --state, --defer and --manage-state
-# are refused there (they would bring another space's relations or state in).
+# flux, not the v1/v2/global spaces (no build, no hook there; its dbt
+# extensions cut there). A flux is a clone, with a git repository of its own.
+# The harmonized line is apart in git too: its v4 worktrees follow branches of
+# their own, <product>/v4-h (v4-h where the product's branches live), opened
+# THERE from the published v4 — a v4 copy on any other branch is refused —, no
+# push of it reaches v1, v2, v4 nor the main copy's branch, nor brings a
+# redescente to a v4-h (a pre-push hook, git-push-garde-h.sh, which runs
+# git-lfs's), its lock is .devcontainer/products-h.lock, and clone, state,
+# --state, --defer, --manage-state — from the command line, the environment or
+# a settings file — are refused there (they would bring another space's
+# relations or state in).
 # The MAIN copy is named, never guessed: DBT_V4_MAIN_WS (dbt.conf) is its real path, and it is never a
 # flux. In a fleet with a v4, a copy that is neither the main one nor a flux (a
 # clone, a flux whose flux.conf was erased by `git clean -X`) has no v4 space
@@ -1365,21 +1369,30 @@ _dbt_under_v4() {
 #     (dbt_hooks_v4_seal, dbt_hooks_v4_verdict, dbt_hooks_v4_proof_path).
 # What a flux <A999> does NOT separate: git. Its worktrees follow the same branches of the products as the main
 # copy's (v4, v2): a commit pushed from it reaches the main copy at its next `just sync` — nothing is committed on v2
-# from any flux (dbt v2 deps rewrites package-lock.yml there). The HARMONIZED line (flux H) is apart in git too, or its
-# convergences would reach the ISO line:
+# from any flux (dbt v2 deps rewrites package-lock.yml there). A flux is a CLONE, a git repository of its own — never a
+# worktree of the main copy (_dbt_flux_git_problem: else nothing is set up, every dbt command refused). Its dbt
+# extensions are cut where they would compute in the main copy's spaces — v1/, v2/, global/ (dbt_ensure_editor_files:
+# a profile no hub declares) —, in the windows opened on one of those folders alone; a window opened on the copy's root
+# reads the tracked root settings: there, no Run/Build/Preview/Compare outside v4/ (said by the doctor). The HARMONIZED
+# line (flux H) is apart in git too, or its convergences would reach the ISO line:
 #   - its v4 worktrees follow branches of their own (dbt_use_product): <product>/v4-h, tracking v4-h where the
 #     product's branches live (<product>/v4-h on origin), opened THERE from the published v4 — never created here
-#     (_dbt_ensure_branch); a v4 copy on any other branch (the ISO line's <product>/v4) or detached elsewhere than in
-#     its own history is refused (dbt_v4_line_h_branch_problem: dbt-run.sh, line_h_guard), never moved by `just sync`;
-#   - no push of it reaches a branch of the ISO line or of the shared generations — v1, v2, v4 —, a v4-h is created at
-#     the published v4 only, never deleted nor rewritten: a pre-push hook (.devcontainer/git-push-garde-h.sh,
-#     installed by dbt_ensure_push_guard_h; every dbt command refused while git would not run it:
-#     _dbt_push_guard_h_problem);
+#     (_dbt_ensure_branch); a v4 copy on any other branch (the ISO line's <product>/v4), detached elsewhere than in
+#     its own history, or a folder that is not a worktree of the copy is refused (dbt_v4_line_h_branch_problem:
+#     dbt-run.sh, line_h_guard), never moved by `just sync`;
+#   - no push of it reaches a branch of the ISO line or of the shared generations — v1, v2, v4 —, nor the main copy's
+#     branch (main, master, the remote's default branch), a v4-h is created at the published v4 only, never deleted
+#     nor rewritten, and never brings a commit marked « Redescente: » that the published v4 does not hold: a pre-push
+#     hook (.devcontainer/git-push-garde-h.sh, installed by dbt_ensure_push_guard_h in the place of git-lfs's own,
+#     which it runs; every dbt command refused while git would not run it: _dbt_push_guard_h_problem);
 #   - its lock is .devcontainer/products-h.lock (dbt_load_conf), never products.lock;
-#   - clone, --state, --defer (--defer-state, --favor-state) and --manage-state are refused there, and their
-#     environment variables (DBT_LINE_H_STATE_ARGS, DBT_LINE_H_STATE_ENV: dbt-run.sh) — they would bring another
-#     space's relations or state into the line (`dbt clone --state <the ISO line's manifest>` would copy ISO tables
-#     under <DBT_BQ_DATASET_PREFIX_V4>_H) — until a later change of this template opens them.
+#   - clone, state, --state, --defer (--defer-state, --favor-state), --manage-state, --run-cache-mode and
+#     --task-cache-url are refused there, and the exported variables and settings files that set them
+#     (DBT_LINE_H_STATE_ARGS, DBT_LINE_H_STATE_ENV_RE, dbt_line_h_state_settings_problem: dbt-run.sh) — they would
+#     bring another space's relations or state into the line (`dbt clone --state <the ISO line's manifest>` would copy
+#     ISO tables under <DBT_BQ_DATASET_PREFIX_V4>_H) — until a later change of this template opens them.
+# A copy that is neither the main one nor a sound flux (an orphan, a refused declaration) writes no lock either
+# (dbt-run.sh, lock_guard).
 # Without flux.conf, in the MAIN copy — the one DBT_V4_MAIN_WS (dbt.conf) names by its real path — nothing changes,
 # but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or
 # <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*): the main copy's v4 — the ISO line — never writes the harmonized line's.
@@ -1662,25 +1675,109 @@ _dbt_is_line_h() { [ "${DBT_V4_FLUX:-}" = H ]; }
 # What the harmonized line refuses, whatever the space (dbt-run.sh, run_dbt): the commands and options that bring
 # another space's relations or state into a line — `clone` (copies relations: `--state <the ISO line's manifest>` would
 # copy ISO tables under <DBT_BQ_DATASET_PREFIX_V4>_H), deferral and state comparison (--defer, and --defer-state,
-# --favor-state, hidden from dbt 2.0.8's help), service-backed dbt State (--manage-state) — and the environment
-# variables that set them (dbt 2.0.8: its help, and the strings of its binary). Every word of the command line is read
-# (`--state=x` as `--state`): a model called `clone` costs a refusal, never a missed clone. The --no-… forms, which
-# turn them off, pass.
-# shellcheck disable=SC2034  # both read by dbt-run.sh (run_dbt)
-DBT_LINE_H_STATE_ARGS="clone --state --defer --defer-state --favor-state --manage-state"
+# --favor-state, hidden from dbt 2.0.8's help), service-backed dbt State (--manage-state, its `state` command, its
+# --run-cache-mode, the --task-cache-url it coordinates through) — and what sets them without a word of the command line:
+#   - an exported variable whose name reads as one of them (DBT_LINE_H_STATE_ENV_RE: DBT_STATE, DBT_DEFER,
+#     DBT_ENGINE_MANAGE_STATE, DBT_ENGINE_STATE_*, DBT_ENGINE_DEFER_TO_STATE, DBT_ENGINE_FAVOR_STATE_MODE,
+#     DBT_ENGINE_ARTIFACT_STATE_PATH, DBT_CLOUD_DEFER_*, DBT_CLOUD_STATE_ORG_ID, DBT_TASK_CACHE_URL, DBT_BUILD_CACHE_* …);
+#   - a settings file that turns them on (dbt_line_h_state_settings_problem): ~/.dbt/user_settings.yml, which every
+#     copy of the container reads (`dbt login` writes « flags: manage_state: true » there), the project's own
+#     dbt_project.yml, and that of every local package it declares or links.
+# The names come from dbt 2.0.8: its help, and the strings of its binary (`strings ~/.local/bin/dbt`, without running
+# it — names glued together without a separator there, hence a pattern rather than a list): not tried on the engine.
+# Every word of the command line is read (`--state=x` as `--state`): a model called `clone` or `state` costs a refusal,
+# never a missed clone. The --no-… forms, which turn them off, pass.
+# shellcheck disable=SC2034  # read by dbt-run.sh (run_dbt)
+DBT_LINE_H_STATE_ARGS="clone state --state --defer --defer-state --favor-state --manage-state --run-cache-mode --task-cache-url"
 # shellcheck disable=SC2034
-DBT_LINE_H_STATE_ENV="DBT_STATE DBT_DEFER DBT_DEFER_STATE DBT_FAVOR_STATE DBT_ENGINE_MANAGE_STATE DBT_ENGINE_STATE_HOME DBT_CLOUD_DEFER_ENV_ID DBT_CLOUD_DEFER_JOB_ID"
+DBT_LINE_H_STATE_ENV_RE='^_?DBT_[A-Z0-9_]*(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'
+
+# The keys of a settings file that turn dbt State, deferral or a state on (snake_case or kebab-case, any case): read
+# where dbt reads flags — under the top-level `flags:` key — and at the top level itself
+_DBT_STATE_KEYS="manage_state state defer defer_state favor_state defer_to_state favor_state_mode artifact_state_path run_cache_mode task_cache_url"
+
+# _dbt_state_flags_in FILE — the keys of _DBT_STATE_KEYS that FILE (YAML: a dbt_project.yml, a user_settings.yml) sets
+# at its top level or under its top-level `flags:` key, one line each; or one line « a form … not read »: `flags:` given
+# otherwise than as a block or a one-line {…} map (an anchor, an alias, a tag, a multi-line flow map), a merge key
+# (<<) or an alias under it, a tab. Read line by line (LC_ALL=C), never sourced: a `state:` elsewhere (a seed's
+# column_types) is not a flag. Nothing: no such key, or no FILE.
+_dbt_state_flags_in() {
+  [ -f "${1:-}" ] || return 0
+  LC_ALL=C awk -v keys=" $_DBT_STATE_KEYS " -v q="'" '
+    function norm(k) { k = tolower(k); gsub("[\"" q "]", "", k); gsub("-", "_", k); return k }
+    function flow(s,   t, k) {   # the keys of a one-line {…} map
+      t = s
+      while (match(t, "[{,][ ]*[\"" q "]?[A-Za-z0-9_-]+[\"" q "]?[ ]*:")) {
+        k = substr(t, RSTART + 1, RLENGTH - 2); sub(/^[ ]*/, "", k); sub(/[ ]*$/, "", k)
+        if (index(keys, " " norm(k) " ")) print "flags: " norm(k)
+        t = substr(t, RSTART + RLENGTH)
+      }
+    }
+    {
+      l = $0; sub(/\r$/, "", l)
+      if (l ~ /^[ \t]*#/) next
+      sub(/[ \t]#.*$/, "", l)
+      if (l ~ /^[ \t]*$/) next
+      if (l ~ /\t/) { print "a tab: a form not read"; exit }
+      if (l ~ /^[^ ]/) {
+        f = 0
+        if (l ~ /^(---|\.\.\.)/) next
+        k = l; sub(/^-[ ]*/, "", k); sub(/[ ]*:.*$/, "", k)
+        if (index(keys, " " norm(k) " ")) print norm(k)
+        if (norm(k) == "flags") {
+          v = l; sub(/^[^:]*:[ ]*/, "", v)
+          if (v == "") f = 1
+          else if (v ~ /^\{.*\}[ ]*$/) flow(v)
+          else { print "flags: a form not read (" v ")"; exit }
+        }
+        next
+      }
+      if (!f) next
+      if (l ~ /<<[ ]*:/ || l ~ /:[ ]+[*&]/ || l ~ /^[ ]*-[ ]+[*&]/ || l ~ /^[ ]*[*&]/ || l ~ /[{,][ ]*[*&]/) {
+        print "flags: a merge key, an anchor or an alias: a form not read"; exit
+      }
+      k = l; sub(/^[ ]*(-[ ]+)?/, "", k)
+      if (k ~ ("^[\"" q "]?[A-Za-z0-9_-]+[\"" q "]?[ ]*:")) { sub(/[ ]*:.*$/, "", k); if (index(keys, " " norm(k) " ")) print "flags: " norm(k) }
+      if (l ~ /\{/) flow(l)
+    }' "$1"
+}
+
+# dbt_line_h_state_settings_problem PROJECT_DIR — (the harmonized line; dbt-run.sh, run_dbt) the settings files that
+# would turn dbt State, deferral or a state on for PROJECT_DIR, one reason per line (_dbt_state_flags_in): the
+# container's ~/.dbt/user_settings.yml, PROJECT_DIR/dbt_project.yml, and the dbt_project.yml of every local package —
+# each `local:` of its packages.yml or dependencies.yml, each link of its dbt_packages/. Nothing: none does.
+dbt_line_h_state_settings_problem() {
+  local P="${1:-}" F X L
+  {
+    printf '%s\n' "${HOME:-/nonexistent}/.dbt/user_settings.yml" "$P/dbt_project.yml"
+    for F in "$P/packages.yml" "$P/dependencies.yml"; do
+      [ -f "$F" ] || continue
+      LC_ALL=C sed -nE "s@^[[:space:]]*-?[[:space:]]*[\"']?local[\"']?[[:space:]]*:[[:space:]]*[\"']?([^\"'#]*[^\"'#[:space:]])[\"']?.*@\1@p" "$F" \
+        | while IFS= read -r L; do case "$L" in /*) printf '%s\n' "$L/dbt_project.yml" ;; *) printf '%s\n' "$P/$L/dbt_project.yml" ;; esac; done
+    done
+    for L in "$P"/dbt_packages/*; do [ -L "$L" ] && printf '%s\n' "$L/dbt_project.yml"; done
+  } | while IFS= read -r F; do
+    X="$(_dbt_state_flags_in "$F" | LC_ALL=C sort -u | paste -sd' ' -)"
+    [ -z "$X" ] || echo "${F#"$DBT_WS"/} sets $X"
+  done
+  return 0
+}
 
 # dbt_v4_line_h_branch_problem — (the harmonized line; after dbt_use_product) why the current product's v4 copy is not
 # the harmonized line's, one line; nothing: it is, or there is no v4 copy (yet). It must be on <product>/v4-h ($P_B4),
 # tracking $P_HOME/$P_HB4 — or detached at a commit of <product>/v4-h's own history (a replay: lock-checkout). Refused:
 # the ISO line's <product>/v4 (or any other branch), a detached HEAD elsewhere, <product>/v4-h tracking anything else
-# (its `git push` would go there).
+# (its `git push` would go there), a folder there that is not one of this copy's worktrees (a copy of one: its branch
+# is unknown).
 dbt_v4_line_h_branch_problem() {
   local W B U C
   _dbt_is_line_h && dbt_v4_enabled || return 0
   W="$(_dbt_wt v4)"
-  _dbt_is_worktree "$W" || return 0
+  if ! _dbt_is_worktree "$W"; then
+    { [ -e "$W" ] || [ -L "$W" ]; } \
+      && echo "$(_dbt_show v4) is there but is not a worktree of this copy (git worktree list): its branch is unknown, and the harmonized line builds its own v4-h branches only — move it away, then: just setup"
+    return 0
+  fi
   B="$(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null)"
   if [ -z "$B" ]; then
     C="$(git -C "$W" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"
@@ -1698,8 +1795,29 @@ dbt_v4_line_h_branch_problem() {
   return 0
 }
 
+# _dbt_flux_git_problem — (a flux) why this copy's git repository is not its own, one reason per line; nothing: it is.
+# A flux is a CLONE of the fleet (git clone): its repository is the .git directory of its own folder, shared with no
+# other copy. A copy made by `git worktree add` from the main copy (or the main copy made so from it) shares its refs,
+# its settings and its hooks: what the flux sets up there — its remotes, its branches, the harmonized line's push guard
+# — would be the main copy's too (that guard would refuse the ISO line's own pushes to v4). Then its lifecycle sets up
+# nothing (dbt_process) and every dbt command is refused (dbt_v4_flux_problem).
+_dbt_flux_git_problem() {
+  local G O M
+  O="$(cd "$DBT_WS" 2>/dev/null && pwd -P)/.git"
+  G="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ -n "$G" ] \
+    || { echo "this copy is not a git repository: a flux is a clone of the fleet (git clone)"; return 0; }
+  G="$(realpath -m -- "$G")"
+  { [ -d "$O" ] && [ ! -L "$O" ] && [ "$G" = "$O" ]; } \
+    || echo "its git repository is $G, not the .git directory of its own folder ($O): a flux is a clone of the fleet (git clone), never a worktree of another copy (git worktree add) — what it would set up there would be that copy's too"
+  M="$(git -C "${DBT_V4_MAIN_WS:-/nonexistent}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ -n "$M" ] || return 0
+  [ "$(realpath -m -- "$M")" != "$G" ] \
+    || echo "it shares its git repository ($G) with the main copy ($DBT_V4_MAIN_WS): a flux is a clone with a repository of its own — its remotes, branches and hooks would be the main copy's"
+  return 0
+}
+
 # The push guard of the harmonized line: .devcontainer/git-push-garde-h.sh (template-owned), installed as this copy's
-# own pre-push hook — <git common dir>/hooks/pre-push, run for every worktree of the copy. What it refuses: its header.
+# own pre-push hook — <git dir>/hooks/pre-push (the copy is a clone: _dbt_flux_git_problem), run for every worktree of
+# the copy. What it refuses: its header.
 _dbt_push_guard_h_src() { printf '%s' "$DBT_WS/.devcontainer/git-push-garde-h.sh"; }
 _dbt_push_guard_h_dst() {
   local G
@@ -1708,10 +1826,22 @@ _dbt_push_guard_h_dst() {
 }
 _DBT_PUSH_GUARD_H_MARK="sap-template: git-push-garde-h"
 
+# _dbt_lfs_pre_push_hook — git-lfs's own pre-push hook, byte for byte as git-lfs 3 writes it (`git lfs install`, and
+# every clone of a repository that tracks files in LFS where git-lfs is set up — the fleet's coordinator is one): the
+# push guard takes its place and runs it (git-push-garde-h.sh: `git lfs pre-push`, same arguments, same input)
+_dbt_lfs_pre_push_hook() {
+  cat <<'EOF'
+#!/bin/sh
+command -v git-lfs >/dev/null 2>&1 || { printf >&2 "\n%s\n\n" "This repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting the 'pre-push' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks')."; exit 2; }
+git lfs pre-push "$@"
+EOF
+}
+
 # dbt_ensure_push_guard_h — (lifecycle; the harmonized line only) the push guard installed, byte for byte: written when
-# there is no pre-push hook, replaced when the one there carries the guard's marker (an older version of it); a hook of
-# someone else is never touched (said: every dbt command stays refused, _dbt_push_guard_h_problem). Never removed —
-# not even when flux.conf is gone: an ex-H copy keeps refusing.
+# there is no pre-push hook, in the place of git-lfs's own (_dbt_lfs_pre_push_hook: the guard runs it), replaced when
+# the one there carries the guard's marker (an older version of it); any other hook is never touched (said: every dbt
+# command stays refused, _dbt_push_guard_h_problem). Never removed — not even when flux.conf is gone: an ex-H copy keeps
+# refusing.
 dbt_ensure_push_guard_h() {
   local S D
   _dbt_is_line_h || return 0
@@ -1720,15 +1850,17 @@ dbt_ensure_push_guard_h() {
   D="$(_dbt_push_guard_h_dst)" || { echo "  WARNING: flux H — not a git repository: no push guard"; return 0; }
   if [ -e "$D" ] || [ -L "$D" ]; then
     if cmp -s "$S" "$D" && [ -x "$D" ] && [ ! -L "$D" ]; then
-      echo "  push guard of the harmonized line: ${D} (no push to v1, v2 nor v4)"; return 0
+      echo "  push guard of the harmonized line: ${D} (no push to v1, v2, v4 nor the main copy's branch)"; return 0
     fi
-    if [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then
-      echo "  WARNING: flux H — $D is another pre-push hook: left as it is, so every dbt command is refused (move it away, then: just setup)"
+    if [ -f "$D" ] && [ ! -L "$D" ] && cmp -s "$D" <(_dbt_lfs_pre_push_hook); then
+      echo "  git-lfs's own pre-push hook found at $D: the push guard takes its place and runs it (git lfs pre-push) — the LFS objects still leave with their commits"
+    elif [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then
+      echo "  WARNING: flux H — $D is another pre-push hook (neither the push guard nor git-lfs's own): left as it is, so every dbt command is refused. Read it: the harmonized line's copy runs the push guard only (the guard runs git-lfs's pre-push itself) — once what it does is not needed here, remove it yourself, then: just setup"
       return 0
     fi
   fi
   mkdir -p "$(dirname "$D")" && cat "$S" > "$D" && chmod 755 "$D" \
-    && echo "  push guard of the harmonized line installed: $D (no push to v1, v2 nor v4; a v4-h created at the published v4 only)" \
+    && echo "  push guard of the harmonized line installed: $D (no push to v1, v2, v4 nor the main copy's branch; a v4-h created at the published v4 only)" \
     || echo "  WARNING: flux H — cannot install the push guard ($D): every dbt command is refused"
   return 0
 }
@@ -1801,11 +1933,14 @@ _dbt_flux_clash() {
 #   - .devcontainer/flux.conf or profiles/v4-<FLUX>.env tracked by git, or not ignored: `git add -A` would commit the
 #     flux, and merging its work would carry it into the main copy;
 #   - a package of the v4 space whose name reads as the flux (_dbt_flux_clash);
+#   - a git repository that is not the copy's own (_dbt_flux_git_problem: a flux is a clone, never a worktree of
+#     another copy);
 #   - the harmonized line (flux H) without its push guard (_dbt_push_guard_h_problem).
 dbt_v4_flux_problem() {
   local F="${DBT_V4_FLUX:-}" X C
   if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then printf '%s\n' "$DBT_V4_FLUX_ERR"; return 0; fi
   [ -n "$F" ] || return 0
+  _dbt_flux_git_problem
   for X in .devcontainer/flux.conf "profiles/v4-$F.env"; do
     if git -C "$DBT_WS" ls-files --error-unmatch -- "$X" >/dev/null 2>&1; then
       echo "$X is tracked by git: a flux is never committed — git rm --cached $X, and ignore it (.gitignore)"
@@ -1917,10 +2052,61 @@ dbt_ensure_v4_env() {
 # Editor + shell integration
 # -----------------------------------------------------------------------------
 
+# The profile no hub declares (dbt_ensure_editor_files): given to the dbt extensions of a copy that is not the main
+# one where they would compute in the main copy's spaces — dbt.profileName, dbt.targetName: every command of the
+# official extension there (its language server, Run, Build, Preview, Compare) fails on it ("profile not found", the
+# hub has no fallback: verrou 1) — and dbt Power User kept out (dbt.allowListFolders)
+DBT_GUEST_EDITOR_PROFILE="sap-template-guest-copy-no-dbt-extension"
+
+# _dbt_editor_cut V — (dbt_ensure_editor_files, the doctor) why the dbt extensions are cut in V (v1, v2, v4, global,
+# global-v4) of THIS copy, one line; nothing: they are not. A flux: in the main copy's spaces — v1/, v2/, global/ —,
+# where its extensions would compute in the main copy's datasets (their .env, or target.schema without one), hooks
+# included (Preview is a `dbt show`: dbt v2 runs the on-run-start hooks); its v4 space stays its own (.env on
+# profiles/v4-<FLUX>.env). An orphan copy or a refused declaration: everywhere (no v4 space of its own either).
+_dbt_editor_cut() {
+  case "$(dbt_v4_role)" in
+    flux) dbt_is_v4 "${1:-}" || echo "flux $DBT_V4_FLUX: $(_dbt_show "${1:-}") is the main copy's space" ;;
+    orphan) echo "orphan copy: no space of its own" ;;
+    refused) echo "flux declaration refused: no space anybody vouches for" ;;
+  esac
+  return 0
+}
+
+# _dbt_editor_settings FILE KIND ALLOW ENVF [WHY] — the generated settings of a window opened on one folder alone; with
+# WHY (_dbt_editor_cut), the dbt extensions cut there. Without WHY, the very bytes written before cuts existed.
+_dbt_editor_settings() {
+  local F="$1" KIND="$2" ALLOW="$3" ENVF="$4" WHY="${5:-}" CUT=""
+  if [ -n "$WHY" ]; then
+    ALLOW='[".vscode"]'
+    CUT="  \"dbt-project.guest-cut\": \"$WHY — the dbt extensions are cut here: their Run/Build/Preview/Compare would compute in the main copy's space, hooks included (dbt.profileName: a profile no hub declares)\",
+  \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\",
+  \"dbt.targetName\": \"$DBT_GUEST_EDITOR_PROFILE\",
+"
+  fi
+  mkdir -p "$(dirname "$F")"
+  cat > "$F" <<EOF
+{
+  "dbt-project.generated": "by .devcontainer/lib-dbt.sh — remove this key to own the file",
+${CUT}  "dbt.dbtMajorVersion": "$KIND",
+  "dbt.allowListFolders": $ALLOW,
+  "python.envFile": "$ENVF",
+  "terminal.integrated.profiles.linux": {
+    "tmux": { "path": "bash", "args": ["$DBT_WS/.devcontainer/tmux-session.sh"], "icon": "terminal-tmux" },
+    "bash": { "path": "bash", "icon": "terminal-bash" }
+  }
+}
+EOF
+}
+
 # Files the editors need inside the worktrees. None of them belongs to the
 # dbt branches: they are hidden from git through the shared info/exclude.
+# In a copy that is not the main one, the dbt extensions are cut where they
+# would compute in the main copy's spaces (_dbt_editor_cut): the worktrees'
+# settings, and global/.vscode/settings.json (global-v4/'s too, in an orphan
+# copy) — generated there only, and removed again (marker keys) once the copy
+# is the main one.
 dbt_ensure_editor_files() {
-  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF ROLE
+  local V N PROJ EXCL PAT F KIND ALLOW WT ENVF ROLE A WHY
   ROLE="$(dbt_v4_role)"
   EXCL="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
   if [ -d "$(dirname "$EXCL")" ]; then
@@ -1958,25 +2144,31 @@ dbt_ensure_editor_files() {
       # Settings for a window opened on the worktree alone (one extension per
       # window). Rewritten as long as they carry the marker key below.
       F="$WT/.vscode/settings.json"
+      WHY="$(_dbt_editor_cut "$V")"
       if [ ! -f "$F" ] || grep -q '"dbt-project.generated"' "$F" 2>/dev/null; then
-        mkdir -p "$WT/.vscode"
         if [ "$V" = "v1" ]; then KIND="v1"; ALLOW="[]"; else KIND="v2"; ALLOW='[".vscode"]'; fi
-        cat > "$F" <<EOF
-{
-  "dbt-project.generated": "by .devcontainer/lib-dbt.sh — remove this key to own the file",
-  "dbt.dbtMajorVersion": "$KIND",
-  "dbt.allowListFolders": $ALLOW,
-  "python.envFile": "$ENVF",
-  "terminal.integrated.profiles.linux": {
-    "tmux": { "path": "bash", "args": ["$DBT_WS/.devcontainer/tmux-session.sh"], "icon": "terminal-tmux" },
-    "bash": { "path": "bash", "icon": "terminal-bash" }
-  }
-}
-EOF
+        _dbt_editor_settings "$F" "$KIND" "$ALLOW" "$ENVF" "$WHY"
+      elif [ -n "$WHY" ] && ! grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$F"; then
+        echo "  WARNING: ${P_TAG}$(_dbt_show "$V").vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there — $WHY, their buttons would compute in the main copy's space. Give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\", or remove it, then: just setup"
       fi
     done
   done
   dbt_use_product "" >/dev/null 2>&1 || true
+  # the assembly projects are folders of this copy (not worktrees): a settings file only where the extensions are cut
+  for A in global global-v4; do
+    dbt_is_fleet && [ -f "$DBT_WS/$A/dbt_project.yml" ] || continue
+    F="$DBT_WS/$A/.vscode/settings.json"; WHY="$(_dbt_editor_cut "$A")"
+    ENVF="$DBT_WS/profiles/dbt.env"; dbt_is_v4 "$A" && ENVF="$(dbt_v4_env_file)"
+    if [ -n "$WHY" ]; then
+      if [ ! -f "$F" ] || grep -q '"dbt-project.generated"' "$F" 2>/dev/null; then
+        _dbt_editor_settings "$F" v2 '[".vscode"]' "$ENVF" "$WHY"
+      elif ! grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$F"; then
+        echo "  WARNING: $A/.vscode/settings.json is yours (no generated marker): the dbt extensions are not cut there — $WHY. Give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\", or remove it, then: just setup"
+      fi
+    elif [ -f "$F" ] && grep -q '"dbt-project.generated"' "$F" && grep -q '"dbt-project.guest-cut"' "$F"; then
+      rm -f "$F"; rmdir "$DBT_WS/$A/.vscode" 2>/dev/null || true
+    fi
+  done
   return 0
 }
 
@@ -2199,21 +2391,140 @@ dbt_packages_unchecked() {
   return 1
 }
 
-# _dbt_packages_incomplete PROJECT_DIR — the project declares packages (packages.yml, dependencies.yml or
-# package-lock.yml) and dbt_packages/ does not hold them all: fewer entries than declared (_dbt_v1_packages_missing:
-# the count, transitive ones included), or a name package-lock.yml locks missing (a directory, or a link to one). dbt v2
-# installs what is missing by itself on its first compile: hooks no check has read. For the copies that are not the
-# main one (dbt-run.sh, guest_hooks_guard), where any unread hook refuses: fail-closed. Nothing declared: complete.
-_dbt_packages_incomplete() {
-  local PROJ="${1:-}" X RE='^[[:space:]]*-[[:space:]]*(package|git|local|tarball|private):'
-  X="$(cat "$PROJ/packages.yml" "$PROJ/dependencies.yml" "$PROJ/package-lock.yml" 2>/dev/null | grep -cE "$RE")"
-  [ "${X:-0}" -gt 0 ] || return 1
-  _dbt_v1_packages_missing "$PROJ" && return 0
-  [ -f "$PROJ/package-lock.yml" ] || return 1
-  while IFS= read -r X; do
-    [ -d "$PROJ/dbt_packages/$X" ] || return 0
-  done < <(sed -nE 's/^[[:space:]]+name:[[:space:]]*([A-Za-z0-9_]+)[[:space:]]*$/\1/p' "$PROJ/package-lock.yml")
-  return 1
+# _dbt_packages_guest_problem PROJECT_DIR — (dbt-run.sh, guest_hooks_guard: a copy that is not the main one, compile
+# or show in the main copy's spaces) why dbt v2 could install a package by itself on its first compile — and run its
+# hooks before any check has read them —, one reason per line; nothing: what packages.yml (or dependencies.yml)
+# declares is exactly what package-lock.yml locks, and every package the lock names is in dbt_packages/. Read by a
+# strict reader, never sourced nor rendered: a form it does not know is a reason (fail-closed) —
+#   packages.yml / dependencies.yml: one top-level key, `packages:`, then a block list of maps whose values are plain or
+#     quoted scalars (`version` may be a one-line [a, b] list), one of package/git/local/tarball/private per entry,
+#     keys version, revision, subdirectory, warn-unpinned, install-prerelease, name; no anchor, alias, tag, flow map,
+#     tab, document marker, nor a line of Jinja statement (brace-percent); dependencies.yml and packages.yml never both
+#     declaring packages. A Jinja expression (double braces) inside a value is read as text: dbt locks the declarations
+#     unrendered (the CI token of a git URL, in a real fleet);
+#   package-lock.yml: the same entries (each with its `name`), and `sha1_hash:`.
+# Then, when packages are declared: package-lock.yml exists; its sha1_hash is the one dbt computes from the declared
+# entries, unrendered (sha1 of their compact JSON, keys sorted, one per line, lines sorted — as dbt 2.0.8 wrote the 55
+# locks of a real fleet, all recomputed: a stale lock, a packages.yml edited since `deps`, is seen); each declared entry is locked
+# (same package/git/local/tarball/private value). And every name the lock gives is a directory (or a link to one) in
+# dbt_packages/. Not seen: an installed package at another version than the lock's (dbt_packages/ keeps no trace of
+# it). What dbt v2 really does with such a project is not tried here (no engine runs).
+_dbt_packages_guest_problem() {
+  local O RC
+  O="$(python3 -I - "${1:-}" 2>&1 <<'PY'
+import hashlib, json, os, re, sys
+proj = sys.argv[1]
+ID = ("package", "git", "local", "tarball", "private")
+KEYS = ID + ("version", "revision", "subdirectory", "warn-unpinned", "install-prerelease", "name")
+BOOL = ("warn-unpinned", "install-prerelease")
+class Unread(Exception):
+    pass
+def scalar(v, key, where):
+    if v[:1] in ("'", '"'):
+        q = v[0]
+        if len(v) < 2 or v[-1] != q or q in v[1:-1] or (q == '"' and "\\" in v):
+            raise Unread(f"{where}: a quoted value it does not read ({v})")
+        return v[1:-1]
+    if key == "version" and v.startswith("[") and v.endswith("]") and not re.search(r"[][{}]", v[1:-1]):
+        items = [i.strip() for i in v[1:-1].split(",")]
+        if not all(items):
+            raise Unread(f"{where}: a version list it does not read ({v})")
+        return [scalar(i, "version-item", where) for i in items]
+    if not v or v[0] in "[]{}&*!|>%@`,#?:-" or re.search(r":(\s|$)", v):
+        raise Unread(f"{where}: a value it does not read ({v})")
+    if key in BOOL:
+        if v not in ("true", "false"):
+            raise Unread(f"{where}: {key} is not true or false ({v})")
+        return v == "true"
+    return v
+def read(name, tops):
+    path = os.path.join(proj, name)
+    try:
+        text = open(path, encoding="utf-8").read()
+    except UnicodeDecodeError:
+        raise Unread(f"{name}: not UTF-8")
+    top, cur, lst, dash, col = {}, None, None, None, None
+    for n, raw in enumerate(text.split("\n"), 1):
+        where = f"{name}, line {n}"
+        line = re.sub(r"(^|\s)#.*$", "", raw.rstrip("\r")).rstrip()
+        if not line.strip():
+            continue
+        if "\t" in line or "\r" in line:
+            raise Unread(f"{where}: a tab")
+        if line in ("---", "...") or line.startswith(("--- ", "... ")):
+            raise Unread(f"{where}: a document marker")
+        if line[0] not in " -":
+            m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*):(?:\s+(.*))?", line)
+            if not m or m.group(1) not in tops or m.group(1) in top:
+                raise Unread(f"{where}: a top-level line it does not read ({line})")
+            k, v = m.group(1), (m.group(2) or "").strip()
+            cur, dash, col = None, None, None
+            if tops[k] == "list":
+                if v not in ("", "[]"):
+                    raise Unread(f"{where}: {k} given otherwise than as a block list ({v})")
+                top[k] = []
+                lst = k if v == "" else None
+            else:
+                top[k] = scalar(v, k, where)
+                lst = None
+            continue
+        m = re.fullmatch(r"( *)-( +)([A-Za-z_][A-Za-z0-9_-]*):(?:\s+(.*))?", line)
+        if m and lst is not None and (dash is None or len(m.group(1)) == dash):
+            dash, col = len(m.group(1)), m.start(3)
+            cur = {}
+            top[lst].append(cur)
+            k, v = m.group(3), m.group(4)
+        else:
+            m = re.fullmatch(r"( *)([A-Za-z_][A-Za-z0-9_-]*):(?:\s+(.*))?", line)
+            if not (m and cur is not None and len(m.group(1)) == col):
+                raise Unread(f"{where}: a line it does not read ({line.strip()})")
+            k, v = m.group(2), m.group(3)
+        if k not in KEYS or k in cur or not (v or "").strip():
+            raise Unread(f"{where}: a key it does not read ({k})")
+        cur[k] = scalar(v.strip(), k, where)
+    for k, v in top.items():
+        if tops[k] == "list":
+            for e in v:
+                if len([i for i in ID if i in e]) != 1:
+                    raise Unread(f"{name}: an entry with no package/git/local/tarball/private key, or several ({json.dumps(e)})")
+    return top
+try:
+    decl, src = [], []
+    for f in ("packages.yml", "dependencies.yml"):
+        if os.path.exists(os.path.join(proj, f)):
+            e = read(f, {"packages": "list"}).get("packages") or []
+            if e:
+                decl += e
+                src.append(f)
+    if len(src) > 1:
+        raise Unread("packages.yml and dependencies.yml both declare packages")
+    lock = read("package-lock.yml", {"packages": "list", "sha1_hash": "scalar"}) if os.path.exists(os.path.join(proj, "package-lock.yml")) else None
+except Unread as x:
+    print(f"declared in a form the guard does not read — {x}")
+    sys.exit(0)
+locked = (lock or {}).get("packages") or []
+if decl:
+    if lock is None:
+        print(f"{src[0]} declares packages and there is no package-lock.yml: dbt v2 would resolve them and install them by itself")
+    else:
+        h = hashlib.sha1("\n".join(sorted(json.dumps(e, sort_keys=True, separators=(",", ":"), ensure_ascii=False) for e in decl)).encode("utf-8")).hexdigest()
+        if lock.get("sha1_hash") != h:
+            print(f"package-lock.yml does not lock what {src[0]} declares (its sha1_hash {lock.get('sha1_hash') or 'none'}, the declared packages' {h}): dbt v2 would resolve them again and install them by itself")
+        for e in decl:
+            k = [i for i in ID if i in e][0]
+            if not any(le.get(k) == e[k] for le in locked):
+                print(f"{k} {e[k]}: declared in {src[0]}, not locked in package-lock.yml")
+for le in locked:
+    nm = le.get("name")
+    if not isinstance(nm, str) or not re.fullmatch(r"[A-Za-z0-9_]+", nm):
+        print(f"package-lock.yml: an entry without a package name it reads ({json.dumps(le)})")
+    elif not os.path.isdir(os.path.join(proj, "dbt_packages", nm)):
+        print(f"{nm} (package-lock.yml): not in dbt_packages/")
+PY
+)"; RC=$?
+  if [ "$RC" != 0 ]; then echo "its packages cannot be read (python3, exit $RC: $(printf '%s\n' "$O" | tail -1))"; return 0; fi
+  [ -z "$O" ] || printf '%s\n' "$O"
+  return 0
 }
 
 # dbt_hooks_compile_name V — the name DBT_HOOKS_COMPILE_OK gives V (after dbt_use_product): `global`, `global-v4`,
@@ -2429,10 +2740,17 @@ dbt_process() {
   case "$(dbt_v4_role)" in
     flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})"
              [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes"
-             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git: its v4 worktrees follow <product>/v4-h (v4-h where the products' branches live), no push of it reaches v1, v2 nor v4 (pre-push guard), its lock is products-h.lock" ;;
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git: its v4 worktrees follow <product>/v4-h (v4-h where the products' branches live), no push of it reaches v1, v2, v4 nor the main copy's branch (pre-push guard), its lock is products-h.lock" ;;
     refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
     orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
   esac
+  # a flux whose git repository is not its own (git worktree add): nothing is set up there — its remotes, worktrees and
+  # hooks would be another copy's (_dbt_flux_git_problem); every dbt command stays refused
+  if [ "$(dbt_v4_role)" = flux ] && [ -n "$(_dbt_flux_git_problem)" ]; then
+    _dbt_flux_git_problem | sed 's/^/  WARNING: flux — /'
+    echo "  WARNING: flux $DBT_V4_FLUX — nothing is set up in this copy (no remote, worktree, hook nor env file), and every dbt command is refused: make the flux a clone (git clone <the fleet's repository> <folder>), then: just setup"
+    return 0
+  fi
   echo "[dbt] upstream access..."
   dbt_git_setup
   if _dbt_is_line_h; then

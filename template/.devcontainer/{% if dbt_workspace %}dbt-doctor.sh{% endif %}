@@ -271,6 +271,14 @@ for N in $(dbt_members); do
       else
         ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
       fi
+      # a copy that is not the main one: its dbt extensions cut where they would compute in the main copy's space
+      WHY="$(_dbt_editor_cut "$V")"
+      if [ -n "$WHY" ]; then
+        grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$W/.vscode/settings.json" 2>/dev/null \
+          && grep -qF '"dbt.allowListFolders": [".vscode"]' "$W/.vscode/settings.json" \
+          && ok "$SHOW: the dbt extensions are cut in a window opened on it ($WHY)" \
+          || ko "$SHOW: the dbt extensions are NOT cut in a window opened on it ($WHY): their Run/Build/Preview/Compare would compute in the main copy's space, hooks included" "just setup (a .vscode/settings.json of yours: give it \"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\" and \"dbt.allowListFolders\": [\".vscode\"])"
+      fi
     else
       ko "$SHOW is not a worktree" "just setup"
     fi
@@ -311,6 +319,13 @@ if dbt_is_fleet; then
   if P="$(dbt_project_dir global-v4)"; then
     ok "global-v4/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) project(s) as local packages"
   fi
+  for A in global global-v4; do
+    P="$(dbt_project_dir "$A")" || continue
+    WHY="$(_dbt_editor_cut "$A")"; [ -n "$WHY" ] || continue
+    grep -qF "\"dbt.profileName\": \"$DBT_GUEST_EDITOR_PROFILE\"" "$P/.vscode/settings.json" 2>/dev/null \
+      && ok "$A/: the dbt extensions are cut in a window opened on it ($WHY)" \
+      || ko "$A/: the dbt extensions are NOT cut in a window opened on it ($WHY): their Run/Build/Preview/Compare would compute in the main copy's space, hooks included" "just setup"
+  done
 fi
 
 if dbt_is_fleet; then
@@ -386,9 +401,12 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
             [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else"
             if [ "$DBT_V4_FLUX" = H ]; then
               # the harmonized line is apart in git too: its own v4 branches, a push guard, its own lock
-              info "flux H, in git: its v4 copies follow <product>/v4-h (v4-h where the products' branches live), never the ISO line's v4 — v1 and v2 are shared with the main copy, read only here; its lock is .devcontainer/products-h.lock; clone, --state, --defer, --manage-state are refused"
+              info "flux H, in git: its v4 copies follow <product>/v4-h (v4-h where the products' branches live), never the ISO line's v4 — v1 and v2 are shared with the main copy, read only here, and so is its branch (main); its lock is .devcontainer/products-h.lock; clone, state, --state, --defer, --manage-state are refused, from the command line, the environment or a settings file"
               [ -n "$(_dbt_push_guard_h_problem)" ] \
-                || ok "flux H: its push guard runs on every push ($(_dbt_push_guard_h_dst)): nothing reaches v1, v2 nor v4; a v4-h is created at the published v4 only, never deleted nor rewritten"
+                || ok "flux H: its push guard runs on every push ($(_dbt_push_guard_h_dst)): nothing reaches v1, v2, v4 nor the main copy's branch; a v4-h is created at the published v4 only, never deleted nor rewritten, never given a redescente the published v4 does not hold"
+              X="$(_dbt_state_flags_in "${HOME:-/nonexistent}/.dbt/user_settings.yml" | LC_ALL=C sort -u | paste -sd' ' -)"
+              [ -z "$X" ] && ok "flux H: ~/.dbt/user_settings.yml turns no dbt State, deferral nor state on" \
+                || ko "flux H: ~/.dbt/user_settings.yml (every copy of the container reads it) sets $X — every dbt command of the harmonized line is refused" "remove it there (dbt login offers to write it), or move ~/.dbt/user_settings.yml away"
             else
               # a flux <A999> is separated from the main copy in BigQuery only: its worktrees follow the same branches
               info "git is shared: this copy's worktrees follow the products' branches the main copy follows — commit nothing on v2 from here (dbt v2 deps rewrites its package-lock.yml)"
@@ -396,6 +414,15 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
     orphan) while IFS= read -r L; do
               ko "ORPHAN copy — $L" "every v4 command is refused and v1/v2/global build nothing until this copy is the main one (DBT_V4_MAIN_WS) or a flux (.devcontainer/flux.conf); then: just setup"
             done < <(dbt_v4_orphan_why) ;;
+  esac
+  # a copy that is not the main one: what its dbt extensions may do (lib-dbt.sh, _dbt_editor_cut)
+  case "$(dbt_v4_role)" in
+    flux)   info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare outside v4/ (in v1/, v2/ and global/ they would compute in the main copy's space, hooks included); open a v4/<product>/ folder alone" ;;
+    orphan|refused) info "⚠ a VS Code window opened on this copy's ROOT reads the tracked root settings: the dbt extensions are not cut there — no Run/Build/Preview/Compare anywhere in this copy (it has no space of its own)" ;;
+  esac
+  case "$(dbt_v4_role)" in flux|orphan|refused)
+    ! _dbt_hub_has "$WS/profiles/profiles.yml" "$DBT_GUEST_EDITOR_PROFILE" \
+      || ko "profiles/profiles.yml declares '$DBT_GUEST_EDITOR_PROFILE', the profile that cuts the dbt extensions of a copy that is not the main one" "remove it from the hub" ;;
   esac
   if _dbt_v4_prefix_ok; then
     ok "write guard v4: v4/ and global-v4/ write under $DBT_BQ_DATASET_PREFIX_V4 / ${DBT_BQ_DATASET_PREFIX_V4}_* only — and nothing else writes there"
@@ -464,6 +491,8 @@ check_hooks() {   # check_hooks V PROJECT_DIR
   # a copy that is not the main one (a flux, an orphan), in the main copy's spaces: no hook ever runs from here
   # (dbt-run.sh, guest_hooks_guard) — the approvals of dbt.conf are the main copy's
   if ! dbt_is_v4 "$V" && case "$(dbt_v4_role)" in flux|orphan) true ;; *) false ;; esac; then
+    PK="$(_dbt_packages_guest_problem "$P" | head -1)"
+    [ -z "$PK" ] || info "$(label "$V"): compile/show refused in this copy — its packages are not installed exactly as locked: $PK"
     HOOKS="$(dbt_hook_sources_deep "$P")"
     if [ -z "$HOOKS" ]; then
       ok "$(label "$V"): no hook, neither in the project, nor in its installed packages, nor in a local package it links"

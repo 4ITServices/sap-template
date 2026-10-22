@@ -8,9 +8,14 @@
 # aucun hook hors de l'espace v4 d'une copie qui n'est pas la principale, les
 # réglages du garde-fou au moins aussi stricts que ceux de la copie principale,
 # la preuve d'un flux dans son propre fichier, la ligne harmonisée dans git — ses
-# branches v4-h, sa garde de push, son verrou products-h.lock, clone/--state/
-# --defer/--manage-state refusés —, les paquets d'une copie invitée tous installés,
-# `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
+# branches v4-h (une copie v4 qui n'est pas un worktree comprise), sa garde de push
+# (main, master, la branche par défaut du remote, une redescente hors de la v4
+# publiée, git-lfs), son verrou products-h.lock, clone/state/--state/--defer/
+# --manage-state refusés, de la ligne de commande, de l'environnement et des
+# fichiers de réglages —, un flux qui est un clone, le verrou refusé dans une
+# copie orpheline, les extensions dbt coupées hors de l'espace d'une copie
+# invitée, les paquets d'une copie invitée lus par un lecteur strict et installés
+# tels que verrouillés, `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
 # retirée ou affaiblie — un « mutant » —, puis scripts/test-lib-dbt.sh sur cette
 # copie. Un mutant doit faire échouer au moins un contrôle ; un mutant qui passe
 # est une garde que rien ne teste.
@@ -186,6 +191,7 @@ M = [
   ("invite-hooks-liens-non-lus", "R", '  H="$(dbt_hook_sources_deep "$PROJ")"\n', '  H="$(dbt_hook_sources "$PROJ")"\n'),
   ("invite-hooks-paquets-non-installes", "R", '  dbt_packages_unchecked "$PROJ" \\\n    && refuse "$WHO:', '  false \\\n    && refuse "$WHO:'),
   ("invite-hooks-lien-pendant-ignore", "L", '      printf \'%s\\n\' "${L#"$PROJ"/} (a link to no directory: its hooks cannot be read)"; continue\n', '      continue\n'),
+  ("doctor-invite-paquets-muet", "D", '    [ -z "$PK" ] || info "$(label "$V"): compile/show refused in this copy', '    true || info "$(label "$V"): compile/show refused in this copy'),
   ("doctor-invite-hooks-comme-principal", "D", '  if ! dbt_is_v4 "$V" && case "$(dbt_v4_role)" in flux|orphan) true ;; *) false ;; esac; then\n',
                                                '  if false; then\n'),
   # la preuve des hooks de global-v4 d'un flux : un fichier à lui
@@ -199,9 +205,25 @@ M = [
   ("ligne-h-git-setup-muet", "L", '             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git:', '             true || echo "[dbt] flux H, in git:'),
   ("flux-git-partage-doctor-muet", "D", '              info "git is shared: this copy', '              true "git is shared: this copy'),
   # aucun hook depuis une copie invitée : ses paquets tous installés (dbt v2 installerait le reste au compile)
-  ("invite-paquets-incomplets-admis", "R", '  _dbt_packages_incomplete "$PROJ" \\\n    && refuse', '  false \\\n    && refuse'),
-  ("invite-paquets-compte-ignore", "L", '  _dbt_v1_packages_missing "$PROJ" && return 0\n  [ -f "$PROJ/package-lock.yml" ] || return 1\n', '  [ -f "$PROJ/package-lock.yml" ] || return 1\n'),
-  ("invite-paquets-verrou-ignore", "L", '    [ -d "$PROJ/dbt_packages/$X" ] || return 0\n', '    :\n'),
+  ("invite-paquets-incomplets-admis", "R", '  PK="$(_dbt_packages_guest_problem "$PROJ")"\n', '  PK=""\n'),
+  ("invite-paquets-lecteur-en-echec-admis", "L", '  if [ "$RC" != 0 ]; then echo "its packages cannot be read', '  if false; then echo "its packages cannot be read'),
+  ("invite-paquets-liste-en-ligne-admise", "L", '                if v not in ("", "[]"):\n', '                if False:\n'),
+  ("invite-paquets-sans-verrou-tu", "L", '    if lock is None:\n        print(f"{src[0]} declares packages and there is no package-lock.yml', '    if False:\n        print(f"{src[0]} declares packages and there is no package-lock.yml'),
+  ("invite-paquets-empreinte-ignoree", "L", '        if lock.get("sha1_hash") != h:\n', '        if False:\n'),
+  ("invite-paquets-declare-hors-verrou-admis", "L", '            if not any(le.get(k) == e[k] for le in locked):\n', '            if False:\n'),
+  ("invite-paquets-verrou-non-installe-admis", "L", '    elif not os.path.isdir(os.path.join(proj, "dbt_packages", nm)):\n', '    elif False:\n'),
+  ("invite-paquets-entree-sans-cle-admise", "L", '                if len([i for i in ID if i in e]) != 1:\n', '                if False:\n'),
+  ("invite-paquets-deux-fichiers-admis", "L", '    if len(src) > 1:\n', '    if False:\n'),
+  ("invite-paquets-cle-inconnue-admise", "L", '        if k not in KEYS or k in cur or not (v or "").strip():\n', '        if k in cur or not (v or "").strip():\n'),
+  ("invite-paquets-ancre-admise", "L", '    if not v or v[0] in "[]{}&*!|>%@`,#?:-" or re.search(r":(\\s|$)", v):\n', '    if not v:\n'),
+  ("invite-paquets-tabulation-admise", "L", '        if "\\t" in line or "\\r" in line:\n', '        if False:\n'),
+  ("invite-paquets-utf8-admis", "L", '    except UnicodeDecodeError:\n        raise Unread(f"{name}: not UTF-8")\n', '    except UnicodeDecodeError:\n        text = ""\n'),
+  ("invite-paquets-cle-double-admise", "L", '        if k not in KEYS or k in cur or not (v or "").strip():\n', '        if k not in KEYS or not (v or "").strip():\n'),
+  ("invite-paquets-valeur-vide-admise", "L", '        if k not in KEYS or k in cur or not (v or "").strip():\n', '        if k not in KEYS or k in cur:\n'),
+  ("invite-paquets-guillemet-admis", "L", '        if len(v) < 2 or v[-1] != q or q in v[1:-1] or (q == \'"\' and "\\\\" in v):\n', '        if False:\n'),
+  ("invite-paquets-booleen-libre", "L", '        if v not in ("true", "false"):\n', '        if False:\n'),
+  ("invite-paquets-liste-de-versions-non-lue", "L", '    if key == "version" and v.startswith("[")', '    if False and v.startswith("[")'),
+  ("invite-paquets-marqueur-admis", "L", '        if line in ("---", "...") or line.startswith(("--- ", "... ")):\n', '        if False:\n'),
   # la ligne harmonisée dans git : ses branches, <p>/v4-h (v4-h là où vivent les branches du produit)
   ("ligne-h-branche-v4-commune", "L", '  _dbt_is_line_h && H4="-h"\n', '  :\n'),
   ("ligne-h-branche-referent", "L", 'P_HB4="v4$H4"; P_B4="$N/v4$H4"; P_WT4=', 'P_HB4="v4"; P_B4="$N/v4"; P_WT4='),
@@ -227,7 +249,8 @@ M = [
   # sa garde de push : posée, vérifiée, jamais contournée en silence
   ("ligne-h-garde-jamais-posee", "L", '  _dbt_is_line_h || return 0\n  S="$(_dbt_push_guard_h_src)"\n', '  return 0\n  S="$(_dbt_push_guard_h_src)"\n'),
   ("ligne-h-garde-posee-non-executable", "L", '  mkdir -p "$(dirname "$D")" && cat "$S" > "$D" && chmod 755 "$D"', '  mkdir -p "$(dirname "$D")" && cat "$S" > "$D"'),
-  ("ligne-h-garde-ecrase-un-autre-hook", "L", '    if [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then\n', '    if false; then\n'),
+  ("ligne-h-garde-ecrase-un-autre-hook", "L", '    elif [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then\n', '    elif false; then\n'),
+  ("ligne-h-garde-lfs-non-reconnu", "L", '    if [ -f "$D" ] && [ ! -L "$D" ] && cmp -s "$D" <(_dbt_lfs_pre_push_hook); then\n', '    if false; then\n'),
   ("ligne-h-garde-jamais-verifiee", "L", '  [ "$F" != H ] || _dbt_push_guard_h_problem\n', ''),
   ("ligne-h-garde-retouchee-admise", "L", '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n', '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ]; } \\\n'),
   ("ligne-h-garde-non-executable-admise", "L", '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n', '  { [ -f "$D" ] && [ ! -L "$D" ] && cmp -s "$S" "$D"; } \\\n'),
@@ -244,20 +267,74 @@ M = [
   ("poussee-h-creation-libre", "G", '    [ -n "$P" ] && [ "$P" = "$LOID" ] \\\n', '    true \\\n'),
   ("poussee-h-creation-depuis-une-v4-quelconque", "G", '    [ -n "$P" ] && [ "$P" = "$LOID" ] \\\n', '    [ -n "$P" ] \\\n'),
   ("poussee-h-reecriture", "G", '  elif ! git cat-file -e "$ROID^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$ROID" "$LOID" 2>/dev/null; then\n', '  elif false; then\n'),
-  ("poussee-h-sortie-permissive", "G", '  exit 1\nfi\nexit 0\n', '  exit 0\nfi\nexit 0\n'),
+  ("poussee-h-sortie-permissive", "G", '  } >&2\n  exit 1\nfi\n', '  } >&2\n  exit 0\nfi\n'),
+  ("poussee-h-main", "G", '    main|master)\n', '    master)\n'),
+  ("poussee-h-master", "G", '    main|master)\n', '    main)\n'),
+  ("poussee-h-branche-par-defaut", "G", '      [ -n "$DEF" ] && [ "$B" = "$DEF" ] \\\n', '      false \\\n'),
+  ("poussee-h-redescente-admise", "G", '    [ -z "$X" ] \\\n      || BAD=', '    true \\\n      || BAD='),
+  ("poussee-h-redescente-de-v4-refusee", "G", '  elif ! L="$(git rev-list "$LOID" --not "$ROID" ${P:+"$P"} 2>/dev/null)"; then\n', '  elif ! L="$(git rev-list "$LOID" --not "$ROID" 2>/dev/null)"; then\n'),
+  ("poussee-h-lfs-non-relaye", "G", '  printf \'%s\' "${IN:+$IN$\'\\n\'}" | git lfs pre-push "$@"\n  exit $?\n', '  exit 0\n'),
+  ("poussee-h-sans-lfs-admis", "G", '  exit 2\n', '  exit 0\n'),
   # clone, --state, --defer, --manage-state (et leurs variables) : refusés dans la ligne H
   ("ligne-h-etat-options-ignorees", "R", '    case " $DBT_LINE_H_STATE_ARGS " in *" ${A%%=*} "*) STATEARGS+=("${A%%=*}") ;; esac\n', ''),
-  ("ligne-h-etat-variables-ignorees", "R", '    for E in $DBT_LINE_H_STATE_ENV; do [ -z "${!E:-}" ] || STATEARGS+=("$E (exported)"); done\n', ''),
+  ("ligne-h-etat-variables-ignorees", "R", '    for E in $(compgen -e | LC_ALL=C grep -E "$DBT_LINE_H_STATE_ENV_RE"); do STATEARGS+=("$E (exported)"); done\n', ''),
+  ("ligne-h-etat-variable-vide-admise", "R", '    for E in $(compgen -e | LC_ALL=C grep -E "$DBT_LINE_H_STATE_ENV_RE"); do STATEARGS+=', '    for E in $(compgen -e | LC_ALL=C grep -E "$DBT_LINE_H_STATE_ENV_RE"); do [ -z "${!E:-}" ] || STATEARGS+='),
   ("ligne-h-etat-permis", "R", '    [ -z "${STATEARGS[*]-}" ] \\\n      || refuse "flux H (the harmonized line)', '    true \\\n      || refuse "flux H (the harmonized line)'),
-  ("ligne-h-clone-permis", "L", 'DBT_LINE_H_STATE_ARGS="clone --state', 'DBT_LINE_H_STATE_ARGS="--state'),
-  ("ligne-h-state-permis", "L", 'ARGS="clone --state --defer', 'ARGS="clone --defer'),
+  ("ligne-h-clone-permis", "L", 'DBT_LINE_H_STATE_ARGS="clone state', 'DBT_LINE_H_STATE_ARGS="state'),
+  ("ligne-h-commande-state-permise", "L", '="clone state --state', '="clone --state'),
+  ("ligne-h-state-permis", "L", ' state --state --defer', ' state --defer'),
   ("ligne-h-defer-permis", "L", ' --state --defer --defer-state', ' --state --defer-state'),
   ("ligne-h-defer-state-permis", "L", ' --defer-state --favor-state', ' --favor-state'),
-  ("ligne-h-favor-state-permis", "L", ' --favor-state --manage-state"', ' --manage-state"'),
-  ("ligne-h-manage-state-permis", "L", ' --favor-state --manage-state"', ' --favor-state"'),
-  ("ligne-h-DBT_STATE-permis", "L", 'DBT_LINE_H_STATE_ENV="DBT_STATE ', 'DBT_LINE_H_STATE_ENV="'),
-  ("ligne-h-DBT_DEFER-permis", "L", ' DBT_DEFER DBT_DEFER_STATE', ' DBT_DEFER_STATE'),
-  ("ligne-h-DBT_ENGINE_MANAGE_STATE-permis", "L", ' DBT_ENGINE_MANAGE_STATE ', ' '),
+  ("ligne-h-favor-state-permis", "L", ' --favor-state --manage-state ', ' --manage-state '),
+  ("ligne-h-manage-state-permis", "L", ' --manage-state --run-cache-mode', ' --run-cache-mode'),
+  ("ligne-h-run-cache-mode-permis", "L", ' --run-cache-mode --task-cache-url"', ' --task-cache-url"'),
+  ("ligne-h-task-cache-url-permis", "L", ' --run-cache-mode --task-cache-url"', ' --run-cache-mode"'),
+  ("ligne-h-env-STATE-permis", "L", "(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'", "(DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'"),
+  ("ligne-h-env-DEFER-permis", "L", "(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'", "(STATE|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'"),
+  ("ligne-h-env-TASK_CACHE-permis", "L", "(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'", "(STATE|DEFER|RUN_CACHE|BUILD_CACHE)'"),
+  ("ligne-h-env-RUN_CACHE-permis", "L", "(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'", "(STATE|DEFER|TASK_CACHE|BUILD_CACHE)'"),
+  ("ligne-h-env-BUILD_CACHE-permis", "L", "(STATE|DEFER|TASK_CACHE|RUN_CACHE|BUILD_CACHE)'", "(STATE|DEFER|TASK_CACHE|RUN_CACHE)'"),
+  ("ligne-h-reglages-ignores", "R", '    while IFS= read -r E; do [ -z "$E" ] || STATEARGS+=("$E"); done < <(dbt_line_h_state_settings_problem "$PROJ")\n', ''),
+  ("ligne-h-user-settings-ignore", "L", '    printf \'%s\\n\' "${HOME:-/nonexistent}/.dbt/user_settings.yml" "$P/dbt_project.yml"\n', '    printf \'%s\\n\' "$P/dbt_project.yml"\n'),
+  ("ligne-h-dbt-project-ignore", "L", '    printf \'%s\\n\' "${HOME:-/nonexistent}/.dbt/user_settings.yml" "$P/dbt_project.yml"\n', '    printf \'%s\\n\' "${HOME:-/nonexistent}/.dbt/user_settings.yml"\n'),
+  ("ligne-h-paquet-local-declare-ignore", "L", '      [ -f "$F" ] || continue\n      LC_ALL=C sed -nE "s@', '      continue\n      LC_ALL=C sed -nE "s@'),
+  ("ligne-h-paquet-local-lie-ignore", "L", '    for L in "$P"/dbt_packages/*; do [ -L "$L" ] && printf', '    for L in; do [ -L "$L" ] && printf'),
+  ("reglages-bloc-flags-ignore", "L", '          if (v == "") f = 1\n', '          if (v == "") f = 0\n'),
+  ("reglages-flags-en-ligne-ignore", "L", '          else if (v ~ /^\\{.*\\}[ ]*$/) flow(v)\n', '          else if (v ~ /^\\{.*\\}[ ]*$/) f = 0\n'),
+  ("reglages-forme-libre-admise", "L", '          else { print "flags: a form not read (" v ")"; exit }\n', '          else f = 0\n'),
+  ("reglages-cle-de-tete-ignoree", "L", '        if (index(keys, " " norm(k) " ")) print norm(k)\n', ''),
+  ("reglages-ancre-admise", "L", '        print "flags: a merge key, an anchor or an alias: a form not read"; exit\n', '        f = f\n'),
+  ("reglages-tabulation-admise", "L", '      if (l ~ /\\t/) { print "a tab: a form not read"; exit }\n', ''),
+  ("reglages-tiret-non-lu", "L", 'gsub("-", "_", k); return k }', 'return k }'),
+  ("reglages-casse-non-lue", "L", 'function norm(k) { k = tolower(k); gsub(', 'function norm(k) { gsub('),
+  ("reglages-commentaire-de-fin-lu-comme-une-cle", "L", '      sub(/[ \\t]#.*$/, "", l)\n', ''),
+  ("doctor-user-settings-muet", "D", '              [ -z "$X" ] && ok "flux H: ~/.dbt/user_settings.yml turns no dbt State', '              true && ok "flux H: ~/.dbt/user_settings.yml turns no dbt State'),
+  # la ligne harmonisée dans git : une copie v4/<p> qui n'est pas un worktree ; la branche de la copie principale
+  ("ligne-h-copie-dossier-admise", "L", '      && echo "$(_dbt_show v4) is there but is not a worktree of this copy', '      && true "$(_dbt_show v4) is there but is not a worktree of this copy'),
+  # un flux est un clone : son dépôt est le sien, jamais celui de la copie principale
+  ("flux-git-dossier-admis", "L", '  { [ -d "$O" ] && [ ! -L "$O" ] && [ "$G" = "$O" ]; } \\\n', '  true \\\n'),
+  ("flux-git-partage-admis", "L", '  [ "$(realpath -m -- "$M")" != "$G" ] \\\n', '  true \\\n'),
+  ("flux-git-garde-fou-ignore", "L", '  [ -n "$F" ] || return 0\n  _dbt_flux_git_problem\n', '  [ -n "$F" ] || return 0\n'),
+  ("flux-git-cycle-pose-quand-meme", "L", '  if [ "$(dbt_v4_role)" = flux ] && [ -n "$(_dbt_flux_git_problem)" ]; then\n', '  if false; then\n'),
+  # le verrou : écrit et rejoué par la copie principale, ou par un flux sain
+  ("verrou-orphelin-ecrit", "R", '  [ "$(dbt_v4_role)" != orphan ] \\\n    || orphan_refuse "just $1', '  true \\\n    || orphan_refuse "just $1'),
+  ("verrou-declaration-refusee-ecrit", "R", 'lock_guard() {\n  flux_guard\n', 'lock_guard() {\n'),
+  ("verrou-ecrit-sans-garde", "R", '  lock_guard lock\n', ''),
+  ("verrou-rejoue-sans-garde", "R", '  lock_guard lock-checkout\n', ''),
+  # les extensions dbt d'une copie qui n'est pas la principale : coupées là où elles calculeraient dans ses espaces
+  ("editeur-flux-non-coupe", "L", '    flux) dbt_is_v4 "${1:-}" || echo "flux $DBT_V4_FLUX', '    flux) dbt_is_v4 "${1:-}" || true "flux $DBT_V4_FLUX'),
+  ("editeur-orphelin-non-coupe", "L", '    orphan) echo "orphan copy: no space of its own" ;;\n', ''),
+  ("editeur-refus-non-coupe", "L", '    refused) echo "flux declaration refused: no space anybody vouches for" ;;\n', ''),
+  ("editeur-coupure-non-ecrite", "L", '  if [ -n "$WHY" ]; then\n    ALLOW=\'[".vscode"]\'\n', '  if false; then\n    ALLOW=\'[".vscode"]\'\n'),
+  ("editeur-power-user-non-ecarte", "L", '  if [ -n "$WHY" ]; then\n    ALLOW=\'[".vscode"]\'\n', '  if [ -n "$WHY" ]; then\n    :\n'),
+  ("editeur-global-non-coupe", "L", '        _dbt_editor_settings "$F" v2 \'[".vscode"]\' "$ENVF" "$WHY"\n', '        :\n'),
+  ("editeur-global-coupure-laissee", "L", '      rm -f "$F"; rmdir "$DBT_WS/$A/.vscode" 2>/dev/null || true\n', '      :\n'),
+  ("editeur-global-a-soi-muet", "L", '        echo "  WARNING: $A/.vscode/settings.json is yours', '        true "  WARNING: $A/.vscode/settings.json is yours'),
+  ("editeur-fichier-a-soi-muet", "L", '        echo "  WARNING: ${P_TAG}$(_dbt_show "$V").vscode/settings.json is yours', '        true "  WARNING: ${P_TAG}$(_dbt_show "$V").vscode/settings.json is yours'),
+  ("doctor-editeur-muet", "D", '          && ok "$SHOW: the dbt extensions are cut in a window opened on it ($WHY)" \\\n          || ko', '          && ok "$SHOW: the dbt extensions are cut in a window opened on it ($WHY)" \\\n          || true'),
+  ("doctor-editeur-global-muet", "D", '      && ok "$A/: the dbt extensions are cut in a window opened on it ($WHY)" \\\n      || ko', '      && ok "$A/: the dbt extensions are cut in a window opened on it ($WHY)" \\\n      || true'),
+  ("doctor-racine-muette", "D", '    flux)   info "⚠ a VS Code window opened on this copy\'s ROOT', '    flux-jamais)   info "⚠ a VS Code window opened on this copy\'s ROOT'),
+  ("doctor-hub-profil-coupe-muet", "D", '    ! _dbt_hub_has "$WS/profiles/profiles.yml" "$DBT_GUEST_EDITOR_PROFILE" \\\n', '    true \\\n'),
   # le doctor
   ("doctor-flux-muet", "D", '  FPB="$(dbt_v4_flux_problem)"\n', '  FPB=""\n'),
   ("doctor-verdict-sans-flux", "D", '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then\n',
@@ -276,7 +353,13 @@ M = [
 #   - dans git-push-garde-h.sh, le refus explicite de supprimer une v4-h : une suppression échoue aussi au contrôle de
 #     l'avance rapide (le commit vide n'a pas l'ancien pour ancêtre), seul le message diffère ;
 #   - dans _dbt_push_guard_h_problem, [ -f "$D" ] : un lien, un dossier ou rien à sa place échouent aussi à [ ! -L ], -x
-#     ou cmp ; dans dbt_v4_line_h_branch_problem, _dbt_has_ref avant merge-base (merge-base échoue sur une réf absente).
+#     ou cmp ; dans dbt_v4_line_h_branch_problem, _dbt_has_ref avant merge-base (merge-base échoue sur une réf absente) ;
+#   - dans _dbt_flux_git_problem, [ ! -L "$O" ] (un .git qui serait un lien : son chemin réel diffère, le contrôle
+#     d'égalité refuse aussi) et « not a git repository » (un flux hors de git est refusé par les contrôles d'ignore) ;
+#   - dans git-push-garde-h.sh, le refus quand git rev-list ne peut lister les commits apportés : seul un dépôt corrompu
+#     le déclenche — sans témoin (non simulé) ;
+#   - dans _dbt_packages_guest_problem, la lecture de package-lock.yml passe par le même lecteur que packages.yml :
+#     ses formes ont leurs mutants par packages.yml.
 PY
 python3 - "$WORK" "$REPO_ROOT" "$@" <<'PY'
 import sys

@@ -386,6 +386,41 @@ and commit messages; this changelog starts at v0.8.12.
   dbt v2 would install the rest by itself and run their hooks unread.
   Tests: 957 offline checks in `scripts/test-lib-dbt.sh`, a real clone of the
   harmonized line among them; 55 more mutants, all killed.
+- **The second review of the harmonized line, closed.** Guards again: each
+  restricts, none opens anything; the main copy does not change:
+  - **the dbt extensions of a copy that is not the main one are cut** where
+    they would compute in the main copy's spaces: the generated settings of a
+    window opened on `v1/<p>/`, `v2/<p>/` or `global/` alone give them
+    `dbt.profileName` / `dbt.targetName` = a profile no hub declares
+    (`sap-template-guest-copy-no-dbt-extension`: every command fails) and keep
+    dbt Power User out; an orphan copy or a refused declaration is cut
+    everywhere. A file of one's own is never rewritten (said). A window opened
+    on the copy's root reads the tracked root settings: not cut, said by the
+    doctor;
+  - **a guest copy's packages are read by a strict reader**
+    (`_dbt_packages_guest_problem`): compile and show of the main copy's
+    spaces are refused unless `packages.yml` (or `dependencies.yml`) is in a
+    form it knows, `package-lock.yml` locks exactly what is declared (its
+    `sha1_hash` recomputed as dbt computes it — checked on 55 real locks), and
+    every locked package is in `dbt_packages/`. Three forms passed before:
+    `- version:` first, a one-line list, a stale lock;
+  - **the push guard also refuses** `main`, `master` and the remote's default
+    branch (the main copy's), and any `v4-h` update that brings a commit
+    marked `Redescente:` the published v4 does not hold; it **takes the place
+    of git-lfs's own `pre-push` hook** (recognized byte for byte) and runs it,
+    so LFS objects still leave with their commits;
+  - **a flux is a clone**: a copy whose git repository is not the `.git` of
+    its own folder, or is the main copy's (`git worktree add`), gets nothing
+    set up, and every dbt command is refused;
+  - **dbt State everywhere in the harmonized line**: the `state` command,
+    `--run-cache-mode`, `--task-cache-url`, every exported variable whose
+    name reads as state, deferral or a run/task/build cache, and the settings
+    files that turn them on (`~/.dbt/user_settings.yml`, the project's and its
+    local packages' `dbt_project.yml`: `flags:`);
+  - an orphan copy or a refused declaration writes and replays no lock;
+  - a `v4/<p>` folder that is not a worktree of the copy is refused.
+  Tests: 1054 offline checks in `scripts/test-lib-dbt.sh` (a copy made by
+  `git worktree add` and git-lfs 3.8.0 among them); 244 mutants, all killed (73 new).
 
 ### Fixed (on the unreleased dbt-project type)
 

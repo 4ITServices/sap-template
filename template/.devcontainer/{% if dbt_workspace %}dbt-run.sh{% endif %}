@@ -83,8 +83,13 @@
 #     v4/<product>, that copy; under global-v4/, every v4 copy —, a pre-push
 #     guard installed (or every dbt command is refused), its lock
 #     .devcontainer/products-h.lock (just lock, lock-status, lock-checkout),
-#     and clone, --state, --defer, --defer-state, --favor-state,
-#     --manage-state (and their DBT_* variables) refused in every space
+#     and clone, state, --state, --defer, --defer-state, --favor-state,
+#     --manage-state, --run-cache-mode, --task-cache-url (and their DBT_*
+#     variables, and the settings files that set them) refused in every space;
+#     an orphan copy or a refused declaration writes and replays no lock
+#   - in a copy that is not the main one, compile and show of the main copy's
+#     spaces only for a project whose packages are installed exactly as locked
+#     (a strict reader: dbt v2 would install the rest and run its hooks unread)
 #   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
 #     copy, a probe…): never handed to plain dbt v2 — nor one of ANOTHER
 #     workspace of this kind (a flux's working copy): it runs through its own
@@ -194,19 +199,25 @@ guest_space() {
 # that product's on-run-start hooks against the main copy's v2 space. The hook approvals of dbt.conf —
 # DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 (.devcontainer/hooks.approved), DBT_HOOKS_REVIEWED — are the main copy's:
 # they are never read here. A command of the allowlist that runs hooks (dbt v2: compile, show) passes only for a project
-# whose packages are ALL installed (_dbt_packages_incomplete: dbt v2 installs a missing one by itself on compile, and
-# would run its on-run-start unread) and that declares no hook at all — in its files, its installed packages, or the
-# files of a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
+# whose packages are installed exactly as locked (_dbt_packages_guest_problem: declared in a form a strict reader knows,
+# package-lock.yml locking what is declared, every locked package in dbt_packages/ — or dbt v2 installs the rest by
+# itself on compile, and runs its on-run-start unread) and that declares no hook at all — in its files, its installed
+# packages, or the files of a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
 guest_hooks_guard() {
-  local V="$1" WHO H
+  local V="$1" WHO H PK
   if [ "$(dbt_v4_role)" = flux ]; then WHO="flux $DBT_V4_FLUX"; else WHO="orphan copy"; fi
   dbt_packages_unchecked "$PROJ" \
     && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed:" \
               "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"
-  _dbt_packages_incomplete "$PROJ" \
-    && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not all installed" \
-              "(dbt_packages/ lacks what packages.yml or package-lock.yml declares): dbt v2 would install the rest by itself and run" \
-              "their hooks unread. Install them first (no hook runs): $JCMD deps"
+  PK="$(_dbt_packages_guest_problem "$PROJ")"
+  if [ -n "$PK" ]; then
+    local -a WHY=()
+    mapfile -t WHY < <(printf '%s\n' "$PK" | head -n 8)
+    refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed exactly as locked:" \
+           "${WHY[@]}" \
+           "dbt v2 would resolve or install them by itself, and run their hooks unread. Install them first (no hook runs): $JCMD deps" \
+           "— a package-lock.yml it rewrites is never committed from this copy."
+  fi
   H="$(dbt_hook_sources_deep "$PROJ")"
   [ -z "$H" ] && return 0
   {
@@ -490,6 +501,16 @@ sync_products() {
 # The fleet lock (.devcontainer/products.lock)
 # -----------------------------------------------------------------------------
 
+# lock_guard WHAT — the lock is written, and replayed, by the main copy (products.lock) or by a sound flux (the
+# harmonized line's: products-h.lock): a declaration that cannot be trusted refuses it (flux_guard), and so does an
+# ORPHAN copy — a clone, an ex-flux whose flux.conf was erased: its products.lock would be the ISO line's, written from
+# a copy that is not the main one (and an ex-H copy's v4 worktrees are v4-h ones)
+lock_guard() {
+  flux_guard
+  [ "$(dbt_v4_role)" != orphan ] \
+    || orphan_refuse "just $1 — the lock is the main copy's ($LOCKN), or the harmonized line's (products-h.lock, in its copy)"
+}
+
 # lock [PRODUCT] — record the current commit of each v1/v2 (and v4). Only commits that
 # are PUSHED where the product's branches live: a lock that names a commit
 # nobody else can fetch would replay nothing. Uncommitted changes are not
@@ -497,6 +518,7 @@ sync_products() {
 lock_write() {
   local ONLY="${1:-}" N V W B U C BAD="" WARN="" TMP OLD NEWL OLDC CHANGES=""
   dbt_is_fleet || die "single-product workspace: nothing to lock"
+  lock_guard lock
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
   TMP="$(mktemp)"
@@ -580,6 +602,7 @@ lock_status() {
 lock_checkout() {
   local ONLY="${1:-}" N V W L DONE=0
   dbt_is_fleet || die "single-product workspace: no lock"
+  lock_guard lock-checkout
   [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/$LOCKN — nothing to replay"
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
@@ -1007,14 +1030,17 @@ run_dbt() {
   [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
     || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
               "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
-  # the harmonized line: nothing that copies another space's relations or reads its state, in any space
+  # the harmonized line: nothing that copies another space's relations or reads its state, in any space — from the
+  # command line, an exported variable (DBT_LINE_H_STATE_ENV_RE) or a settings file (dbt_line_h_state_settings_problem)
   if _dbt_is_line_h; then
-    for E in $DBT_LINE_H_STATE_ENV; do [ -z "${!E:-}" ] || STATEARGS+=("$E (exported)"); done
+    for E in $(compgen -e | LC_ALL=C grep -E "$DBT_LINE_H_STATE_ENV_RE"); do STATEARGS+=("$E (exported)"); done
+    while IFS= read -r E; do [ -z "$E" ] || STATEARGS+=("$E"); done < <(dbt_line_h_state_settings_problem "$PROJ")
     [ -z "${STATEARGS[*]-}" ] \
       || refuse "flux H (the harmonized line): \`dbt $*\` refused — ${STATEARGS[*]}: clone, deferral, state comparison and service-backed" \
                 "dbt State bring another space's relations or state into the line (\`dbt clone --state <the ISO line's manifest>\` would copy" \
-                "ISO tables under $(dbt_v4_prefix)). Refused here — options and their variables ($DBT_LINE_H_STATE_ENV) — until a later" \
-                "change of the template opens them."
+                "ISO tables under $(dbt_v4_prefix)). Refused here — options, their variables (DBT_STATE, DBT_DEFER, DBT_ENGINE_*STATE*…)" \
+                "and the settings files that set them (~/.dbt/user_settings.yml, dbt_project.yml: flags) — until a later change of the" \
+                "template opens them."
   fi
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then

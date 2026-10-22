@@ -86,24 +86,28 @@ DBT_TARGET_NAME="{{ dbt_target_name }}"
 # never writes there. DBT_V4_FLUX=H is the HARMONIZED line: a long-lived copy
 # whose v4 is this copy's (the ISO line, outputs equal to production) plus one
 # convergence per deviation, under <DBT_BQ_DATASET_PREFIX_V4>_H — where this
-# copy never writes. A flux <A999> is separated in BigQuery only, not in git:
-# its worktrees follow the same branches as this copy's. The harmonized line is
-# apart in git too: its v4 copies follow branches of their own, <product>/v4-h
-# (v4-h where the products' branches live, opened there from the published
-# v4), a pre-push guard refuses any push of it to v1, v2 or v4, its lock is
-# .devcontainer/products-h.lock, and clone, --state, --defer, --manage-state
-# are refused there. Never set DBT_V4_FLUX here: every dbt command would be
-# refused.
+# copy never writes. A flux is a CLONE of this repository (git clone), never a
+# worktree of this copy (git worktree add: refused); its dbt extensions are cut
+# in v1/, v2/ and global/. A flux <A999> is separated in BigQuery only, not in
+# git: its worktrees follow the same branches as this copy's. The harmonized
+# line is apart in git too: its v4 copies follow branches of their own,
+# <product>/v4-h (v4-h where the products' branches live, opened there from the
+# published v4), a pre-push guard refuses any push of it to v1, v2, v4 or this
+# copy's branch (main), and any redescente brought to a v4-h, its lock is
+# .devcontainer/products-h.lock, and clone, state, --state, --defer,
+# --manage-state are refused there (options, variables, settings files). Never
+# set DBT_V4_FLUX here: every dbt command would be refused.
 # The MAIN working copy is NAMED, by its real path in the container (e.g.
 # "/workspaces/<folder>"): the one copy whose v4 writes the main v4 space and
 # that writes the container's state (engines, ~/.bashrc, global git settings).
 # As soon as a v4 is declared, a copy that is neither the main one nor a flux
 # (a clone, a flux whose flux.conf was erased) runs no v4 command, its
-# v1/v2/global build nothing — and empty here, no copy is the main one: the
-# main copy itself then builds nothing. A flux reads the main copy's dbt.conf:
-# same sandbox, prefixes and engine pins, and guard settings at least as strict
-# (DBT_SANDBOX_NEVER_BUILD, DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED,
-# DBT_HOOKS_REVIEWED_V2, DBT_ALLOW_RUN_OPERATION) — looser refuses every command.
+# v1/v2/global build nothing, it writes no lock — and empty here, no copy is
+# the main one: the main copy itself then builds nothing. A flux reads the main
+# copy's dbt.conf: same sandbox, prefixes and engine pins, and guard settings at
+# least as strict (DBT_SANDBOX_NEVER_BUILD, DBT_HOOKS_COMPILE_OK,
+# DBT_HOOKS_REVIEWED, DBT_HOOKS_REVIEWED_V2, DBT_ALLOW_RUN_OPERATION) — looser
+# refuses every command.
 DBT_V4_MAIN_WS=""
 DBT_V4_PRODUCTS=""
 DBT_BQ_DATASET_PREFIX_V4=""
