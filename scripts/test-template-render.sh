@@ -11,7 +11,7 @@
 # renseigné = ~/.claude-profiles/<profil> monté et créé par initializeCommand ;
 # devcontainer.json toujours valide (JSONC) ; un profil « ../x » est refusé.
 # Puis project_type=dbt-project, et dbt-fleet (une flotte de produits) : pas
-# de squelette Python, l'outillage dbt (lib-dbt.sh, dbt.conf, feature gcloud,
+# de squelette Python, l'outillage dbt (lib-dbt.sh, git-ssh-garde.sh, dbt.conf, feature gcloud,
 # hub de profils, products.conf et global/ pour la flotte) présent et valide,
 # et rien de tout cela ne fuit dans les autres types.
 #
@@ -150,7 +150,7 @@ if render false "$WORK/dbt" --data project_type=dbt-project --data "upstream_rep
     [ -e "$D/$absent" ] && bad "DBT: $absent ne devrait PAS exister" || pass "DBT: pas de $absent"
   done
   if find "$D" -type d -empty | grep -q .; then bad "DBT: dossier vide généré"; find "$D" -type d -empty; else pass "DBT: aucun dossier vide"; fi
-  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh \
+  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh \
                  .devcontainer/dbt.conf .devcontainer/features/google-cloud-cli/devcontainer-feature.json \
                  .devcontainer/lib-mcp.sh .devcontainer/mcp-servers.conf .ignore profiles/dbt.env \
                  justfile CLAUDE.md README.md .env.example; do
@@ -252,7 +252,7 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
   for absent in pyproject.toml .python-version Dockerfile src tests .github; do
     [ -e "$D/$absent" ] && bad "FLEET: $absent ne devrait PAS exister" || pass "FLEET: pas de $absent"
   done
-  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh \
+  for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh \
                  .devcontainer/dbt.conf .devcontainer/products.conf \
                  .devcontainer/features/google-cloud-cli/install.sh .ignore profiles/dbt.env \
                  global/dbt_project.yml global/packages.yml global/macros/generate_schema_name.sql \
@@ -291,7 +291,7 @@ for leak in .devcontainer/products.conf global; do
 done
 
 echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
-for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/dbt.conf \
+for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/dbt.conf \
             .devcontainer/features .ignore profiles; do
   [ -e "$WORK/off/$leak" ] && bad "OFF: $leak ne devrait PAS exister" || pass "OFF: pas de $leak"
 done

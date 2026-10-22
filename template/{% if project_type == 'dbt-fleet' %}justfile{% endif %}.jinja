@@ -1,4 +1,4 @@
-# {{ project_name }} — flotte dbt : v1 = dbt Core commun, v2 = dbt v2, global = les v2 réunis
+# {{ project_name }} — flotte dbt : v1 = dbt Core commun, v2 = dbt v2, global = les v2 réunis, v4 / global-v4 = l'espace v4
 # ⚠ Arguments POSITIONNELS : `just v1 <produit> parse`, `just global parse`
 
 set positional-arguments
@@ -55,6 +55,10 @@ product-new name url branch='main' subdir='-' global='no':
 product-add name url branch='main' subdir='-' global='no' home='-':
     @bash .devcontainer/dbt-run.sh product-add "$@"
 
+# Produit « né ici » (sans origine, v4 seule) dont le dépôt porte une branche v4 : just referent-add <nom> <url-du-dépôt> [dossier]
+referent-add name home subdir='-':
+    @bash .devcontainer/dbt-run.sh referent-add "$@"
+
 # --- dbt (voie gardée : hub de profils imposé, écritures contrôlées) ----------
 
 # dbt Core commun sur v1/<produit>/ : just v1 <produit> parse
@@ -69,11 +73,19 @@ v2 product *args:
 global *args:
     @bash .devcontainer/dbt-run.sh global "$@"
 
+# dbt v2 sur v4/<produit>/ (DBT_V4_PRODUCTS, référents) — préfixe DBT_BQ_DATASET_PREFIX_V4 : just v4 <produit> parse
+v4 product *args:
+    @bash .devcontainer/dbt-run.sh v4 "$@"
+
+# dbt v2 sur global-v4/ (l'assemblage de l'espace v4, mêmes refus que global/) : just global-v4 parse
+global-v4 *args:
+    @bash .devcontainer/dbt-run.sh global-v4 "$@"
+
 # Approuver les hooks relus de global/ (DBT_HOOKS_REVIEWED_V2 n'exécute que ceux-là)
 hooks-approve target='':
     @bash .devcontainer/dbt-run.sh hooks-approve "$@"
 
-# Où v1 et v2 écrivent chaque modèle (hors ligne) — un produit, tous, ou « global » (collisions)
+# Où v1, v2 (et v4) écrivent chaque modèle (hors ligne) — un produit, tous, « global » ou « global-v4 » (collisions)
 destinations target='':
     @bash .devcontainer/dbt-run.sh destinations "$@"
 
