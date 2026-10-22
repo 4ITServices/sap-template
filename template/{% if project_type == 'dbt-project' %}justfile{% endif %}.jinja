@@ -27,6 +27,10 @@ v1 *args:
 v2 *args:
     @bash .devcontainer/dbt-run.sh v2 "$@"
 
+# Approuver les hooks relus de v2/ (DBT_HOOKS_REVIEWED_V2 n'exécute que ceux-là)
+hooks-approve:
+    @bash .devcontainer/dbt-run.sh hooks-approve
+
 # Où v1 et v2 écriraient chaque modèle (hors ligne), et où ils divergent
 destinations:
     @bash .devcontainer/dbt-run.sh destinations

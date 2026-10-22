@@ -6,7 +6,8 @@
 # Checks, repairs nothing. Everything that lives in the container filesystem
 # (both engines, ~/.gitconfig, ~/.bashrc) is gone after a rebuild and must be
 # put back by the hooks: this script tells whether it is all there. In a
-# fleet, every product of .devcontainer/products.conf is checked.
+# fleet, every product of .devcontainer/products.conf is checked, and every
+# referent of .devcontainer/referents.conf (born here: v4 only).
 #
 #   just doctor           fast and offline
 #   just doctor --deep    also parses every project and asks Google for a token
@@ -72,22 +73,125 @@ fi
 echo "[upstream — read-only]"
 KH="$(_dbt_known_hosts)"
 HOSTS=""
+SSH_HOSTS=""
 while IFS= read -r U; do
   H="$(_dbt_url_host "$U")"; [ -n "$H" ] || continue
   case " $HOSTS " in *" $H "*) continue ;; esac
   HOSTS="$HOSTS $H"
   if _dbt_url_is_ssh "$U"; then
+    SSH_HOSTS="$SSH_HOSTS $H"
     if ssh-keygen -F "$H" -f "$KH" >/dev/null 2>&1; then
       ok "$H host key pinned: $(ssh-keygen -lf "$KH" 2>/dev/null | grep -F "$H" | awk '{print $2" "$NF}' | paste -sd' ' -)"
     else
       ko "no pinned host key for $H" "just setup (needs the network), then commit .devcontainer/upstream_known_hosts"
     fi
   fi
-  if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
-    git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF "git@$H:" \
-      && ok "push lock on $H, global (pushInsteadOf)" || ko "global push lock missing for $H" "just setup"
-  fi
 done < <(_dbt_upstream_urls)
+# The push lock (verrou 4), layer by layer — offline: ssh is stubbed, and the https probes run only once the
+# dead proxy is checked in the configuration (they meet it on 127.0.0.1): nothing connects anywhere
+if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+  PL="$(git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null)"
+  for H in $HOSTS; do
+    NP=0; MISS=""
+    while IFS= read -r P; do
+      NP=$((NP + 1)); grep -qxF -- "$P" <<<"$PL" || MISS="$MISS $P"
+    done < <(_dbt_push_prefixes "$H")
+    [ -z "$MISS" ] && ok "push lock on $H, global (pushInsteadOf: $NP forms — git push only, git send-pack never reads them)" \
+      || ko "global push lock incomplete for $H (pushInsteadOf missing:$MISS)" "just setup"
+    if _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; then
+      # (b), first line: the dead proxy
+      POK=1
+      for U in "https://$H" "http://$H"; do
+        mapfile -t PV < <(git config --global --get-all "http.$U.proxy" 2>/dev/null)
+        [ "${#PV[@]}" -ge 1 ] && [ "${PV[${#PV[@]}-1]}" = "$_DBT_DEAD_PROXY" ] || POK=0
+      done
+      L="$(git -C "$WS" config --local --get-regexp '^http\..*\.proxy$' 2>/dev/null | grep -ic -- "$H")"
+      if [ "$POK" = 0 ]; then ko "no dead proxy for https://$H (http.https://$H.proxy = $_DBT_DEAD_PROXY)" "just setup"
+      elif [ "${L:-0}" != 0 ]; then ko "a proxy for $H is set in the workspace's own git config: it may outrank the dead proxy" "git config --local --unset-all it"
+      else
+        MISSP=""
+        for U in "https://doctor-probe@$H/verrou4-doctor.git" "http://doctor-probe@$H/verrou4-doctor.git"; do
+          E="$(env -u NO_PROXY -u no_proxy -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= timeout 20 git -C "$WS" ls-remote "$U" 2>&1 </dev/null)"
+          grep -q '127\.0\.0\.1 port 9' <<<"$E" || MISSP="$MISSP ${U%%://*}"
+        done
+        [ -z "$MISSP" ] && ok "https and http to $H meet a dead proxy (127.0.0.1:9 — tried: nothing left the container)" \
+          || ko "the dead proxy does not stop$MISSP to $H" "just setup, then look for an http.*.proxy of $H in the git configuration"
+      fi
+      NPH=""
+      for V in "${NO_PROXY:-}" "${no_proxy:-}"; do
+        IFS=, read -r -a NPL <<<"${V,,}"
+        for E in "${NPL[@]}"; do
+          E="${E//[[:space:]]/}"; [ "$E" = "*" ] && { NPH="*"; break 2; }
+          E="${E#\*}"; E="${E#.}"; E="${E%.}"; [ -n "$E" ] || continue
+          case "${H,,}" in "$E"|*".$E") NPH="$E"; break 2 ;; esac
+        done
+      done
+      [ -z "$NPH" ] || ko "NO_PROXY / no_proxy covers $H ($NPH): git goes round the dead proxy (the quitter still holds — not against a password in the URL)" "take $H out of NO_PROXY"
+      # (b), second line: the quitter
+      QOK=1
+      for U in "https://$H" "http://$H"; do
+        mapfile -t QV < <(git config --global --get-all "credential.$U.helper" 2>/dev/null)
+        [ "${#QV[@]}" -ge 2 ] && [ -z "${QV[${#QV[@]}-2]}" ] && [ "${QV[${#QV[@]}-1]}" = "$(_dbt_https_quitter "$H")" ] || QOK=0
+      done
+      L="$(git -C "$WS" config --local --get-regexp '^credential\..*helper$' 2>/dev/null | grep -ic -- "$H")"
+      if [ "$QOK" = 1 ] && [ "${L:-0}" = 0 ]; then ok "no https credentials for $H (quitter: no helper asked, no prompt)"
+      elif [ "$QOK" = 1 ]; then ko "a credential helper for $H is set in the workspace's own git config: it may outrank the quitter" "git config --local --unset-all it"
+      else ko "https quitter missing for $H (credential.https://$H.helper)" "just setup"; fi
+    else
+      info "$H is read over https: no dead proxy, no https quitter (an explicit pushurl https://$H/… is stopped by nothing but its credentials)"
+    fi
+  done
+  G="$(_dbt_ssh_guard)"; GS="$(_dbt_ssh_guard_src)"
+  SC="$(git -C "$WS" config --get core.sshCommand 2>/dev/null || true)"
+  GH="$(printf '%s' "$SC" | sed -n 's/.*git-ssh-garde.sh --hosts=\([^ ]*\).*/\1/p' | tr ',' ' ')"
+  MISS=""; for H in $HOSTS; do case " $GH " in *" ${H,,} "*) ;; *) MISS="$MISS $H" ;; esac; done
+  if [ ! -f "$GS" ]; then ko "ssh push guard missing in the worktree (.devcontainer/git-ssh-garde.sh — an older commit checked out?)" "copier update (or back on the branch), then: just setup"
+  elif [ -z "$GH" ]; then
+    case "$SC" in ""|*upstream_known_hosts*) ko "core.sshCommand is not the ssh push guard" "just setup" ;;
+      *) ko "core.sshCommand is customised: the ssh push guard is not installed" "put bash $G --hosts=$(echo $HOSTS | tr ' ' ',') in front of its options" ;; esac
+  elif [ "${SC#"bash $(printf '%q' "$G") --hosts="}" = "$SC" ]; then
+    ko "core.sshCommand runs a guard other than its installed copy ~/.local/libexec/git-ssh-garde.sh (in the worktree, a checkout of an older commit takes it away)" "just setup"
+  elif ! cmp -s "$GS" "$G"; then ko "the installed ssh push guard (~/.local/libexec/git-ssh-garde.sh) differs from .devcontainer/git-ssh-garde.sh" "just setup"
+  elif [ -n "$MISS" ]; then ko "the ssh push guard does not cover$MISS" "just setup"
+  elif [ "$(git config --global --get core.sshCommand 2>/dev/null)" != "$SC" ]; then
+    ko "the workspace's own git config overrides core.sshCommand" "git -C $WS config --local --unset core.sshCommand"
+  elif ! STUB="$(mktemp -d 2>/dev/null)" || [ -z "$STUB" ]; then
+    ko "cannot prove the ssh push guard (mktemp failed)" "check /tmp"
+  else
+    ok "ssh push guard: core.sshCommand = ~/.local/libexec/git-ssh-garde.sh, the copy of .devcontainer/git-ssh-garde.sh (${GH// /, })"
+    # prove it, offline: ssh replaced by a stub that only answers `ssh -G` (local, no connection)
+    REAL_SSH="$(command -v ssh 2>/dev/null || echo ssh)"
+    printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = -G ] && exec "%s" "$@"; done\necho "doctor stub: ssh $*" >&2\nexit 42\n' "$REAL_SSH" > "$STUB/ssh"
+    chmod +x "$STUB/ssh"
+    for H in $HOSTS; do
+      A="$(timeout 10 getent ahosts "$H" 2>/dev/null | awk '$1 ~ /^[0-9]+(\.[0-9]+)+$/ { print $1; exit }')"; [ -n "$A" ] || A=192.0.2.1
+      REF=0; ASK=""
+      for D in "git@$H" "jb@${H^^}" "$H." "git@[::ffff:$A]"; do
+        PATH="$STUB:$PATH" bash "$G" --hosts="${GH// /,}" "$D" "git-receive-pack 'doctor-probe.git'" </dev/null >/dev/null 2>"$STUB/err"
+        [ $? = 1 ] && grep -q 'verrou 4' "$STUB/err" && REF=$((REF + 1)) || ASK="$ASK $D"
+      done
+      [ "$REF" = 4 ] && ok "the ssh push guard refuses git-receive-pack to $H (git@$H, jb@${H^^}, $H., git@[::ffff:$A] — tried, ssh stubbed)" \
+        || ko "the ssh push guard let git-receive-pack through to:$ASK" "check .devcontainer/git-ssh-garde.sh (copier update), then: just setup"
+      PATH="$STUB:$PATH" bash "$G" --hosts="${GH// /,}" "git@$H" "git-upload-pack 'doctor-probe.git'" </dev/null >/dev/null 2>&1
+      [ $? = 42 ] && ok "…and lets git-upload-pack through to $H (reads unchanged)" \
+        || ko "the ssh push guard blocks reads from $H" "check .devcontainer/git-ssh-garde.sh (copier update)"
+    done
+    rm -rf "${STUB:?}"
+  fi
+  # what replaces the guard from the environment (deliberate overrides of the configuration: see git-ssh-garde.sh)
+  [ -z "${GIT_SSH_COMMAND:-}" ] \
+    || ko "GIT_SSH_COMMAND is exported: it replaces the ssh push guard (pushInsteadOf still holds for git push, never for git send-pack)" "unset GIT_SSH_COMMAND"
+  [ -z "${GIT_SSH:-}" ] || info "GIT_SSH is exported: git uses it only without core.sshCommand — the ssh push guard stays in front"
+  K="$(printf '%s' "${GIT_CONFIG_PARAMETERS:-}" | tr '[:upper:]' '[:lower:]' | grep -oE "core\.sshcommand|url\.[^=']*insteadof|credential\.[^=']*|http\.[^=']*" | sort -u | paste -sd' ' -)"
+  NC="${GIT_CONFIG_COUNT:-0}"; [[ "$NC" =~ ^[0-9]+$ ]] || NC=0
+  for ((i = 0; i < NC && i < 100; i++)); do
+    V="GIT_CONFIG_KEY_$i"; V="${!V:-}"; V="${V,,}"
+    case "$V" in core.sshcommand|url.*insteadof|credential.*|http.*) K="$K $V" ;; esac
+  done
+  K="${K# }"
+  [ -z "$K" ] || ko "git configuration exported in the environment touches the push lock (GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT: $K)" "unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT"
+  [ -z "${GIT_CONFIG_GLOBAL:-}" ] || info "GIT_CONFIG_GLOBAL is exported: git reads $GIT_CONFIG_GLOBAL, not ~/.gitconfig — the lock checked here is the one written there"
+fi
 if [ -z "$HOSTS" ]; then
   if dbt_is_fleet; then ko "no data product declared" "just product-add <name> <git-url>"; else ko "no upstream declared" "set DBT_UPSTREAM_URL in .devcontainer/dbt.conf"; fi
 else
@@ -113,11 +217,17 @@ for N in $(dbt_products); do
 done
 
 echo "[worktrees]"
-for N in $(dbt_products); do
+for N in $(dbt_members); do
   dbt_use_product "$N" || continue
   [ "$P_HOME" != "origin" ] && info "$N: branches live in $P_HOME_URL (remote $P_HOME)"
-  for V in $DBT_WORKTREES; do
+  for V in $(dbt_versions); do
     W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
+    if [ "$V" = v4 ] && ! _dbt_is_worktree "$W" && ! git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/$(_dbt_hbr v4)"; then
+      # declared, not opened yet where its branches live: nothing to repair here
+      if [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
+      else info "$SHOW: v4 not opened yet — it starts from the published v2: git push $P_HOME $P_HOME/$P_HB2:refs/heads/$(_dbt_hbr v4), then just setup"; fi
+      continue
+    fi
     if _dbt_is_worktree "$W"; then
       B="$(git -C "$W" rev-parse --abbrev-ref HEAD 2>/dev/null)"
       ok "$SHOW on branch $B ($(git -C "$W" rev-parse --short HEAD 2>/dev/null)$( [ -n "$(git -C "$W" status --porcelain 2>/dev/null | head -1)" ] && echo ', uncommitted changes'))"
@@ -135,6 +245,11 @@ for N in $(dbt_products); do
         && ok "$SHOW locked against prune" || ko "$SHOW not locked" "just setup"
       if P="$(dbt_project_dir "$V")"; then
         ok "$(label "$V") dbt project: ${P#"$WS"/} (profile '$(_dbt_profile_name "$P")')"
+        if [ "$V" = v4 ]; then
+          [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$(readlink -f "$WS/profiles/v4.env")" ] \
+            && ok "$SHOW: .env -> profiles/v4.env (the dbt extension stays in the v4 space)" \
+            || ko "$SHOW: .env does not point to profiles/v4.env" "just setup — until then the dbt extension would read another space there"
+        fi
       else
         ko "$(label "$V"): dbt_project.yml not found" "$(dbt_is_fleet && echo 'set the dbt folder of the product in products.conf' || echo 'set DBT_PROJECT_SUBDIR in .devcontainer/dbt.conf')"
       fi
@@ -143,7 +258,17 @@ for N in $(dbt_products); do
     fi
   done
   BR="$P_BRANCH"
-  if git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_REMOTE/$BR"; then
+  if dbt_v4_enabled && [ "${P_REFERENT:-0}" != 1 ] && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
+    if git -C "$WS" merge-base --is-ancestor "$P_B2" "$P_B4" 2>/dev/null; then
+      info "$P_B4 contains $P_B2 (+$(git -C "$WS" rev-list --count "$P_B2..$P_B4" 2>/dev/null) commit(s) of its own)"
+    else
+      info "$P_B4 lacks $(git -C "$WS" rev-list --count "$P_B4..$P_B2" 2>/dev/null) commit(s) of $P_B2: merge $P_B2 into it"
+    fi
+  fi
+  if [ "${P_REFERENT:-0}" = 1 ]; then
+    info "$N: a referent, born here (referents.conf) — no upstream, no mirror, no v1/v2"
+    if _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}'; then ko "$N is declared in products.conf AND referents.conf" "remove one of the two lines"; fi
+  elif git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_REMOTE/$BR"; then
     info "$P_B1 is $(git -C "$WS" rev-list --count "$P_B1..$P_REMOTE/$BR" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$P_B1" 2>/dev/null) ahead of $P_REMOTE/$BR (as last fetched: just upstream-pull${P_NAME:+ $P_NAME})"
     info "$P_B2 is $(git -C "$WS" rev-list --count "$P_B2..$P_B1" 2>/dev/null) behind / $(git -C "$WS" rev-list --count "$P_B1..$P_B2" 2>/dev/null) ahead of $P_B1"
   else
@@ -156,6 +281,9 @@ if dbt_is_fleet; then
   else
     info "no global/ dbt project"
   fi
+  if P="$(dbt_project_dir global-v4)"; then
+    ok "global-v4/ dbt project (profile '$(_dbt_profile_name "$P")'): $(grep -c -E '^[[:space:]]*- local:' "$P/packages.yml" 2>/dev/null || echo 0) project(s) as local packages"
+  fi
 fi
 
 if dbt_is_fleet; then
@@ -165,9 +293,12 @@ if dbt_is_fleet; then
   else
     git -C "$WS" ls-files --error-unmatch .devcontainer/products.lock >/dev/null 2>&1 \
       || info "products.lock is not committed yet — commit it with the global/ change it goes with"
-    for N in $(dbt_products); do
+    for N in $(dbt_members); do
       dbt_use_product "$N" || continue
-      for V in $DBT_WORKTREES; do info "$(_dbt_show "$V") $(dbt_lock_describe "$V")"; done
+      for V in $(dbt_versions); do
+        [ "$V" = v4 ] && ! _dbt_is_worktree "$(_dbt_wt v4)" && continue   # not opened yet: said above
+        info "$(_dbt_show "$V") $(dbt_lock_describe "$V")"
+      done
     done
   fi
 fi
@@ -178,13 +309,17 @@ echo "[profile hub]"
   || ko "DBT_PROFILES_DIR is '${DBT_PROFILES_DIR:-unset}'" "rebuild the container (containerEnv) — until then use only the just recipes"
 if [ -f "$WS/profiles/profiles.yml" ]; then
   NAMES=""
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    P="$(dbt_project_dir v1)" || P="$(dbt_project_dir v2)" || continue
+    P=""
+    for V in $(dbt_versions); do P="$(dbt_project_dir "$V")" && break; P=""; done
+    [ -n "$P" ] || continue
     NAME="$(_dbt_profile_name "$P")"; [ -n "$NAME" ] && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
   done
-  dbt_is_fleet && P="$(dbt_project_dir global)" && NAME="$(_dbt_profile_name "$P")" && [ -n "$NAME" ] \
-    && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  for V in global global-v4; do
+    dbt_is_fleet && P="$(dbt_project_dir "$V")" && NAME="$(_dbt_profile_name "$P")" && [ -n "$NAME" ] \
+      && case " $NAMES " in *" $NAME "*) ;; *) NAMES="$NAMES $NAME" ;; esac
+  done
   for NAME in $NAMES; do
     _dbt_hub_has "$WS/profiles/profiles.yml" "$NAME" && ok "profiles/profiles.yml declares '$NAME'" \
       || ko "profiles/profiles.yml does not declare '$NAME'" "add it — dbt refuses to run without it"
@@ -200,9 +335,47 @@ else
 fi
 [ -f "$WS/profiles/dbt.env" ] && ok "profiles/dbt.env" || ko "profiles/dbt.env missing" "restore it from git"
 
+# the v4 space — checked as soon as a v4 is declared (DBT_V4_PRODUCTS, referents.conf) or a v4 prefix is set
+if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_referents)" ]; then
+  echo "[v4 space — datasets of its own]"
+  if _dbt_v4_prefix_ok; then
+    ok "write guard v4: v4/ and global-v4/ write under $DBT_BQ_DATASET_PREFIX_V4 / ${DBT_BQ_DATASET_PREFIX_V4}_* only — and nothing else writes there"
+    if [ -f "$WS/profiles/dbt.env" ] && cmp -s <(_dbt_v4_env_render) "$WS/profiles/v4.env"; then
+      ok "profiles/v4.env = profiles/dbt.env with DATASET_PREFIX=$DBT_BQ_DATASET_PREFIX_V4 (generated)"
+    else
+      ko "profiles/v4.env missing or stale" "just setup, then commit it"
+    fi
+  else
+    ko "DBT_BQ_DATASET_PREFIX_V4 '${DBT_BQ_DATASET_PREFIX_V4:-}' is not ${DBT_BQ_DATASET_PREFIX:-<DBT_BQ_DATASET_PREFIX>}_<x>: every v4 command is refused" "set it in .devcontainer/dbt.conf, then: just setup"
+  fi
+  [ -z "${DATASET_PREFIX:-}" ] && ok "DATASET_PREFIX is not exported in this environment (the env files decide)" \
+    || ko "DATASET_PREFIX='$DATASET_PREFIX' is exported in the environment" "remove it (containerEnv, remoteEnv, ~/.bashrc): exported, it could win over a project's .env for the dbt extension"
+  for N in ${DBT_V4_PRODUCTS:-}; do
+    _dbt_products_lines | awk -v n="$N" '$1==n {f=1} END {exit !f}' \
+      || ko "DBT_V4_PRODUCTS names '$N', which is not in products.conf" "fix DBT_V4_PRODUCTS in .devcontainer/dbt.conf"
+  done
+  # the reverse: no project outside the v4 space reads the v4's env
+  E4="$(readlink -f "$WS/profiles/v4.env")"; LEAK=""
+  for N in $(dbt_members); do
+    dbt_use_product "$N" || continue
+    for V in $(dbt_versions); do
+      [ "$V" = v4 ] && continue
+      P="$(dbt_project_dir "$V")" || continue
+      [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK ${P#"$WS"/}"
+    done
+  done
+  P="$(dbt_project_dir global)" && [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && LEAK="$LEAK global"
+  [ -z "$LEAK" ] && ok "no project outside the v4 space reads profiles/v4.env" \
+    || ko "these .env point to profiles/v4.env:$LEAK" "point them back to their env file (or remove them), then: just setup"
+  if P="$(dbt_project_dir global-v4)"; then
+    [ "$(readlink -f "$P/.env" 2>/dev/null)" = "$E4" ] && ok "global-v4/.env -> profiles/v4.env" \
+      || ko "global-v4/.env does not point to profiles/v4.env" "just setup"
+  fi
+fi
+
 echo "[hooks — SQL the sandbox check cannot see]"
 check_hooks() {   # check_hooks V PROJECT_DIR
-  local V="$1" P="$2" HOOKS
+  local V="$1" P="$2" HOOKS N S
   if dbt_packages_unchecked "$P"; then
     info "$(label "$V"): packages not installed, their hooks are unknown — $(dbt_just_cmd "$V") deps"
     return
@@ -212,21 +385,39 @@ check_hooks() {   # check_hooks V PROJECT_DIR
     ok "$(label "$V"): no hook, neither in the project nor in its installed packages"
   elif [ "${DBT_HOOKS_REVIEWED:-0}" = "1" ]; then
     ok "$(label "$V"): hooks reviewed (DBT_HOOKS_REVIEWED=1): $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+  elif dbt_is_v4 "$V"; then
+    info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
+    N="$(dbt_hooks_compile_name "$V")"
+    case " ${DBT_HOOKS_COMPILE_OK:-} " in
+      *" $N "*)
+        if [ "$N" != global-v4 ]; then
+          ko "$N is listed in DBT_HOOKS_COMPILE_OK, but a v4/<product> has no seal of its own: compile/show refused" "remove it from DBT_HOOKS_COMPILE_OK"
+        elif [ -z "${DBT_HOOKS_V4_PROOF:-}" ]; then
+          ko "global-v4 is listed in DBT_HOOKS_COMPILE_OK, but DBT_HOOKS_V4_PROOF names no proof: compile/show refused" "DBT_HOOKS_V4_PROOF in .devcontainer/dbt.conf"
+        elif ! S="$(cd "$WS" && dbt_hooks_v4_seal)"; then
+          ko "global-v4: its hooks cannot be sealed — compile/show refused" "$(dbt_just_cmd "$V") deps, then prove its hooks again"
+        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S"; then
+          ok "global-v4: compile/show allowed — the proof of its hooks holds (seal $S, $DBT_HOOKS_V4_PROOF); every other hook command refused: $(dbt_hook_commands "$V" | sed 's/compile //; s/show //')"
+        else
+          ko "global-v4: the proof of its hooks ($DBT_HOOKS_V4_PROOF) does not hold for the files on disk (seal now $S) — compile/show refused" "prove its hooks again"
+        fi ;;
+      *) info "    -> refused (the v4 space has no approved-hooks list; DBT_HOOKS_COMPILE_OK may name $N for compile/show$([ "$N" = global-v4 ] && echo ', under a proof of its hooks — DBT_HOOKS_V4_PROOF')): $(dbt_hook_commands "$V")" ;;
+    esac
   else
     info "$(label "$V"): hooks in $(printf '%s\n' "$HOOKS" | paste -sd' ' - | cut -c1-140)"
     info "    -> refused until DBT_HOOKS_REVIEWED=1 in dbt.conf: $(dbt_hook_commands "$V")"
   fi
 }
-for N in $(dbt_products); do
+for N in $(dbt_members); do
   dbt_use_product "$N" || continue
-  for V in $DBT_WORKTREES; do
+  for V in $(dbt_versions); do
     P="$(dbt_project_dir "$V")" || continue
     check_hooks "$V" "$P"
   done
 done
-if dbt_is_fleet && P="$(dbt_project_dir global)"; then
+if dbt_is_fleet; then
   dbt_use_product "" >/dev/null 2>&1 || true
-  check_hooks global "$P"
+  for V in global global-v4; do P="$(dbt_project_dir "$V")" && check_hooks "$V" "$P"; done
 fi
 
 echo "[BigQuery auth]"
@@ -325,14 +516,15 @@ fi
 
 if [ "$DEEP" = 1 ]; then
   echo "[parse — offline]"
-  for N in $(dbt_products); do
+  for N in $(dbt_members); do
     dbt_use_product "$N" || continue
-    for V in $DBT_WORKTREES; do
+    for V in $(dbt_versions); do
+      [ "$V" = v4 ] && ! _dbt_is_worktree "$(_dbt_wt v4)" && continue
       if dbt_is_fleet; then OUT="$(bash "$HERE/dbt-run.sh" "$V" "$N" parse 2>&1)"; else OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"; fi
       if [ $? -eq 0 ]; then
         ok "$(label "$V") parses"
-      elif [ "$V" = "v2" ]; then
-        info "$(label v2) does not parse yet — expected until the migration is done:"
+      elif [ "$V" != "v1" ]; then
+        info "$(label "$V") does not parse yet — expected until the migration is done:"
         printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'
       else
         ko "$(label v1) does not parse" "$(dbt_just_cmd v1) parse"
@@ -340,12 +532,13 @@ if [ "$DEEP" = 1 ]; then
       fi
     done
   done
-  if dbt_is_fleet && dbt_project_dir global >/dev/null; then
+  for V in global global-v4; do
+    dbt_is_fleet && dbt_project_dir "$V" >/dev/null || continue
     dbt_use_product "" >/dev/null 2>&1 || true
-    OUT="$(bash "$HERE/dbt-run.sh" global parse 2>&1)"
-    if [ $? -eq 0 ]; then ok "global parses"; else
-      info "global does not parse yet:"; printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'; fi
-  fi
+    OUT="$(bash "$HERE/dbt-run.sh" "$V" parse 2>&1)"
+    if [ $? -eq 0 ]; then ok "$V parses"; else
+      info "$V does not parse yet:"; printf '%s\n' "$OUT" | grep -E "^Finished" | tail -n 1 | sed 's/^/       /'; fi
+  done
 fi
 
 echo
