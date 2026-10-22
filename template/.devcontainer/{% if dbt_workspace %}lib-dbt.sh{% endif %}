@@ -310,8 +310,11 @@ _dbt_upstream_urls() {
 # replayed on every start. One pass per distinct upstream host. ~/.gitconfig is
 # the container's, shared by every working copy: a copy that does not own the
 # container (_dbt_owns_container: a flux, an orphan) only ADDS the push locks it
-# needs — it never rewrites core.sshCommand (it names this copy's pinned keys)
-# nor the HTTPS->SSH rewrite, and never lifts a lock.
+# needs, the three layers of verrou 4 included — it never rewrites the HTTPS->SSH
+# rewrite nor the rest of core.sshCommand (the main copy's pinned keys), never
+# replaces the installed ssh guard, and never lifts a lock: its layer (b) goes by
+# the container's state (_dbt_container_https_over_ssh), its layer (a) adds the
+# hosts the guard lacks (_dbt_push_lock_ssh_guest).
 dbt_git_setup() {
   local KH CUR P U HOST SSH_HOSTS="" ALL_HOSTS="" OWN=1
   _dbt_owns_container || OWN=0
@@ -356,7 +359,7 @@ dbt_git_setup() {
     fi
   done
   if [ "$OWN" = 0 ]; then
-    echo "  the container's git settings (core.sshCommand, HTTPS->SSH) are the main copy's (${DBT_V4_MAIN_WS:-?}): left as they are"
+    echo "  the container's git settings (HTTPS->SSH, the pinned keys of core.sshCommand) are the main copy's (${DBT_V4_MAIN_WS:-?}): left as they are — the push locks are added below, never lifted"
   elif [ -n "$SSH_HOSTS" ] && [ -s "$KH" ]; then
     CUR="$(git config --global --get core.sshCommand 2>/dev/null || true)"
     case "$CUR" in
@@ -397,12 +400,14 @@ dbt_git_setup() {
         git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null | grep -qxF -- "$P" \
           || git config --global --add url.DISABLED://.pushInsteadOf "$P"
       done < <(_dbt_push_prefixes "$HOST")
-      if _dbt_https_read_over_ssh "$HOST" "$SSH_HOSTS"; then
+      if { [ "$OWN" = 1 ] && _dbt_https_read_over_ssh "$HOST" "$SSH_HOSTS"; } \
+         || { [ "$OWN" = 0 ] && _dbt_container_https_over_ssh "$HOST"; }; then
         _dbt_push_lock_proxy 1 "$HOST"; _dbt_push_lock_https 1 "$HOST"
         echo "  push to $HOST LOCKED (pushInsteadOf; https: dead proxy, no credentials)"
       elif [ "$OWN" = 0 ]; then
-        # a copy that does not own the container never lifts a lock: the https layer is left as it is
-        echo "  push to $HOST LOCKED (pushInsteadOf; read over https here: the https layer is the main copy's, left as it is)"
+        # the container reads https://$HOST/ over https (the main copy's choice): its https layer is left as it is —
+        # a copy that does not own the container never lifts a lock
+        echo "  push to $HOST LOCKED (pushInsteadOf; the container reads it over https: its https layer is the main copy's, left as it is)"
       else
         _dbt_push_lock_proxy 0 "$HOST"; _dbt_push_lock_https 0 "$HOST"
         echo "  push to $HOST LOCKED (pushInsteadOf; read over https: no dead proxy, no https quitter)"
@@ -419,7 +424,7 @@ dbt_git_setup() {
     fi
   done
   # shellcheck disable=SC2086
-  if [ "$OWN" = 0 ]; then echo "  core.sshCommand (the ssh push guard) is the main copy's (${DBT_V4_MAIN_WS:-?}): left as it is"
+  if [ "$OWN" = 0 ]; then _dbt_push_lock_ssh_guest $ALL_HOSTS
   elif [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then _dbt_push_lock_ssh 1 $ALL_HOSTS; else _dbt_push_lock_ssh 0 $ALL_HOSTS; fi
   return 0
 }
@@ -550,6 +555,57 @@ _dbt_push_lock_ssh() {   # <lock 1|0> <host>…
   return 0
 }
 
+# _dbt_container_https_over_ssh HOST — the container reads https://HOST/ over ssh: its global git settings rewrite it
+# (url.git@HOST:.insteadOf, the main copy's DBT_UPSTREAM_HTTPS_TO_SSH). What a copy that does not own the container
+# goes by for layer (b): the container's state, never its own dbt.conf.
+_dbt_container_https_over_ssh() {
+  git config --global --get-all "url.git@$1:.insteadOf" 2>/dev/null | grep -qxF -- "https://$1/"
+}
+
+# _dbt_push_lock_ssh_guest HOST… — layer (a) from a copy that does not own the container (a flux, an orphan:
+# _dbt_owns_container): ADDED, never lifted nor rewritten. The hosts the guard covers stay; a missing one is added to
+# its --hosts=, the rest of the command — the main copy's pinned keys — kept byte for byte. No guard yet: set in front
+# of the main copy's pinned keys, never this copy's (core.sshCommand would name a path of a guest). The installed guard
+# (~/.local/libexec/git-ssh-garde.sh) is the main copy's: installed from here only when there is none, never replaced.
+# DBT_UPSTREAM_PUSH_LOCK=0 in the guest's dbt.conf changes nothing (dbt_git_setup says so).
+_dbt_push_lock_ssh_guest() {   # <host>…
+  local G Q CUR HAVE="" MISS="" H CMD OLD
+  G="$(_dbt_ssh_guard)"; Q="$(printf '%q' "$G")"
+  CUR="$(git config --global --get core.sshCommand 2>/dev/null || true)"
+  case "$CUR" in
+    *git-ssh-garde.sh*) HAVE="$(printf '%s' "$CUR" | sed -n 's/.*--hosts=\([^ ]*\).*/\1/p' | tr ',' ' ')" ;;
+    ""|"ssh "*upstream_known_hosts*) ;;
+    *)
+      echo "  NOTE: core.sshCommand is customised — left as it is (the main copy's: ${DBT_V4_MAIN_WS:-?}); the ssh push"
+      echo "        guard is NOT there — pushInsteadOf and the https quitter still hold"
+      return 0 ;;
+  esac
+  for H in "${@,,}"; do case " $HAVE $MISS " in *" $H "*) ;; *) MISS="$MISS $H" ;; esac; done
+  MISS="${MISS# }"
+  if [ -z "$MISS" ]; then
+    echo "  ssh push guard on $(echo $HAVE) — the main copy's core.sshCommand (${DBT_V4_MAIN_WS:-?}), left as it is"
+    return 0
+  fi
+  if [ -n "$HAVE" ]; then
+    OLD="$(printf '%s' "$CUR" | sed -n 's/.*\(--hosts=[^ ]*\).*/\1/p')"
+    H="$(echo $HAVE $MISS)"
+    CMD="${CUR/"$OLD"/--hosts=${H// /,}}"
+  else
+    CMD="bash $Q --hosts=${MISS// /,}"
+    case "$CUR" in "ssh "*) CMD="$CMD ${CUR#ssh }" ;; esac
+  fi
+  case "$CMD" in
+    *"$Q"*)
+      if [ ! -f "$G" ] && ! _dbt_ssh_guard_install; then
+        echo "  WARNING: the ssh push guard cannot be installed (.devcontainer/git-ssh-garde.sh missing? copier update)"
+        echo "           — pushInsteadOf, the dead proxy and the https quitter still hold"
+        return 0
+      fi ;;
+  esac
+  git config --global core.sshCommand "$CMD"
+  echo "  ssh push guard on $MISS ADDED by this copy (the rest of core.sshCommand is the main copy's: ${DBT_V4_MAIN_WS:-?})"
+  return 0
+}
 
 # Bounded fetch of the current product's upstream remote. In a hook (no
 # terminal) ssh must never prompt nor hang; from a terminal a passphrase

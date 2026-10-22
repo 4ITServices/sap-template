@@ -230,8 +230,10 @@ and commit messages; this changelog starts at v0.8.12.
   linking it to the main space. `flux.conf` in the main copy is refused.
 - **Only the main copy writes the container's state.** A flux's (or an
   orphan's) `just setup` sets up its own working copy only: it never rewrites
-  `~/.bashrc` (`dbt`, `DBT_PROFILES_DIR`), `core.sshCommand` or the HTTPS→SSH
-  rewrite, never lifts a push lock (it only adds the ones it needs), never
+  `~/.bashrc` (`dbt`, `DBT_PROFILES_DIR`), the HTTPS→SSH rewrite or the main
+  copy's pinned keys in `core.sshCommand`, never replaces the installed ssh
+  guard, never lifts a push lock (it only adds the ones it needs, the three
+  layers of verrou 4 included — see below), never
   creates `~/.bigqueryrc`, and never installs nor rebuilds an engine
   (`dbt_engines` included). A flux must share the main copy's sandbox,
   prefixes and engine pins (`DBT_BQ_PROJECT`, `DBT_BQ_DATASET_PREFIX`,
@@ -266,6 +268,21 @@ and commit messages; this changelog starts at v0.8.12.
   clean -fdX` then `just setup` gives an orphan, never a main copy). Each
   guard of the list in `scripts/test-flux-mutants.sh` is seen failing when
   removed (89 mutants); the redundant guards it cannot kill are named there.
+- **Fluxes on top of verrou 4.** Rebased on `main`, a flux (or an orphan)
+  used to leave `core.sshCommand` to the main copy — but since verrou 4,
+  `core.sshCommand` is a lock (the ssh push guard, layer a). A copy that does
+  not own the container now adds it, and lifts nothing: the guard already on
+  every host leaves `core.sshCommand` byte for byte; a missing host is added
+  to its `--hosts=`, the rest (the main copy's pinned keys) kept; no guard
+  yet: set in front of the main copy's pinned keys, never the guest's. The
+  installed guard (`~/.local/libexec/git-ssh-garde.sh`) is installed from a
+  guest only when there is none, never replaced. Layer (b) — the dead proxy
+  and the https quitter — goes by the container's state (its HTTPS→SSH
+  rewrite), never by the guest's `dbt.conf`, and is never lifted from a
+  guest; layer (c), the 13 `pushInsteadOf` prefixes, is added as before.
+  `just doctor` checks a guest's lock even under `DBT_UPSTREAM_PUSH_LOCK=0`.
+  Tests: 783 offline checks in `scripts/test-lib-dbt.sh` (775 after the
+  rebase on `main`); 7 more mutants, all killed.
 
 ### Fixed (on the unreleased dbt-project type)
 

@@ -93,6 +93,15 @@ M = [
                                      '    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then\n'),
   ("pushurl-invite-leve", "L", '    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || ! _dbt_owns_container; then\n',
                                '    if [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then\n'),
+  # le verrou 4 dans une copie qui ne possède pas le container : ajouté, jamais levé ni réécrit (dbt_git_setup)
+  ("verrou4-invite-garde-ssh-absente", "L", '  if [ "$OWN" = 0 ]; then _dbt_push_lock_ssh_guest $ALL_HOSTS\n', '  if [ "$OWN" = 0 ]; then :\n'),
+  ("verrou4-invite-reecrit-sshcommand", "L", '  if [ "$OWN" = 0 ]; then _dbt_push_lock_ssh_guest $ALL_HOSTS\n', '  if [ "$OWN" = 0 ]; then _dbt_push_lock_ssh 1 $ALL_HOSTS\n'),
+  ("verrou4-invite-remplace-la-garde", "L", '      if [ ! -f "$G" ] && ! _dbt_ssh_guard_install; then\n', '      if ! _dbt_ssh_guard_install; then\n'),
+  ("verrou4-invite-cles-du-flux", "L", '    case "$CUR" in "ssh "*) CMD="$CMD ${CUR#ssh }" ;; esac\n', '    CMD="$CMD -o \\"UserKnownHostsFile=$(_dbt_known_hosts) $HOME/.ssh/known_hosts\\""\n'),
+  ("verrou4-invite-hotes-perdus", "L", '    CMD="${CUR/"$OLD"/--hosts=${H// /,}}"\n', '    CMD="bash $Q --hosts=${MISS// /,}"\n'),
+  ("verrou4-invite-https-selon-sa-conf", "L", '         || { [ "$OWN" = 0 ] && _dbt_container_https_over_ssh "$HOST"; }; then\n',
+                                              '         || { [ "$OWN" = 0 ] && _dbt_https_read_over_ssh "$HOST" "$SSH_HOSTS"; }; then\n'),
+  ("verrou4-invite-leve-https", "L", '      elif [ "$OWN" = 0 ]; then\n        # the container reads', '      elif false; then\n        # the container reads'),
   ("bigqueryrc-par-une-autre-copie", "L", '  if [ ! -f "${HOME:-}/.bigqueryrc" ] && _dbt_owns_container; then\n', '  if [ ! -f "${HOME:-}/.bigqueryrc" ]; then\n'),
   # les espaces
   ("prefixe-v4-forme-de-flux", "L", '    [[ "$(_dbt_upper "$X")" =~ $DBT_V4_FLUX_RE ]] && return 1\n', '    :\n'),
@@ -156,7 +165,11 @@ M = [
 # Gardes redondantes, sans mutant (un mutant seul ne peut pas les tuer, une autre garde fait le même refus) :
 #   - [ -r "$F" ] dans _dbt_flux_parse : un fichier illisible ne se lit pas non plus (read échoue, 0 déclaration) ;
 #   - la classe explicite _DBT_FLUX_BLANK_RE : sous LC_ALL=C (conf-locale-du-shell), [[:space:]] est la même ;
-#   - safe.directory, ajouté (jamais retiré) par une copie de flux pour ses propres worktrees : pas une garde.
+#   - safe.directory, ajouté (jamais retiré) par une copie de flux pour ses propres worktrees : pas une garde ;
+#   - dans _dbt_push_lock_ssh_guest, le retour quand la garde couvre déjà tous les hôtes : sans lui, la commande
+#     recomposée est la même (core.sshCommand inchangé), seul le message diffère ;
+#   - le doctor d'une copie invitée (verrou 4 vérifié même sous DBT_UPSTREAM_PUSH_LOCK=0, couche https selon l'état du
+#     container) : la suite ne simule pas d'upstream ssh dans la flotte (dbt-doctor.sh relit products.conf), pas de témoin.
 PY
 python3 - "$WORK" "$REPO_ROOT" "$@" <<'PY'
 import sys

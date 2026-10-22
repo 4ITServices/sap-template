@@ -1750,25 +1750,69 @@ life "$CF" start >/dev/null
 [ ! -e "$HOME/.bigqueryrc" ] && pass "…~/.bigqueryrc absent : jamais créé par la copie de flux" || bad "création de ~/.bigqueryrc par le flux"
 [ "$(git -C "$CF" config --get remote.up-alpha.pushurl)" = DISABLED ] && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans la copie de flux : son remote up-alpha reste verrouillé (pushurl DISABLED)" || bad "flux qui déverrouille son remote ($(git -C "$CF" config --get remote.up-alpha.pushurl))"
 mv "$W/bigqueryrc-sauve" "$HOME/.bigqueryrc"; cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"
-# les réglages git globaux : la copie de flux n'ajoute que des verrous, ne réécrit ni core.sshCommand ni HTTPS→SSH, ne lève rien
+# les réglages git globaux : la copie de flux n'ajoute que des verrous — les trois couches du verrou 4 comprises —, ne
+# réécrit ni HTTPS→SSH ni le reste de core.sshCommand (les clés épinglées de la copie principale), ne remplace jamais la
+# garde installée, ne lève rien
 GSET() { ( cd "$1" && bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && _dbt_upstream_urls() { echo "git@git.invalid:grp/x.git"; } && dbt_git_setup' ) 2>&1; }
+# GSETC CFG COPIE [EVAL] — dbt_git_setup de COPIE sur la configuration globale CFG (une upstream ssh, git.invalid) ; EVAL
+# après dbt_load_conf (un réglage du dbt.conf de la copie)
+GSETC() { ( cd "$2" && GIT_CONFIG_GLOBAL="$1" bash -c 'source .devcontainer/lib-dbt.sh && dbt_load_conf "$PWD" && eval "$1" && _dbt_upstream_urls() { echo "git@git.invalid:grp/x.git"; } && dbt_git_setup' _ "${3:-:}" ) 2>&1; }
+GC() { GIT_CONFIG_GLOBAL="$1" git config --global "${@:2}"; }
 KEY="git.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAkeyforteststestsaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 echo "$KEY" > "$CF/.devcontainer/upstream_known_hosts"; echo "$KEY" > "$FW/.devcontainer/upstream_known_hosts"
-git config --global core.sshCommand "ssh -o \"UserKnownHostsFile=$W/autre/.devcontainer/upstream_known_hosts\""
-git config --global --unset-all url.git@git.invalid:.insteadOf 2>/dev/null   # posé plus haut par le projet seul (WS3)
+cp "$SRC/"*"git-ssh-garde.sh"* "$CF/.devcontainer/git-ssh-garde.sh"
+KHM="$W/autre/.devcontainer/upstream_known_hosts"; GQ="$(printf '%q' "$GI")"; GV="$W/verrou4-invite"; mkdir -p "$GV"
+cp "$GI" "$GV/garde.principale"
+# (a) aucune garde encore : posée devant les clés épinglées de la copie principale, jamais celles du flux
+: > "$GV/s1.cfg"; GC "$GV/s1.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""
+O="$(GSETC "$GV/s1.cfg" "$CF")"
+[ "$(GC "$GV/s1.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && [ -z "$(GC "$GV/s1.cfg" --get url.git@git.invalid:.insteadOf)" ] \
+  && [ "$(GC "$GV/s1.cfg" --get-all url.DISABLED://.pushInsteadOf | grep -c 'git\.invalid')" = 13 ] && has "$O" "ADDED by this copy" \
+  && pass "copie de flux, hôte SSH : verrou 4 ajouté (13 préfixes, la garde ssh devant les clés épinglées de la copie principale) ; HTTPS→SSH laissé à la copie principale" \
+  || bad "git global de la copie de flux ($(GC "$GV/s1.cfg" --get core.sshCommand) | $O)"
+! GC "$GV/s1.cfg" --get core.sshCommand | grep -qF "$CF/" && pass "…core.sshCommand ne nomme aucun chemin de la copie de flux" || bad "core.sshCommand nomme la copie de flux ($(GC "$GV/s1.cfg" --get core.sshCommand))"
+# (a) la garde couvre déjà l'hôte : core.sshCommand laissé octet pour octet
+SCM="bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\""
+: > "$GV/s2.cfg"; GC "$GV/s2.cfg" core.sshCommand "$SCM"; O="$(GSETC "$GV/s2.cfg" "$CF")"
+[ "$(GC "$GV/s2.cfg" --get core.sshCommand)" = "$SCM" ] && has "$O" "left as it is" \
+  && pass "…la garde de la copie principale couvre l'hôte : core.sshCommand laissé octet pour octet" || bad "garde de la principale réécrite par le flux ($(GC "$GV/s2.cfg" --get core.sshCommand))"
+# (a) la garde d'un autre hôte : l'hôte ajouté à --hosts=, le reste gardé
+: > "$GV/s3.cfg"; GC "$GV/s3.cfg" core.sshCommand "bash $GQ --hosts=autre.invalid -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s3.cfg" "$CF" >/dev/null
+[ "$(GC "$GV/s3.cfg" --get core.sshCommand)" = "bash $GQ --hosts=autre.invalid,git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && pass "…une garde sur un autre hôte : git.invalid ajouté à --hosts=, autre.invalid et les clés de la principale gardés" || bad "hôtes de la garde ($(GC "$GV/s3.cfg" --get core.sshCommand))"
+# (a) DBT_UPSTREAM_PUSH_LOCK=0 dans le dbt.conf du flux : la garde n'est jamais retirée
+: > "$GV/s5.cfg"; GC "$GV/s5.cfg" core.sshCommand "$SCM"; O="$(GSETC "$GV/s5.cfg" "$CF" 'DBT_UPSTREAM_PUSH_LOCK=0')"
+[ "$(GC "$GV/s5.cfg" --get core.sshCommand)" = "$SCM" ] && [ "$(GC "$GV/s5.cfg" --get-all url.DISABLED://.pushInsteadOf | grep -c 'git\.invalid')" = 13 ] && has "$O" "never lifts a lock" \
+  && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans le flux : la garde ssh et les 13 préfixes restent, et c'est dit" || bad "flux qui retire la garde ($(GC "$GV/s5.cfg" --get core.sshCommand) | $O)"
+# (a) la garde installée est celle de la copie principale : jamais remplacée depuis le flux ; absente, posée
+echo "# la copie installée par la copie principale" >> "$GI"; G0="$(sha256sum < "$GI")"
+: > "$GV/s4.cfg"; GC "$GV/s4.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s4.cfg" "$CF" >/dev/null
+[ "$(sha256sum < "$GI")" = "$G0" ] && [ "$(GC "$GV/s4.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid -o \"UserKnownHostsFile=$KHM\"" ] \
+  && pass "…la garde installée (~/.local/libexec), autre que celle du flux : jamais remplacée depuis le flux" || bad "garde installée remplacée par le flux"
+rm -f "$GI"; : > "$GV/s4b.cfg"; GSETC "$GV/s4b.cfg" "$CF" >/dev/null
+cmp -s "$GI" "$CF/.devcontainer/git-ssh-garde.sh" && [ "$(GC "$GV/s4b.cfg" --get core.sshCommand)" = "bash $GQ --hosts=git.invalid" ] \
+  && pass "…aucune garde installée, aucun core.sshCommand : la garde posée, sans clés épinglées du flux" || bad "garde absente ($(GC "$GV/s4b.cfg" --get core.sshCommand))"
+cp "$GV/garde.principale" "$GI"
+# (b) selon l'état du container, jamais selon le dbt.conf du flux
+: > "$GV/s6.cfg"; GC "$GV/s6.cfg" url.git@git.invalid:.insteadOf "https://git.invalid/"; GSETC "$GV/s6.cfg" "$CF" 'DBT_UPSTREAM_HTTPS_TO_SSH=0' >/dev/null
+[ "$(GC "$GV/s6.cfg" --get-all http.https://git.invalid.proxy | tail -1)" = "http://127.0.0.1:9" ] \
+  && [ "$(GC "$GV/s6.cfg" --get-all credential.https://git.invalid.helper | tail -1)" = "$(LIBC _dbt_https_quitter git.invalid)" ] \
+  && [ "$(GC "$GV/s6.cfg" --get url.git@git.invalid:.insteadOf)" = "https://git.invalid/" ] \
+  && pass "…le container lit https://git.invalid par ssh, le flux dit DBT_UPSTREAM_HTTPS_TO_SSH=0 : proxy mort et quitteur ajoutés quand même, HTTPS→SSH laissé" || bad "couche (b) du flux selon son dbt.conf"
+: > "$GV/s7.cfg"; GC "$GV/s7.cfg" --add http.https://git.invalid.proxy "http://127.0.0.1:9"; GSETC "$GV/s7.cfg" "$CF" >/dev/null
+[ "$(GC "$GV/s7.cfg" --get-all http.https://git.invalid.proxy | tail -1)" = "http://127.0.0.1:9" ] && [ -z "$(GC "$GV/s7.cfg" --get url.git@git.invalid:.insteadOf)" ] \
+  && pass "…le container lit git.invalid par https : la couche https laissée telle quelle (le proxy mort posé avant n'est pas retiré)" || bad "flux qui lève la couche https"
+# témoin : la copie principale, elle, réécrit core.sshCommand avec SES clés épinglées
+: > "$GV/s8.cfg"; GC "$GV/s8.cfg" core.sshCommand "ssh -o \"UserKnownHostsFile=$KHM\""; GSETC "$GV/s8.cfg" "$FW" >/dev/null
+has "$(GC "$GV/s8.cfg" --get core.sshCommand)" "UserKnownHostsFile=$FW/.devcontainer/upstream_known_hosts" && pass "…la copie principale, elle, le réécrit (le témoin voit une réécriture)" || bad "copie principale et core.sshCommand ($(GC "$GV/s8.cfg" --get core.sshCommand))"
+# et sur la configuration globale du container (HOME factice, remise telle quelle ensuite) : le flux n'y lève rien
+cp "$HOME/.gitconfig" "$GV/gitconfig.avant"
 for P in "git@git.invalid:" "ssh://git@git.invalid/" "https://git.invalid/"; do git config --global --fixed-value --unset-all url.DISABLED://.pushInsteadOf "$P" 2>/dev/null; done
-O="$(GSET "$CF")"
-[ "$(git config --global --get core.sshCommand)" = "ssh -o \"UserKnownHostsFile=$W/autre/.devcontainer/upstream_known_hosts\"" ] \
-  && [ -z "$(git config --global --get url.git@git.invalid:.insteadOf)" ] && git config --global --get-all url.DISABLED://.pushInsteadOf | grep -qxF "git@git.invalid:" \
-  && pass "copie de flux, hôte SSH : verrou de push ajouté ; core.sshCommand et HTTPS→SSH laissés à la copie principale" || bad "git global de la copie de flux ($(git config --global --get core.sshCommand) | $O)"
 echo 'DBT_UPSTREAM_PUSH_LOCK=0' >> "$CF/.devcontainer/dbt.conf"
 O="$(GSET "$CF")"; git config --global --get-all url.DISABLED://.pushInsteadOf | grep -qxF "git@git.invalid:" && has "$O" "never lifts a lock" && pass "…DBT_UPSTREAM_PUSH_LOCK=0 dans la copie de flux : le verrou n'est jamais levé, et c'est dit" || bad "flux qui lève un verrou ($O)"
-cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"
-GSET "$FW" >/dev/null
-has "$(git config --global --get core.sshCommand)" "UserKnownHostsFile=$FW/.devcontainer/upstream_known_hosts" && pass "…la copie principale, elle, le réécrit (le témoin voit une réécriture)" || bad "copie principale et core.sshCommand ($(git config --global --get core.sshCommand))"
-git config --global --unset core.sshCommand; git config --global --unset-all url.git@git.invalid:.insteadOf 2>/dev/null
-for P in "git@git.invalid:" "ssh://git@git.invalid/" "https://git.invalid/"; do git config --global --fixed-value --unset-all url.DISABLED://.pushInsteadOf "$P" 2>/dev/null; done
-rm -f "$FW/.devcontainer/upstream_known_hosts" "$CF/.devcontainer/upstream_known_hosts"
+cp "$FW/.devcontainer/dbt.conf" "$CF/.devcontainer/dbt.conf"; cp "$GV/gitconfig.avant" "$HOME/.gitconfig"
+rm -f "$FW/.devcontainer/upstream_known_hosts" "$CF/.devcontainer/upstream_known_hosts" "$CF/.devcontainer/git-ssh-garde.sh"
 # un nettoyage ordinaire efface flux.conf (ignoré) : la copie devient orpheline, jamais la copie principale
 git -C "$CF" clean -fdXq
 [ ! -e "$CF/.devcontainer/flux.conf" ] && [ ! -e "$CF/profiles/v4-D007.env" ] && [ -d "$CF/v4/delta/dbt" ] \

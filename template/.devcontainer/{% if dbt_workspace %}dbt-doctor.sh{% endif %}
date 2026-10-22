@@ -95,7 +95,10 @@ while IFS= read -r U; do
 done < <(_dbt_upstream_urls)
 # The push lock (verrou 4), layer by layer — offline: ssh is stubbed, and the https probes run only once the
 # dead proxy is checked in the configuration (they meet it on 127.0.0.1): nothing connects anywhere
-if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
+# A copy that does not own the container (a flux, an orphan) never lifts a lock: the lock is checked whatever its own
+# DBT_UPSTREAM_PUSH_LOCK says, and its https layer goes by the container's state (lib-dbt.sh, dbt_git_setup)
+OWNC=1; _dbt_owns_container || OWNC=0
+if [ -n "$HOSTS" ] && { [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ] || [ "$OWNC" = 0 ]; }; then
   PL="$(git config --global --get-all url.DISABLED://.pushInsteadOf 2>/dev/null)"
   for H in $HOSTS; do
     NP=0; MISS=""
@@ -104,7 +107,7 @@ if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
     done < <(_dbt_push_prefixes "$H")
     [ -z "$MISS" ] && ok "push lock on $H, global (pushInsteadOf: $NP forms — git push only, git send-pack never reads them)" \
       || ko "global push lock incomplete for $H (pushInsteadOf missing:$MISS)" "just setup"
-    if _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; then
+    if { [ "$OWNC" = 1 ] && _dbt_https_read_over_ssh "$H" "$SSH_HOSTS"; } || { [ "$OWNC" = 0 ] && _dbt_container_https_over_ssh "$H"; }; then
       # (b), first line: the dead proxy
       POK=1
       for U in "https://$H" "http://$H"; do
@@ -157,7 +160,8 @@ if [ -n "$HOSTS" ] && [ "${DBT_UPSTREAM_PUSH_LOCK:-1}" != "0" ]; then
       *) ko "core.sshCommand is customised: the ssh push guard is not installed" "put bash $G --hosts=$(echo $HOSTS | tr ' ' ',') in front of its options" ;; esac
   elif [ "${SC#"bash $(printf '%q' "$G") --hosts="}" = "$SC" ]; then
     ko "core.sshCommand runs a guard other than its installed copy ~/.local/libexec/git-ssh-garde.sh (in the worktree, a checkout of an older commit takes it away)" "just setup"
-  elif ! cmp -s "$GS" "$G"; then ko "the installed ssh push guard (~/.local/libexec/git-ssh-garde.sh) differs from .devcontainer/git-ssh-garde.sh" "just setup"
+  elif ! cmp -s "$GS" "$G"; then ko "the installed ssh push guard (~/.local/libexec/git-ssh-garde.sh) differs from .devcontainer/git-ssh-garde.sh" \
+    "$( [ "$OWNC" = 1 ] && echo "just setup" || echo "just setup in the main copy (${DBT_V4_MAIN_WS:-?}): the installed guard is the container's, never replaced from this copy")"
   elif [ -n "$MISS" ]; then ko "the ssh push guard does not cover$MISS" "just setup"
   elif [ "$(git config --global --get core.sshCommand 2>/dev/null)" != "$SC" ]; then
     ko "the workspace's own git config overrides core.sshCommand" "git -C $WS config --local --unset core.sshCommand"
