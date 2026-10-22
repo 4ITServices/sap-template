@@ -25,9 +25,11 @@ DBT_UPSTREAM_BRANCH="{{ upstream_branch }}"
 # empty = auto-detect, possible when it has a single dbt_project.yml)
 DBT_PROJECT_SUBDIR="{{ dbt_project_subdir }}"
 {%- endif %}
-# 1 = no push to the upstream host{% if project_type == 'dbt-fleet' %}s{% endif %} can leave this container (global
-# pushInsteadOf + remote pushurl). Set to 0 only for the day a branch must be
-# delivered upstream, then put it back.
+# 1 = no push by git to the upstream host{% if project_type == 'dbt-fleet' %}s{% endif %} (global pushInsteadOf, remote
+# pushurl, the ssh push guard git-ssh-garde.sh as core.sshCommand, no https: a
+# dead proxy, no credentials). Not ssh outside git with the same key: only a
+# read-only access on the server covers that. Set to 0 only for the day a branch
+# must be delivered upstream, then put it back.
 DBT_UPSTREAM_PUSH_LOCK=1
 # 1 = fetch https://<upstream host>/… over SSH: private dbt packages hosted
 # next to the project are usually declared over HTTPS, which only CI can auth
@@ -65,6 +67,19 @@ DBT_BQ_DATASET="{{ bq_sandbox_dataset }}"
 DBT_BQ_DATASET_PREFIX="{{ bq_dataset_prefix }}"
 DBT_BQ_LOCATION="{{ bq_location }}"
 DBT_TARGET_NAME="{{ dbt_target_name }}"
+{%- if project_type == 'dbt-fleet' %}
+
+# --- v4: a refactoring generation on dbt v2, per product (opt-in) ----------
+# Products that also follow v4/<product>/ (branch <product>/v4, opened where
+# their branches live from the published v2 — only tracked here). Products
+# born here (no upstream, v4 only) are declared in .devcontainer/referents.conf
+# (just referent-add). The v2 and the v4 of a product share package names:
+# v4/ and global-v4/ write under their own prefix, <DBT_BQ_DATASET_PREFIX>_<x>
+# (profiles/v4.env is generated from profiles/dbt.env with it); the guard
+# requires it there and refuses it everywhere else. Empty = no v4 space.
+DBT_V4_PRODUCTS=""
+DBT_BQ_DATASET_PREFIX_V4=""
+{%- endif %}
 
 # --- Write guard opt-outs (leave at 0 until reviewed) ------------------------
 # run-operation executes arbitrary macros: refused unless 1
@@ -81,9 +96,27 @@ DBT_HOOKS_REVIEWED=0
 # refused). Fleet: product names, `global` for global/; single project:
 # `project`. elementary's hooks also need ELEMENTARY=0 (its uploads off).
 DBT_HOOKS_COMPILE_OK=""
+{%- if project_type == 'dbt-fleet' %}
+# The v4 space has no approved-hooks list, and names of its own in the list
+# above: `global-v4`, `v4/<product>` (a product name never opens its v4). Listed,
+# `global-v4` holds only while the proof of its hooks named here holds: ONE
+# verdict line, exactly
+#   VERDICT HOOKS GLOBAL-V4 : PREUVE OK ; TÉMOINS OK ; sceau <20 hex>
+# whose seal the guard recomputes at every compile/show (lib-dbt.sh,
+# dbt_hooks_v4_seal: what decides which hooks run there, and what they do).
+# Written by the fleet's own proof tool; a path inside the workspace. Empty:
+# global-v4 stays refused. A `v4/<product>` has no seal: listed, refused.
+DBT_HOOKS_V4_PROOF=""
+{%- endif %}
 # Nodes never built in the sandbox, whatever the selection (space-separated,
 # <package>.<node> as dbt names them; in a fleet, as in global/): the guard
 # refuses a write that selects one. For tables whose production protects the
 # rows (a row access policy for a production group): a sandbox copy would
 # expose those rows or, with the policy, hide them from you.
 DBT_SANDBOX_NEVER_BUILD=""
+# Scoped to the v2 worktree(s) and global/ — v1 keeps the origin's hooks. 1 = every
+# command may run hooks there, but only the approved ones: .devcontainer/hooks.approved,
+# written by `just hooks-approve` from a compiled manifest (each hook's text + where
+# every source() it names resolves). A new or edited hook, or one whose source now
+# resolves elsewhere, is refused until approved again.
+DBT_HOOKS_REVIEWED_V2=0
