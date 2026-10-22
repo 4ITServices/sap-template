@@ -234,7 +234,8 @@ for N in $(dbt_members); do
     W="$(_dbt_wt "$V")"; SHOW="$(_dbt_show "$V")"
     if [ "$V" = v4 ] && ! _dbt_is_worktree "$W" && ! git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/$(_dbt_hbr v4)"; then
       # declared, not opened yet where its branches live: nothing to repair here
-      if [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
+      if _dbt_is_line_h; then info "$SHOW: the harmonized line's $(_dbt_hbr v4) not opened yet — it starts from the published v4: git push $P_HOME $P_HOME/${P_HB4%-h}:refs/heads/$(_dbt_hbr v4), then just setup"
+      elif [ "${P_REFERENT:-0}" = 1 ]; then ko "$SHOW: $P_HOME/$(_dbt_hbr v4) not found (as last fetched)" "push the v4 of $P_HOME_URL, then: just setup"
       else info "$SHOW: v4 not opened yet — it starts from the published v2: git push $P_HOME $P_HOME/$P_HB2:refs/heads/$(_dbt_hbr v4), then just setup"; fi
       continue
     fi
@@ -275,6 +276,15 @@ for N in $(dbt_members); do
     fi
   done
   BR="$P_BRANCH"
+  # the harmonized line: its v4-h is the ISO line's v4 plus its convergences
+  if _dbt_is_line_h && dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4" \
+     && git -C "$WS" show-ref --verify --quiet "refs/remotes/$P_HOME/${P_HB4%-h}"; then
+    if git -C "$WS" merge-base --is-ancestor "$P_HOME/${P_HB4%-h}" "$P_B4" 2>/dev/null; then
+      info "$P_B4 contains $P_HOME/${P_HB4%-h}, the ISO line's (+$(git -C "$WS" rev-list --count "$P_HOME/${P_HB4%-h}..$P_B4" 2>/dev/null) commit(s) of its own, as last fetched)"
+    else
+      info "$P_B4 lacks $(git -C "$WS" rev-list --count "$P_B4..$P_HOME/${P_HB4%-h}" 2>/dev/null) commit(s) of $P_HOME/${P_HB4%-h}, the ISO line's (as last fetched): recalibrate"
+    fi
+  fi
   if dbt_v4_enabled && [ "${P_REFERENT:-0}" != 1 ] && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
     if git -C "$WS" merge-base --is-ancestor "$P_B2" "$P_B4" 2>/dev/null; then
       info "$P_B4 contains $P_B2 (+$(git -C "$WS" rev-list --count "$P_B2..$P_B4" 2>/dev/null) commit(s) of its own)"
@@ -304,12 +314,14 @@ if dbt_is_fleet; then
 fi
 
 if dbt_is_fleet; then
-  echo "[lock — .devcontainer/products.lock]"
+  LOCKN="$(basename "$DBT_LOCK_FILE")"
+  echo "[lock — .devcontainer/$LOCKN]"
+  _dbt_is_line_h && info "the harmonized line's lock: products-h.lock, never products.lock (the ISO line's)"
   if [ ! -f "$DBT_LOCK_FILE" ]; then
-    info "no products.lock yet — just lock, then commit it with global/"
+    info "no $LOCKN yet — just lock, then commit it with $(_dbt_is_line_h && echo global-v4/ || echo global/)"
   else
-    git -C "$WS" ls-files --error-unmatch .devcontainer/products.lock >/dev/null 2>&1 \
-      || info "products.lock is not committed yet — commit it with the global/ change it goes with"
+    git -C "$WS" ls-files --error-unmatch ".devcontainer/$LOCKN" >/dev/null 2>&1 \
+      || info "$LOCKN is not committed yet — commit it with the $(_dbt_is_line_h && echo global-v4/ || echo global/) change it goes with"
     for N in $(dbt_members); do
       dbt_use_product "$N" || continue
       for V in $(dbt_versions); do
@@ -372,10 +384,15 @@ if dbt_is_fleet && [ -n "${DBT_V4_PRODUCTS:-}${DBT_BQ_DATASET_PREFIX_V4:-}$(dbt_
     main)   ok "this copy is the MAIN one (DBT_V4_MAIN_WS=\"$DBT_V4_MAIN_WS\", dbt.conf): the main v4 space, and the container's state (engines, ~/.bashrc, global git settings)" ;;
     flux)   ok "this copy is flux $DBT_V4_FLUX; the main copy is $DBT_V4_MAIN_WS — it keeps the container's state (engines, ~/.bashrc, global git settings)"
             [ "$DBT_V4_FLUX" != H ] || info "flux H is the HARMONIZED line: the main copy's v4 (the ISO line) plus its convergences, under $(dbt_v4_prefix) / $(dbt_v4_prefix)_* — the ISO line never writes there, and this copy writes nowhere else"
-            # a flux is separated from the main copy in BigQuery only: its worktrees follow the same branches
-            info "git is shared: this copy's worktrees follow the products' branches the main copy follows — commit nothing on v2 from here (dbt v2 deps rewrites its package-lock.yml)"
-            [ "$DBT_V4_FLUX" != H ] || ko "flux H: the two lines are separated in BigQuery only, not in git — its v4 worktrees follow the products' branch v4, the ISO line's: a convergence committed and pushed from here would reach the ISO line at its next just sync" \
-                                          "commit and push nothing on v4 from this copy until the harmonized line has branches of its own" ;;
+            if [ "$DBT_V4_FLUX" = H ]; then
+              # the harmonized line is apart in git too: its own v4 branches, a push guard, its own lock
+              info "flux H, in git: its v4 copies follow <product>/v4-h (v4-h where the products' branches live), never the ISO line's v4 — v1 and v2 are shared with the main copy, read only here; its lock is .devcontainer/products-h.lock; clone, --state, --defer, --manage-state are refused"
+              [ -n "$(_dbt_push_guard_h_problem)" ] \
+                || ok "flux H: its push guard runs on every push ($(_dbt_push_guard_h_dst)): nothing reaches v1, v2 nor v4; a v4-h is created at the published v4 only, never deleted nor rewritten"
+            else
+              # a flux <A999> is separated from the main copy in BigQuery only: its worktrees follow the same branches
+              info "git is shared: this copy's worktrees follow the products' branches the main copy follows — commit nothing on v2 from here (dbt v2 deps rewrites its package-lock.yml)"
+            fi ;;
     orphan) while IFS= read -r L; do
               ko "ORPHAN copy — $L" "every v4 command is refused and v1/v2/global build nothing until this copy is the main one (DBT_V4_MAIN_WS) or a flux (.devcontainer/flux.conf); then: just setup"
             done < <(dbt_v4_orphan_why) ;;

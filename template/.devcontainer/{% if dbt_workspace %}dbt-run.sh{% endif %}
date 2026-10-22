@@ -78,6 +78,13 @@
 #     v4 command and the same allowlist elsewhere. A declaration that cannot be
 #     trusted — or a flux whose dbt.conf differs from the main copy's on the
 #     sandbox, the prefixes or the engines — refuses every dbt command
+#   - keeps the harmonized line (flux H) apart in git too (lib-dbt.sh, "the
+#     harmonized line in git"): its v4 copies on <product>/v4-h only — under
+#     v4/<product>, that copy; under global-v4/, every v4 copy —, a pre-push
+#     guard installed (or every dbt command is refused), its lock
+#     .devcontainer/products-h.lock (just lock, lock-status, lock-checkout),
+#     and clone, --state, --defer, --defer-state, --favor-state,
+#     --manage-state (and their DBT_* variables) refused in every space
 #   - refuses a dbt project of the workspace it does not know (`dbt` typed in a
 #     copy, a probe…): never handed to plain dbt v2 — nor one of ANOTHER
 #     workspace of this kind (a flux's working copy): it runs through its own
@@ -104,6 +111,9 @@ WS="$(dirname "$HERE")"
 # shellcheck disable=SC1091
 source "$HERE/lib-dbt.sh"
 dbt_load_conf "$WS"
+
+# the lock of THIS copy: .devcontainer/products.lock — products-h.lock in the harmonized line (lib-dbt.sh, dbt_load_conf)
+LOCKN="$(basename "$DBT_LOCK_FILE")"
 
 die()    { echo "⛔ $*" >&2; exit 1; }
 refuse() { echo "⛔ $1" >&2; shift; for L in "$@"; do echo "   $L" >&2; done; exit 1; }
@@ -184,14 +194,19 @@ guest_space() {
 # that product's on-run-start hooks against the main copy's v2 space. The hook approvals of dbt.conf —
 # DBT_HOOKS_COMPILE_OK, DBT_HOOKS_REVIEWED_V2 (.devcontainer/hooks.approved), DBT_HOOKS_REVIEWED — are the main copy's:
 # they are never read here. A command of the allowlist that runs hooks (dbt v2: compile, show) passes only for a project
-# whose packages are installed and that declares no hook at all — in its files, its installed packages, or the files of
-# a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
+# whose packages are ALL installed (_dbt_packages_incomplete: dbt v2 installs a missing one by itself on compile, and
+# would run its on-run-start unread) and that declares no hook at all — in its files, its installed packages, or the
+# files of a local package it links (dbt_hook_sources_deep). Refused (exit) otherwise.
 guest_hooks_guard() {
   local V="$1" WHO H
   if [ "$(dbt_v4_role)" = flux ]; then WHO="flux $DBT_V4_FLUX"; else WHO="orphan copy"; fi
   dbt_packages_unchecked "$PROJ" \
     && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not installed:" \
               "their hooks cannot be checked. Install them first (no hook runs): $JCMD deps"
+  _dbt_packages_incomplete "$PROJ" \
+    && refuse "$WHO: \`dbt ${CMD_HOOKS:-$CMD_WRITE}\` under $(_dbt_show "$V") can run hooks, and this project's packages are not all installed" \
+              "(dbt_packages/ lacks what packages.yml or package-lock.yml declares): dbt v2 would install the rest by itself and run" \
+              "their hooks unread. Install them first (no hook runs): $JCMD deps"
   H="$(dbt_hook_sources_deep "$PROJ")"
   [ -z "$H" ] && return 0
   {
@@ -204,6 +219,27 @@ guest_hooks_guard() {
     echo "   Here: parse or ls (no hook runs). Compile or show it in the main copy${DBT_V4_MAIN_WS:+ ($DBT_V4_MAIN_WS)}."
   } >&2
   exit 1
+}
+
+# line_h_guard V — (the harmonized line, flux H) the v4 copies V runs are the line's own (dbt_v4_line_h_branch_problem,
+# lib-dbt.sh): under v4/<product>, that product's; under global-v4/ — it assembles them all — every v4 copy of the
+# fleet. A copy on the ISO line's branch (<product>/v4), or detached outside its own history, is refused (exit): what it
+# would build is the ISO line's code under the harmonized line's space, and what it would commit, the ISO line's
+# branch. Elsewhere (v1/, v2/, global/: no v4 copy read), and in any other copy: nothing.
+line_h_guard() {
+  local V="${1:-}" N PB=""
+  _dbt_is_line_h || return 0
+  case "$V" in
+    v4) PB="$(dbt_v4_line_h_branch_problem)" ;;
+    global-v4) PB="$(for N in $(dbt_members); do ( dbt_use_product "$N" >/dev/null 2>&1 && dbt_v4_line_h_branch_problem ); done)" ;;
+    *) return 0 ;;
+  esac
+  [ -n "$PB" ] || return 0
+  local -a WHY=()
+  mapfile -t WHY <<< "$PB"
+  refuse "flux H (the harmonized line): \`dbt …\` refused under $(_dbt_show "$V") — a v4 copy it reads is not on the line's own branch:" \
+         "${WHY[@]}" \
+         "The harmonized line builds and commits its v4-h branches only (never the ISO line's v4)."
 }
 
 # check_generation V — the current product follows V (dbt_versions): v4 for a product of DBT_V4_PRODUCTS or a
@@ -239,10 +275,12 @@ upstream_pull_one() {
     git -C "$WS" show-ref --verify --quiet "refs/heads/$B" || continue
     echo "  $B: $(git -C "$WS" rev-list --count "$B..$P_REMOTE/$BR") commit(s) behind $P_REMOTE/$BR, $(git -C "$WS" rev-list --count "$P_REMOTE/$BR..$B") ahead"
   done
-  if dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
+  if dbt_v4_enabled && _dbt_is_line_h; then
+    echo "  $P_B4 (the harmonized line) follows the ISO line's v4, never $P_B2: recalibrated from $P_HOME/${P_HB4%-h}, in the line's own steps"
+  elif dbt_v4_enabled && git -C "$WS" show-ref --verify --quiet "refs/heads/$P_B4"; then
     echo "  $P_B4: $(git -C "$WS" rev-list --count "$P_B4..$P_B2") commit(s) of $P_B2 not in it yet"
   fi
-  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1$(dbt_v4_enabled && printf ', then into %s && git merge %s' "${P_SHOW4%/}" "$P_B2")"
+  echo "Nothing was merged. To take the changes: cd ${P_SHOW1%/} && git merge $P_REMOTE/$BR, then cd into ${P_SHOW2%/} && git merge $P_B1$(dbt_v4_enabled && ! _dbt_is_line_h && printf ', then into %s && git merge %s' "${P_SHOW4%/}" "$P_B2")"
 }
 
 upstream_pull() {
@@ -394,12 +432,15 @@ destinations() {
   local N RC=0
   flux_guard
   [ "$(dbt_v4_role)" != orphan ] || orphan_refuse "just destinations"
+  # the harmonized line reads its v4 copies on their own branch only (line_h_guard): all of them, or the product's
+  case "${1:-}" in global) ;; ""|global-v4) line_h_guard global-v4 ;; esac
   if dbt_is_assembly "${1:-}"; then destinations_global "$1"; return $?; fi
   if dbt_is_fleet && [ -z "${1:-}" ]; then
     for N in $(dbt_members); do dbt_use_product "$N" && { destinations_one || RC=1; }; done
     return $RC
   fi
   dbt_is_fleet && select_product "$1"
+  ! dbt_v4_enabled || line_h_guard v4
   destinations_one
 }
 
@@ -442,7 +483,7 @@ sync_products() {
     done
   done
   if [ "$MOVED" = 0 ]; then echo "lock: every worktree is at its locked commit"
-  else echo "lock: $MOVED worktree(s) away from products.lock — just lock-status"; fi
+  else echo "lock: $MOVED worktree(s) away from $LOCKN — just lock-status"; fi
 }
 
 # -----------------------------------------------------------------------------
@@ -460,9 +501,15 @@ lock_write() {
   load_token
   TMP="$(mktemp)"
   {
-    echo "# products.lock — the exact commit of every product's v1 and v2, and v4 where there is one (just lock)."
-    echo "# Commit it with the change of global/ (or global-v4/) it goes with: \`git log -p\` on this file"
-    echo "# then tells which product versions each state of global/ was validated with."
+    if _dbt_is_line_h; then
+      echo "# products-h.lock — the lock of the HARMONIZED line (flux H): the exact commit of every product's v1 and v2,"
+      echo "# and of its v4-h where there is one (its v4 lines) (just lock, in the harmonized line's copy). Never products.lock,"
+      echo "# the ISO line's. Commit it with the change of global-v4/ it goes with, on the harmonized line's branch."
+    else
+      echo "# products.lock — the exact commit of every product's v1 and v2, and v4 where there is one (just lock)."
+      echo "# Commit it with the change of global/ (or global-v4/) it goes with: \`git log -p\` on this file"
+      echo "# then tells which product versions each state of global/ was validated with."
+    fi
     echo "# Generated — edit with \`just lock\`, not by hand. Replay: just lock-checkout"
     echo "# PRODUCT        VERSION  COMMIT                                    SOURCE"
   } > "$TMP"
@@ -503,22 +550,22 @@ lock_write() {
   done
   if [ -n "$BAD" ]; then
     rm -f "$TMP"
-    echo "⛔ products.lock NOT written:$BAD" >&2
+    echo "⛔ $LOCKN NOT written:$BAD" >&2
     exit 1
   fi
   [ -z "$WARN" ] || printf '⚠ not part of the lock:%s\n' "$WARN"
   if [ -z "$CHANGES" ] && [ -f "$DBT_LOCK_FILE" ]; then
-    rm -f "$TMP"; echo "products.lock already up to date"; return 0
+    rm -f "$TMP"; echo "$LOCKN already up to date"; return 0
   fi
   cat "$TMP" > "$DBT_LOCK_FILE"; rm -f "$TMP"
-  echo "products.lock written:$CHANGES"
-  echo "Commit it with the global/ change it goes with: git add .devcontainer/products.lock"
+  echo "$LOCKN written:$CHANGES"
+  echo "Commit it with the $(_dbt_is_line_h && echo global-v4/ || echo global/) change it goes with: git add .devcontainer/$LOCKN"
 }
 
 lock_status() {
   local N V
   dbt_is_fleet || die "single-product workspace: no lock"
-  [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/products.lock yet — just lock"; return 0; }
+  [ -f "$DBT_LOCK_FILE" ] || { echo "no .devcontainer/$LOCKN yet — just lock"; return 0; }
   for N in $(dbt_members); do
     dbt_use_product "$N" || continue
     for V in $(dbt_versions); do
@@ -533,7 +580,7 @@ lock_status() {
 lock_checkout() {
   local ONLY="${1:-}" N V W L DONE=0
   dbt_is_fleet || die "single-product workspace: no lock"
-  [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/products.lock — nothing to replay"
+  [ -f "$DBT_LOCK_FILE" ] || die "no .devcontainer/$LOCKN — nothing to replay"
   [ -z "$ONLY" ] || select_product "$ONLY"
   load_token
   for N in $(dbt_members); do
@@ -908,11 +955,12 @@ hooks_approve() {
 
 run_dbt() {
   local V="$1" PROJ ENGINE A CMD_WRITE="" CMD_RUNOP="" CMD_HOOKS="" CMD_HOOKS_HARD="" SELECTED="" COLLECT=0 OUT BAD NEVER HOOKS ALL DUPS JCMD
-  local HOOKS_CHECK="" NEW
-  local -a SEL=() UNSEALED=()
+  local HOOKS_CHECK="" NEW E
+  local -a SEL=() UNSEALED=() STATEARGS=()
   shift
   flux_guard
   role_guard "$V" "$@"
+  line_h_guard "$V"
   JCMD="$(dbt_just_cmd "$V")"
   PROJ="$(dbt_project_dir "$V")" || die "no dbt project in $(_dbt_show "$V") (worktree missing, or set the dbt folder in $( dbt_is_fleet && echo products.conf || echo 'DBT_PROJECT_SUBDIR, dbt.conf')) — run: just setup"
   ENGINE="$(dbt_engine "$V")"
@@ -947,6 +995,8 @@ run_dbt() {
     esac
     # the arguments the seal of global-v4's hook proof cannot see (refused there: hooks_v4_proof_ok)
     case "$A" in --vars|--vars=*|--profile|--profile=*) UNSEALED+=("${A%%=*}") ;; esac
+    # what brings another space's relations or state in (refused in the harmonized line, below)
+    case " $DBT_LINE_H_STATE_ARGS " in *" ${A%%=*} "*) STATEARGS+=("${A%%=*}") ;; esac
   done
 
   export_env "$V"
@@ -957,6 +1007,15 @@ run_dbt() {
   [ -z "${DBT_PACKAGES_INSTALL_PATH:-}" ] \
     || refuse "DBT_PACKAGES_INSTALL_PATH is set ('$DBT_PACKAGES_INSTALL_PATH'): dbt would load packages whose hooks the guard does not" \
               "read — refused." "unset DBT_PACKAGES_INSTALL_PATH"
+  # the harmonized line: nothing that copies another space's relations or reads its state, in any space
+  if _dbt_is_line_h; then
+    for E in $DBT_LINE_H_STATE_ENV; do [ -z "${!E:-}" ] || STATEARGS+=("$E (exported)"); done
+    [ -z "${STATEARGS[*]-}" ] \
+      || refuse "flux H (the harmonized line): \`dbt $*\` refused — ${STATEARGS[*]}: clone, deferral, state comparison and service-backed" \
+                "dbt State bring another space's relations or state into the line (\`dbt clone --state <the ISO line's manifest>\` would copy" \
+                "ISO tables under $(dbt_v4_prefix)). Refused here — options and their variables ($DBT_LINE_H_STATE_ENV) — until a later" \
+                "change of the template opens them."
+  fi
 
   if [ -n "$CMD_RUNOP" ] && [ "${DBT_ALLOW_RUN_OPERATION:-0}" != "1" ]; then
     refuse "run-operation is refused: it executes arbitrary macros, outside every guard." \

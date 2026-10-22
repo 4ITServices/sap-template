@@ -45,8 +45,14 @@
 # line) —, never by dbt.conf nor by an exported variable. Its
 # v4/ and global-v4/ write under <DBT_BQ_DATASET_PREFIX_V4>_<FLUX> (= or _*),
 # profiles/v4-<FLUX>.env, and nowhere else: not the main v4 space, not another
-# flux, not the v1/v2/global spaces (no build, no hook there). The MAIN copy is named,
-# never guessed: DBT_V4_MAIN_WS (dbt.conf) is its real path, and it is never a
+# flux, not the v1/v2/global spaces (no build, no hook there). The harmonized
+# line is apart in git too: its v4 worktrees follow branches of their own,
+# <product>/v4-h (v4-h where the product's branches live), opened THERE from the
+# published v4 — a v4 copy on any other branch is refused —, no push of it
+# reaches v1, v2 nor v4 (a pre-push hook, git-push-garde-h.sh), its lock is
+# .devcontainer/products-h.lock, and clone, --state, --defer and --manage-state
+# are refused there (they would bring another space's relations or state in).
+# The MAIN copy is named, never guessed: DBT_V4_MAIN_WS (dbt.conf) is its real path, and it is never a
 # flux. In a fleet with a v4, a copy that is neither the main one nor a flux (a
 # clone, a flux whose flux.conf was erased by `git clean -X`) has no v4 space
 # and builds nothing — `just setup` does not make it the main copy. Only the
@@ -147,6 +153,9 @@ dbt_load_conf() {
   _DBT_CONF_FLUX_SET="$(_dbt_flux_changed "$_DBT_CONF_FLUXSNAP")"
   DBT_V4_FLUX_FILE="$DBT_WS/.devcontainer/flux.conf"
   _dbt_flux_read
+  # the harmonized line locks its own state (products-h.lock: its v4 lines are v4-h commits), never the ISO line's —
+  # set after dbt.conf, which cannot move it back
+  if _dbt_is_line_h; then DBT_LOCK_FILE="$DBT_WS/.devcontainer/products-h.lock"; fi
   dbt_use_product "" >/dev/null 2>&1 || true
   return 0
 }
@@ -195,8 +204,11 @@ dbt_members() { { dbt_products; dbt_referents; } | awk '!seen[$0]++'; }
 #   P_SHOW1 P_SHOW2 P_SHOW4 (display)  P_ENV (env file)  P_TAG (log prefix)
 #   P_REFERENT (1 = born here, from referents.conf: no upstream, v4 only)
 # Whether the product follows v4: dbt_v4_enabled; the worktrees it follows: dbt_versions.
+# In the harmonized line (flux H: _dbt_is_line_h) the v4 branches are the line's own: P_HB4 v4-h (<product>/v4-h on
+# origin), P_B4 <product>/v4-h — never the ISO line's v4, which that copy neither follows nor pushes.
 dbt_use_product() {
-  local N="${1:-}" L URL BR SUB GL HOMEU REST
+  local N="${1:-}" L URL BR SUB GL HOMEU REST H4=""
+  _dbt_is_line_h && H4="-h"
   if ! dbt_is_fleet; then
     P_NAME=""; P_URL="${DBT_UPSTREAM_URL:-}"; P_BRANCH="${DBT_UPSTREAM_BRANCH:-main}"
     P_SUBDIR="${DBT_PROJECT_SUBDIR:-}"; P_GLOBAL=0; P_REFERENT=0
@@ -221,7 +233,7 @@ dbt_use_product() {
     [ "${SUB:-}" = "-" ] && SUB=""
     case "${HOMEU:-}" in ""|-) return 1 ;; esac
     P_NAME="$N"; P_REFERENT=1; P_SUBDIR="${SUB:-}"
-    P_HOME="home-$N"; P_HOME_URL="$HOMEU"; P_HB4="v4"; P_B4="$N/v4"; P_WT4="$DBT_WS/v4/$N"; P_SHOW4="v4/$N/"
+    P_HOME="home-$N"; P_HOME_URL="$HOMEU"; P_HB4="v4$H4"; P_B4="$N/v4$H4"; P_WT4="$DBT_WS/v4/$N"; P_SHOW4="v4/$N/"
     if [ -f "$DBT_WS/profiles/env/$N.env" ]; then P_ENV="$DBT_WS/profiles/env/$N.env"; fi
     P_TAG="[$N] "
     return 0
@@ -232,12 +244,12 @@ dbt_use_product() {
   [ "${HOMEU:-}" = "-" ] && HOMEU=""
   P_NAME="$N"; P_URL="$URL"; P_BRANCH="${BR:-main}"; P_SUBDIR="${SUB:-}"
   case "${GL:-}" in yes|true|1|global) P_GLOBAL=1 ;; *) P_GLOBAL=0 ;; esac
-  P_REMOTE="up-$N"; P_B1="$N/v1"; P_B2="$N/v2"; P_B4="$N/v4"
+  P_REMOTE="up-$N"; P_B1="$N/v1"; P_B2="$N/v2"; P_B4="$N/v4$H4"
   if [ -n "${HOMEU:-}" ]; then
     # its own repository (a dbt-project repo): same branch names as there
-    P_HOME="home-$N"; P_HOME_URL="$HOMEU"; P_HB1="v1"; P_HB2="v2"; P_HB4="v4"; P_MIRROR="upstream-$P_BRANCH"
+    P_HOME="home-$N"; P_HOME_URL="$HOMEU"; P_HB1="v1"; P_HB2="v2"; P_HB4="v4$H4"; P_MIRROR="upstream-$P_BRANCH"
   else
-    P_HOME="origin"; P_HOME_URL=""; P_HB1="$N/v1"; P_HB2="$N/v2"; P_HB4="$N/v4"; P_MIRROR="$N/upstream"
+    P_HOME="origin"; P_HOME_URL=""; P_HB1="$N/v1"; P_HB2="$N/v2"; P_HB4="$N/v4$H4"; P_MIRROR="$N/upstream"
   fi
   P_WT1="$DBT_WS/v1/$N"; P_WT2="$DBT_WS/v2/$N"; P_SHOW1="v1/$N/"; P_SHOW2="v2/$N/"
   P_WT4="$DBT_WS/v4/$N"; P_SHOW4="v4/$N/"
@@ -702,7 +714,12 @@ _dbt_ensure_branch() {
       && echo "  ${P_TAG}branch $B <- $P_HOME/$HB" && return 0
   fi
   if [ "$V" = "v4" ]; then
-    if [ "${P_REFERENT:-0}" = 1 ]; then
+    if _dbt_is_line_h; then
+      # the harmonized line's branch is opened where the product's branches live, from the published v4 (the ISO
+      # line's) — never created here, from anything
+      echo "  ${P_TAG}$(_dbt_show v4): the harmonized line's $HB is not opened yet in ${P_HOME_URL:-origin} — it starts from the published v4:"
+      echo "           git push $P_HOME $P_HOME/${HB%-h}:refs/heads/$HB, then: just setup"
+    elif [ "${P_REFERENT:-0}" = 1 ]; then
       echo "  ${P_TAG}WARNING: $P_HOME/$HB not found — a referent's v4 lives in $P_HOME_URL only (pushed? token? network?)"
     else
       echo "  ${P_TAG}$(_dbt_show v4): not opened yet — a v4 starts from the published v2:"
@@ -774,6 +791,9 @@ dbt_ensure_worktrees() {
 
     if _dbt_is_worktree "$P"; then
       echo "  ${SHOW} on branch $(git -C "$P" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      # the harmonized line: a v4 copy on any other branch than its own is refused (never switched for you)
+      [ "$V" != v4 ] || dbt_v4_line_h_branch_problem | while IFS= read -r X; do
+        echo "  WARNING: ${P_TAG}$X — its dbt commands are refused until then"; done
     else
       if [ -e "$P" ] && [ -n "$(ls -A "$P" 2>/dev/null)" ]; then
         echo "  WARNING: ${SHOW} exists but is not a worktree of this repository."
@@ -819,6 +839,12 @@ dbt_sync() {
   for V in $(dbt_versions); do
     W="$(_dbt_wt "$V")"; B="$(_dbt_br "$V")"; U="$P_HOME/$(_dbt_hbr "$V")"
     _dbt_is_worktree "$W" || continue
+    # the harmonized line moves a worktree on its own branch only: fast-forwarded to $U, a copy on the ISO line's
+    # branch (or detached, after lock-checkout) would carry the harmonized line's commits there
+    if _dbt_is_line_h && [ "$(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null)" != "$B" ]; then
+      echo "  ${P_TAG}$(_dbt_show "$V"): not on $B ($(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null || echo detached)) — NOT synced (the harmonized line moves its own branches only): git -C $(_dbt_show "$V") checkout $B, or just lock-release"
+      continue
+    fi
     if ! _dbt_has_ref "refs/remotes/$U"; then echo "  ${P_TAG}$B: not published yet ($U missing)"; continue; fi
     read -r AHEAD BEHIND <<< "$(git -C "$DBT_WS" rev-list --left-right --count "$B...$U" 2>/dev/null)"
     if [ "${AHEAD:-0}" = 0 ] && [ "${BEHIND:-0}" = 0 ]; then
@@ -846,6 +872,8 @@ dbt_sync() {
   if [ "$P_HOME" != "origin" ]; then
     local OTHER EX="HEAD|main|master|upstream-.*" VV
     for VV in $(dbt_versions); do EX="$EX|$(_dbt_hbr "$VV")"; done
+    # the harmonized line knows the ISO line's v4 (its v4-h starts there): not a structural change to report
+    if _dbt_is_line_h && dbt_v4_enabled; then EX="$EX|${P_HB4%-h}"; fi
     OTHER="$(git -C "$DBT_WS" for-each-ref --format='%(refname:lstrip=3)' "refs/remotes/$P_HOME/" 2>/dev/null \
       | grep -v -x -E "$EX" | paste -sd' ' -)"
     [ -z "$OTHER" ] || echo "  ${P_TAG}NOTE: branches in $P_HOME not followed here: $OTHER"
@@ -1335,10 +1363,23 @@ _dbt_under_v4() {
 #     profiles/v4.env, the verdict line names the flux, and the proof is a file of its own, DBT_HOOKS_V4_PROOF with
 #     -<FLUX> before its extension: a proof holds for one flux only, and the main copy's stays where it is
 #     (dbt_hooks_v4_seal, dbt_hooks_v4_verdict, dbt_hooks_v4_proof_path).
-# What a flux does NOT separate: git. Its worktrees follow the same branches of the products as the main copy's (v4,
-# v2): a commit pushed from a flux reaches the main copy at its next `just sync` — the harmonized line's convergences
-# would reach the ISO line. Until the harmonized line has branches of its own, nothing is committed on v4 from flux H
-# (just doctor says so), nor on v2 from any flux (dbt v2 deps rewrites package-lock.yml there).
+# What a flux <A999> does NOT separate: git. Its worktrees follow the same branches of the products as the main
+# copy's (v4, v2): a commit pushed from it reaches the main copy at its next `just sync` — nothing is committed on v2
+# from any flux (dbt v2 deps rewrites package-lock.yml there). The HARMONIZED line (flux H) is apart in git too, or its
+# convergences would reach the ISO line:
+#   - its v4 worktrees follow branches of their own (dbt_use_product): <product>/v4-h, tracking v4-h where the
+#     product's branches live (<product>/v4-h on origin), opened THERE from the published v4 — never created here
+#     (_dbt_ensure_branch); a v4 copy on any other branch (the ISO line's <product>/v4) or detached elsewhere than in
+#     its own history is refused (dbt_v4_line_h_branch_problem: dbt-run.sh, line_h_guard), never moved by `just sync`;
+#   - no push of it reaches a branch of the ISO line or of the shared generations — v1, v2, v4 —, a v4-h is created at
+#     the published v4 only, never deleted nor rewritten: a pre-push hook (.devcontainer/git-push-garde-h.sh,
+#     installed by dbt_ensure_push_guard_h; every dbt command refused while git would not run it:
+#     _dbt_push_guard_h_problem);
+#   - its lock is .devcontainer/products-h.lock (dbt_load_conf), never products.lock;
+#   - clone, --state, --defer (--defer-state, --favor-state) and --manage-state are refused there, and their
+#     environment variables (DBT_LINE_H_STATE_ARGS, DBT_LINE_H_STATE_ENV: dbt-run.sh) — they would bring another
+#     space's relations or state into the line (`dbt clone --state <the ISO line's manifest>` would copy ISO tables
+#     under <DBT_BQ_DATASET_PREFIX_V4>_H) — until a later change of this template opens them.
 # Without flux.conf, in the MAIN copy — the one DBT_V4_MAIN_WS (dbt.conf) names by its real path — nothing changes,
 # but one thing: its v4 never writes a dataset shaped like a flux's space, <DBT_BQ_DATASET_PREFIX_V4>_<A999> or
 # <DBT_BQ_DATASET_PREFIX_V4>_H (= or _*): the main copy's v4 — the ISO line — never writes the harmonized line's.
@@ -1610,6 +1651,112 @@ _dbt_guest_engines() {
   return 0
 }
 
+# -----------------------------------------------------------------------------
+# Fleet: the harmonized line (flux H) in git — its own branches, its push guard
+# -----------------------------------------------------------------------------
+
+# _dbt_is_line_h — this working copy is the harmonized line: it declares flux H (.devcontainer/flux.conf, read by
+# _dbt_flux_read — a declaration that cannot be trusted is no line at all: every dbt command is refused there)
+_dbt_is_line_h() { [ "${DBT_V4_FLUX:-}" = H ]; }
+
+# What the harmonized line refuses, whatever the space (dbt-run.sh, run_dbt): the commands and options that bring
+# another space's relations or state into a line — `clone` (copies relations: `--state <the ISO line's manifest>` would
+# copy ISO tables under <DBT_BQ_DATASET_PREFIX_V4>_H), deferral and state comparison (--defer, and --defer-state,
+# --favor-state, hidden from dbt 2.0.8's help), service-backed dbt State (--manage-state) — and the environment
+# variables that set them (dbt 2.0.8: its help, and the strings of its binary). Every word of the command line is read
+# (`--state=x` as `--state`): a model called `clone` costs a refusal, never a missed clone. The --no-… forms, which
+# turn them off, pass.
+# shellcheck disable=SC2034  # both read by dbt-run.sh (run_dbt)
+DBT_LINE_H_STATE_ARGS="clone --state --defer --defer-state --favor-state --manage-state"
+# shellcheck disable=SC2034
+DBT_LINE_H_STATE_ENV="DBT_STATE DBT_DEFER DBT_DEFER_STATE DBT_FAVOR_STATE DBT_ENGINE_MANAGE_STATE DBT_ENGINE_STATE_HOME DBT_CLOUD_DEFER_ENV_ID DBT_CLOUD_DEFER_JOB_ID"
+
+# dbt_v4_line_h_branch_problem — (the harmonized line; after dbt_use_product) why the current product's v4 copy is not
+# the harmonized line's, one line; nothing: it is, or there is no v4 copy (yet). It must be on <product>/v4-h ($P_B4),
+# tracking $P_HOME/$P_HB4 — or detached at a commit of <product>/v4-h's own history (a replay: lock-checkout). Refused:
+# the ISO line's <product>/v4 (or any other branch), a detached HEAD elsewhere, <product>/v4-h tracking anything else
+# (its `git push` would go there).
+dbt_v4_line_h_branch_problem() {
+  local W B U C
+  _dbt_is_line_h && dbt_v4_enabled || return 0
+  W="$(_dbt_wt v4)"
+  _dbt_is_worktree "$W" || return 0
+  B="$(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null)"
+  if [ -z "$B" ]; then
+    C="$(git -C "$W" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"
+    [ -n "$C" ] && _dbt_has_ref "refs/heads/$P_B4" && git -C "$DBT_WS" merge-base --is-ancestor "$C" "refs/heads/$P_B4" 2>/dev/null && return 0
+    echo "$(_dbt_show v4) is detached at ${C:0:9}, a commit outside $P_B4's history: the harmonized line works on its own branch ($P_HOME/$P_HB4) — git -C ${P_SHOW4%/} checkout $P_B4"
+    return 0
+  fi
+  if [ "$B" != "$P_B4" ]; then
+    echo "$(_dbt_show v4) is on $B, not on $P_B4: the harmonized line works on its own branch ($P_HOME/$P_HB4), never on the ISO line's — git -C ${P_SHOW4%/} checkout $P_B4"
+    return 0
+  fi
+  U="$(git -C "$DBT_WS" rev-parse --abbrev-ref "$P_B4@{upstream}" 2>/dev/null)"
+  [ "$U" = "$P_HOME/$P_HB4" ] \
+    || echo "$P_B4 tracks ${U:-nothing}, not $P_HOME/$P_HB4: its pushes would go elsewhere — git -C ${P_SHOW4%/} branch -u $P_HOME/$P_HB4"
+  return 0
+}
+
+# The push guard of the harmonized line: .devcontainer/git-push-garde-h.sh (template-owned), installed as this copy's
+# own pre-push hook — <git common dir>/hooks/pre-push, run for every worktree of the copy. What it refuses: its header.
+_dbt_push_guard_h_src() { printf '%s' "$DBT_WS/.devcontainer/git-push-garde-h.sh"; }
+_dbt_push_guard_h_dst() {
+  local G
+  G="$(git -C "$DBT_WS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ -n "$G" ] || return 1
+  printf '%s/hooks/pre-push' "$G"
+}
+_DBT_PUSH_GUARD_H_MARK="sap-template: git-push-garde-h"
+
+# dbt_ensure_push_guard_h — (lifecycle; the harmonized line only) the push guard installed, byte for byte: written when
+# there is no pre-push hook, replaced when the one there carries the guard's marker (an older version of it); a hook of
+# someone else is never touched (said: every dbt command stays refused, _dbt_push_guard_h_problem). Never removed —
+# not even when flux.conf is gone: an ex-H copy keeps refusing.
+dbt_ensure_push_guard_h() {
+  local S D
+  _dbt_is_line_h || return 0
+  S="$(_dbt_push_guard_h_src)"
+  if [ ! -f "$S" ]; then echo "  WARNING: flux H — no ${S#"$DBT_WS"/} (copier update): no push guard, every dbt command is refused"; return 0; fi
+  D="$(_dbt_push_guard_h_dst)" || { echo "  WARNING: flux H — not a git repository: no push guard"; return 0; }
+  if [ -e "$D" ] || [ -L "$D" ]; then
+    if cmp -s "$S" "$D" && [ -x "$D" ] && [ ! -L "$D" ]; then
+      echo "  push guard of the harmonized line: ${D} (no push to v1, v2 nor v4)"; return 0
+    fi
+    if [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then
+      echo "  WARNING: flux H — $D is another pre-push hook: left as it is, so every dbt command is refused (move it away, then: just setup)"
+      return 0
+    fi
+  fi
+  mkdir -p "$(dirname "$D")" && cat "$S" > "$D" && chmod 755 "$D" \
+    && echo "  push guard of the harmonized line installed: $D (no push to v1, v2 nor v4; a v4-h created at the published v4 only)" \
+    || echo "  WARNING: flux H — cannot install the push guard ($D): every dbt command is refused"
+  return 0
+}
+
+# _dbt_push_guard_h_problem — (the harmonized line) why its push guard would not run, one reason per line; nothing: git
+# runs it on every push, from the copy and from each of its worktrees. The template's file missing, the installed hook
+# not byte for byte that file or not executable, or git resolving its pre-push hook elsewhere (core.hooksPath — in the
+# copy's or the container's git settings, or in one worktree's own, when extensions.worktreeConfig is on).
+_dbt_push_guard_h_problem() {
+  local S D W WC H
+  local -a WTS=()
+  S="$(_dbt_push_guard_h_src)"
+  [ -f "$S" ] || { echo "${S#"$DBT_WS"/} is missing (copier update): the harmonized line has no push guard"; return 0; }
+  D="$(_dbt_push_guard_h_dst)" || { echo "not a git repository: the harmonized line has no push guard"; return 0; }
+  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \
+    || echo "its push guard is not installed ($D is not ${S#"$DBT_WS"/}, byte for byte, executable): a push could reach v1, v2 or v4 — just setup"
+  WC="$(git -C "$DBT_WS" config --bool --get extensions.worktreeConfig 2>/dev/null)"
+  WTS=("$DBT_WS")
+  [ "$WC" != true ] || mapfile -t -O 1 WTS < <(git -C "$DBT_WS" worktree list --porcelain 2>/dev/null | LC_ALL=C sed -n 's/^worktree //p')
+  # the hooks directory git uses, from the copy and (worktree settings on) from each worktree: this copy's own
+  for W in "${WTS[@]}"; do
+    H="$(git -C "$W" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)"
+    [ -n "$H" ] && [ "$(realpath -m -- "$H")" = "$(realpath -m -- "${D%/*}")" ] \
+      || echo "git does not run $D from ${W#"$DBT_WS"/} (core.hooksPath: $(git -C "$W" config --get core.hooksPath 2>/dev/null || echo '?')): the push guard would not run — unset core.hooksPath"
+  done
+  return 0
+}
+
 # dbt_v4_prefix — the dataset prefix of THIS copy's v4 space: DBT_BQ_DATASET_PREFIX_V4, or <it>_<FLUX> in a flux
 dbt_v4_prefix() { printf '%s' "${DBT_BQ_DATASET_PREFIX_V4:-}${DBT_V4_FLUX:+_$DBT_V4_FLUX}"; }
 
@@ -1653,7 +1800,8 @@ _dbt_flux_clash() {
 #   - the declaration itself (DBT_V4_FLUX_ERR, _dbt_flux_read);
 #   - .devcontainer/flux.conf or profiles/v4-<FLUX>.env tracked by git, or not ignored: `git add -A` would commit the
 #     flux, and merging its work would carry it into the main copy;
-#   - a package of the v4 space whose name reads as the flux (_dbt_flux_clash).
+#   - a package of the v4 space whose name reads as the flux (_dbt_flux_clash);
+#   - the harmonized line (flux H) without its push guard (_dbt_push_guard_h_problem).
 dbt_v4_flux_problem() {
   local F="${DBT_V4_FLUX:-}" X C
   if [ -n "${DBT_V4_FLUX_ERR:-}" ]; then printf '%s\n' "$DBT_V4_FLUX_ERR"; return 0; fi
@@ -1667,6 +1815,7 @@ dbt_v4_flux_problem() {
   done
   C="$(_dbt_flux_clash)"
   [ -z "$C" ] || echo "flux $F reads as a package of the v4 space ($(printf '%s\n' "$C" | paste -sd' ' -)): its datasets ${DBT_BQ_DATASET_PREFIX_V4:-<V4>}_<PACKAGE>__… would be the flux's — choose another flux name"
+  [ "$F" != H ] || _dbt_push_guard_h_problem
   _dbt_flux_main_problem
   return 0
 }
@@ -2050,6 +2199,23 @@ dbt_packages_unchecked() {
   return 1
 }
 
+# _dbt_packages_incomplete PROJECT_DIR — the project declares packages (packages.yml, dependencies.yml or
+# package-lock.yml) and dbt_packages/ does not hold them all: fewer entries than declared (_dbt_v1_packages_missing:
+# the count, transitive ones included), or a name package-lock.yml locks missing (a directory, or a link to one). dbt v2
+# installs what is missing by itself on its first compile: hooks no check has read. For the copies that are not the
+# main one (dbt-run.sh, guest_hooks_guard), where any unread hook refuses: fail-closed. Nothing declared: complete.
+_dbt_packages_incomplete() {
+  local PROJ="${1:-}" X RE='^[[:space:]]*-[[:space:]]*(package|git|local|tarball|private):'
+  X="$(cat "$PROJ/packages.yml" "$PROJ/dependencies.yml" "$PROJ/package-lock.yml" 2>/dev/null | grep -cE "$RE")"
+  [ "${X:-0}" -gt 0 ] || return 1
+  _dbt_v1_packages_missing "$PROJ" && return 0
+  [ -f "$PROJ/package-lock.yml" ] || return 1
+  while IFS= read -r X; do
+    [ -d "$PROJ/dbt_packages/$X" ] || return 0
+  done < <(sed -nE 's/^[[:space:]]+name:[[:space:]]*([A-Za-z0-9_]+)[[:space:]]*$/\1/p' "$PROJ/package-lock.yml")
+  return 1
+}
+
 # dbt_hooks_compile_name V — the name DBT_HOOKS_COMPILE_OK gives V (after dbt_use_product): `global`, `global-v4`,
 # `v4/<product>`, a product's name (its v2 and v1 — never its v4), or `project` outside a fleet.
 dbt_hooks_compile_name() {
@@ -2263,12 +2429,16 @@ dbt_process() {
   case "$(dbt_v4_role)" in
     flux)    echo "[dbt] working copy: flux $DBT_V4_FLUX — this copy only; the container (engines, ~/.bashrc, global git settings) is the main copy's (${DBT_V4_MAIN_WS:-?})"
              [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H: the HARMONIZED line — its v4 writes under $(dbt_v4_prefix) only, where the main copy's ISO line never writes"
-             [ "$DBT_V4_FLUX" != H ] || echo "  WARNING: flux H — separated from the ISO line in BigQuery only, not in git: its v4 worktrees follow the products' branch v4, the ISO line's. Commit and push nothing on v4 from this copy until the harmonized line has branches of its own" ;;
+             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git: its v4 worktrees follow <product>/v4-h (v4-h where the products' branches live), no push of it reaches v1, v2 nor v4 (pre-push guard), its lock is products-h.lock" ;;
     refused) echo "[dbt] working copy: flux declaration refused — this copy only; the container is left to the main copy (${DBT_V4_MAIN_WS:-?})" ;;
     orphan)  echo "[dbt] working copy: ORPHAN — neither the main copy (DBT_V4_MAIN_WS) nor a flux: no v4 space here$( _dbt_owns_container || echo "; the container is left to the main copy")" ;;
   esac
   echo "[dbt] upstream access..."
   dbt_git_setup
+  if _dbt_is_line_h; then
+    echo "[dbt] push guard of the harmonized line (pre-push)..."
+    dbt_ensure_push_guard_h
+  fi
   if dbt_is_fleet; then
     echo "[dbt] data products (.devcontainer/products.conf)..."
     [ -n "$(dbt_products)" ] || echo "  none yet — add one: just product-add <name> <git-url> [branch] [subdir]"

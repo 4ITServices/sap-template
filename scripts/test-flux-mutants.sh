@@ -7,8 +7,10 @@
 # copies orphelines, l'état du container, la liste blanche hors de l'espace v4,
 # aucun hook hors de l'espace v4 d'une copie qui n'est pas la principale, les
 # réglages du garde-fou au moins aussi stricts que ceux de la copie principale,
-# la preuve d'un flux dans son propre fichier, l'alerte git de la ligne
-# harmonisée, `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
+# la preuve d'un flux dans son propre fichier, la ligne harmonisée dans git — ses
+# branches v4-h, sa garde de push, son verrou products-h.lock, clone/--state/
+# --defer/--manage-state refusés —, les paquets d'une copie invitée tous installés,
+# `dbt` hors de tout projet) : une copie jetable du dépôt où CETTE garde est
 # retirée ou affaiblie — un « mutant » —, puis scripts/test-lib-dbt.sh sur cette
 # copie. Un mutant doit faire échouer au moins un contrôle ; un mutant qui passe
 # est une garde que rien ne teste.
@@ -37,7 +39,7 @@ if [ "${1:-}" = "-j" ]; then J="${2:?-j N}"; shift 2; fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# --- les mutants : NOM, fichier (L lib-dbt.sh, R dbt-run.sh, D dbt-doctor.sh), texte exact, remplacement ----------
+# --- les mutants : NOM, fichier (L lib-dbt.sh, R dbt-run.sh, D dbt-doctor.sh, G git-push-garde-h.sh), texte exact, remplacement
 cat > "$WORK/mutants.py" <<'PY'
 M = [
   # la déclaration (.devcontainer/flux.conf), lue du fichier seul
@@ -191,10 +193,71 @@ M = [
   ("preuve-garde-fou-fichier-principal", "R", '  PF="$(dbt_hooks_v4_proof_path)"\n', '  PF="$DBT_HOOKS_V4_PROOF"\n'),
   ("preuve-doctor-fichier-principal", "D", '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then\n',
                                            '        elif dbt_hooks_v4_verdict "$WS/$DBT_HOOKS_V4_PROOF" "$S" "${DBT_V4_FLUX:-}"; then\n'),
-  # la ligne harmonisée : séparée de la ligne ISO dans BigQuery seulement, pas dans git — dit
-  ("ligne-h-git-doctor-muet", "D", '            [ "$DBT_V4_FLUX" != H ] || ko "flux H: the two lines are separated', '            true || ko "flux H: the two lines are separated'),
-  ("ligne-h-git-setup-muet", "L", '             [ "$DBT_V4_FLUX" != H ] || echo "  WARNING: flux H — separated', '             true || echo "  WARNING: flux H — separated'),
-  ("flux-git-partage-doctor-muet", "D", '            info "git is shared: this copy', '            true "git is shared: this copy'),
+  # la ligne harmonisée séparée de la ligne ISO dans git aussi — dit ; un flux <A999> ne l'est que dans BigQuery — dit
+  ("ligne-h-git-doctor-muet", "D", '              info "flux H, in git: its v4 copies follow', '              true "flux H, in git: its v4 copies follow'),
+  ("ligne-h-garde-doctor-muette", "D", '                || ok "flux H: its push guard runs on every push', '                || true "flux H: its push guard runs on every push'),
+  ("ligne-h-git-setup-muet", "L", '             [ "$DBT_V4_FLUX" != H ] || echo "[dbt] flux H, in git:', '             true || echo "[dbt] flux H, in git:'),
+  ("flux-git-partage-doctor-muet", "D", '              info "git is shared: this copy', '              true "git is shared: this copy'),
+  # aucun hook depuis une copie invitée : ses paquets tous installés (dbt v2 installerait le reste au compile)
+  ("invite-paquets-incomplets-admis", "R", '  _dbt_packages_incomplete "$PROJ" \\\n    && refuse', '  false \\\n    && refuse'),
+  ("invite-paquets-compte-ignore", "L", '  _dbt_v1_packages_missing "$PROJ" && return 0\n  [ -f "$PROJ/package-lock.yml" ] || return 1\n', '  [ -f "$PROJ/package-lock.yml" ] || return 1\n'),
+  ("invite-paquets-verrou-ignore", "L", '    [ -d "$PROJ/dbt_packages/$X" ] || return 0\n', '    :\n'),
+  # la ligne harmonisée dans git : ses branches, <p>/v4-h (v4-h là où vivent les branches du produit)
+  ("ligne-h-branche-v4-commune", "L", '  _dbt_is_line_h && H4="-h"\n', '  :\n'),
+  ("ligne-h-branche-referent", "L", 'P_HB4="v4$H4"; P_B4="$N/v4$H4"; P_WT4=', 'P_HB4="v4"; P_B4="$N/v4"; P_WT4='),
+  ("ligne-h-branche-locale-produit", "L", 'P_B2="$N/v2"; P_B4="$N/v4$H4"\n', 'P_B2="$N/v2"; P_B4="$N/v4"\n'),
+  ("ligne-h-branche-dans-son-depot", "L", 'P_HB2="v2"; P_HB4="v4$H4"; P_MIRROR=', 'P_HB2="v2"; P_HB4="v4"; P_MIRROR='),
+  ("ligne-h-branche-sur-origin", "L", 'P_HB4="$N/v4$H4"; P_MIRROR="$N/upstream"', 'P_HB4="$N/v4"; P_MIRROR="$N/upstream"'),
+  ("ligne-h-ouverture-tue", "L", "    if _dbt_is_line_h; then\n      # the harmonized line's branch is opened where", "    if false; then\n      # the harmonized line's branch is opened where"),
+  ("ligne-h-setup-copie-hors-ligne-tue", "L", '      [ "$V" != v4 ] || dbt_v4_line_h_branch_problem | while IFS= read -r X; do\n', '      true || dbt_v4_line_h_branch_problem | while IFS= read -r X; do\n'),
+  ("ligne-h-sync-avance-une-autre-branche", "L", 'if _dbt_is_line_h && [ "$(git -C "$W" symbolic-ref -q --short HEAD 2>/dev/null)" != "$B" ]; then', 'if false; then'),
+  ("ligne-h-sync-v4-iso-non-suivie", "L", '    if _dbt_is_line_h && dbt_v4_enabled; then EX="$EX|${P_HB4%-h}"; fi\n', ''),
+  ("ligne-h-verrou-commun", "L", '  if _dbt_is_line_h; then DBT_LOCK_FILE="$DBT_WS/.devcontainer/products-h.lock"; fi\n', ''),
+  ("ligne-h-verrou-message-commun", "R", 'LOCKN="$(basename "$DBT_LOCK_FILE")"\n\ndie()', 'LOCKN=products.lock\n\ndie()'),
+  ("ligne-h-verrou-doctor-nom-commun", "D", '  LOCKN="$(basename "$DBT_LOCK_FILE")"\n  echo "[lock', '  LOCKN=products.lock\n  echo "[lock'),
+  # une copie v4/<p> qui n'est pas sur <p>/v4-h : refusée
+  ("ligne-h-copie-v4-jamais-verifiee", "L", '  _dbt_is_line_h && dbt_v4_enabled || return 0\n  W="$(_dbt_wt v4)"', '  return 0\n  W="$(_dbt_wt v4)"'),
+  ("ligne-h-copie-detachee-toujours-admise", "L", '    [ -n "$C" ] && _dbt_has_ref "refs/heads/$P_B4" && git -C "$DBT_WS" merge-base --is-ancestor "$C" "refs/heads/$P_B4" 2>/dev/null && return 0\n', '    return 0\n'),
+  ("ligne-h-copie-sur-une-autre-branche", "L", '  if [ "$B" != "$P_B4" ]; then\n    echo "$(_dbt_show v4) is on $B', '  if false; then\n    echo "$(_dbt_show v4) is on $B'),
+  ("ligne-h-suivi-non-verifie", "L", '  [ "$U" = "$P_HOME/$P_HB4" ] \\\n    || echo "$P_B4 tracks', '  true \\\n    || echo "$P_B4 tracks'),
+  ("ligne-h-garde-de-branche-absente", "R", '  role_guard "$V" "$@"\n  line_h_guard "$V"\n', '  role_guard "$V" "$@"\n'),
+  ("ligne-h-garde-de-branche-sans-global-v4", "R", '    global-v4) PB="$(for N in $(dbt_members); do', '    global-v4-jamais) PB="$(for N in $(dbt_members); do'),
+  ("ligne-h-destinations-sans-garde-de-branche", "R", '  ! dbt_v4_enabled || line_h_guard v4\n', ''),
+  ("ligne-h-destinations-global-v4-sans-garde", "R", '  case "${1:-}" in global) ;; ""|global-v4) line_h_guard global-v4 ;; esac\n', ''),
+  # sa garde de push : posée, vérifiée, jamais contournée en silence
+  ("ligne-h-garde-jamais-posee", "L", '  _dbt_is_line_h || return 0\n  S="$(_dbt_push_guard_h_src)"\n', '  return 0\n  S="$(_dbt_push_guard_h_src)"\n'),
+  ("ligne-h-garde-posee-non-executable", "L", '  mkdir -p "$(dirname "$D")" && cat "$S" > "$D" && chmod 755 "$D"', '  mkdir -p "$(dirname "$D")" && cat "$S" > "$D"'),
+  ("ligne-h-garde-ecrase-un-autre-hook", "L", '    if [ -L "$D" ] || [ ! -f "$D" ] || ! grep -qF "$_DBT_PUSH_GUARD_H_MARK" "$D"; then\n', '    if false; then\n'),
+  ("ligne-h-garde-jamais-verifiee", "L", '  [ "$F" != H ] || _dbt_push_guard_h_problem\n', ''),
+  ("ligne-h-garde-retouchee-admise", "L", '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n', '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ]; } \\\n'),
+  ("ligne-h-garde-non-executable-admise", "L", '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n', '  { [ -f "$D" ] && [ ! -L "$D" ] && cmp -s "$S" "$D"; } \\\n'),
+  ("ligne-h-garde-lien-admis", "L", '  { [ -f "$D" ] && [ ! -L "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n', '  { [ -f "$D" ] && [ -x "$D" ] && cmp -s "$S" "$D"; } \\\n'),
+  ("ligne-h-garde-hookspath-ignore", "L", '    [ -n "$H" ] && [ "$(realpath -m -- "$H")" = "$(realpath -m -- "${D%/*}")" ] \\\n', '    true \\\n'),
+  ("ligne-h-garde-hookspath-par-copie-ignore", "L", '  [ "$WC" != true ] || mapfile -t -O 1 WTS', '  true || mapfile -t -O 1 WTS'),
+  # ce que refuse la garde de push (git-push-garde-h.sh)
+  ("poussee-h-v4", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v1|v2|*/v1|*/v2|*/v4)\n'),
+  ("poussee-h-v2", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v1|v4|*/v1|*/v2|*/v4)\n'),
+  ("poussee-h-v1", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v2|v4|*/v1|*/v2|*/v4)\n'),
+  ("poussee-h-x-v4-sur-origin", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v1|v2|v4|*/v1|*/v2)\n'),
+  ("poussee-h-x-v2-sur-origin", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v1|v2|v4|*/v1|*/v4)\n'),
+  ("poussee-h-x-v1-sur-origin", "G", '    v1|v2|v4|*/v1|*/v2|*/v4)\n', '    v1|v2|v4|*/v2|*/v4)\n'),
+  ("poussee-h-creation-libre", "G", '    [ -n "$P" ] && [ "$P" = "$LOID" ] \\\n', '    true \\\n'),
+  ("poussee-h-creation-depuis-une-v4-quelconque", "G", '    [ -n "$P" ] && [ "$P" = "$LOID" ] \\\n', '    [ -n "$P" ] \\\n'),
+  ("poussee-h-reecriture", "G", '  elif ! git cat-file -e "$ROID^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$ROID" "$LOID" 2>/dev/null; then\n', '  elif false; then\n'),
+  ("poussee-h-sortie-permissive", "G", '  exit 1\nfi\nexit 0\n', '  exit 0\nfi\nexit 0\n'),
+  # clone, --state, --defer, --manage-state (et leurs variables) : refusés dans la ligne H
+  ("ligne-h-etat-options-ignorees", "R", '    case " $DBT_LINE_H_STATE_ARGS " in *" ${A%%=*} "*) STATEARGS+=("${A%%=*}") ;; esac\n', ''),
+  ("ligne-h-etat-variables-ignorees", "R", '    for E in $DBT_LINE_H_STATE_ENV; do [ -z "${!E:-}" ] || STATEARGS+=("$E (exported)"); done\n', ''),
+  ("ligne-h-etat-permis", "R", '    [ -z "${STATEARGS[*]-}" ] \\\n      || refuse "flux H (the harmonized line)', '    true \\\n      || refuse "flux H (the harmonized line)'),
+  ("ligne-h-clone-permis", "L", 'DBT_LINE_H_STATE_ARGS="clone --state', 'DBT_LINE_H_STATE_ARGS="--state'),
+  ("ligne-h-state-permis", "L", 'ARGS="clone --state --defer', 'ARGS="clone --defer'),
+  ("ligne-h-defer-permis", "L", ' --state --defer --defer-state', ' --state --defer-state'),
+  ("ligne-h-defer-state-permis", "L", ' --defer-state --favor-state', ' --favor-state'),
+  ("ligne-h-favor-state-permis", "L", ' --favor-state --manage-state"', ' --manage-state"'),
+  ("ligne-h-manage-state-permis", "L", ' --favor-state --manage-state"', ' --favor-state"'),
+  ("ligne-h-DBT_STATE-permis", "L", 'DBT_LINE_H_STATE_ENV="DBT_STATE ', 'DBT_LINE_H_STATE_ENV="'),
+  ("ligne-h-DBT_DEFER-permis", "L", ' DBT_DEFER DBT_DEFER_STATE', ' DBT_DEFER_STATE'),
+  ("ligne-h-DBT_ENGINE_MANAGE_STATE-permis", "L", ' DBT_ENGINE_MANAGE_STATE ', ' '),
   # le doctor
   ("doctor-flux-muet", "D", '  FPB="$(dbt_v4_flux_problem)"\n', '  FPB=""\n'),
   ("doctor-verdict-sans-flux", "D", '        elif dbt_hooks_v4_verdict "$WS/$(dbt_hooks_v4_proof_path)" "$S" "${DBT_V4_FLUX:-}"; then\n',
@@ -209,14 +272,19 @@ M = [
 #   - dans _dbt_push_lock_ssh_guest, le retour quand la garde couvre déjà tous les hôtes : sans lui, la commande
 #     recomposée est la même (core.sshCommand inchangé), seul le message diffère ;
 #   - le doctor d'une copie invitée (verrou 4 vérifié même sous DBT_UPSTREAM_PUSH_LOCK=0, couche https selon l'état du
-#     container) : la suite ne simule pas d'upstream ssh dans la flotte (dbt-doctor.sh relit products.conf), pas de témoin.
+#     container) : la suite ne simule pas d'upstream ssh dans la flotte (dbt-doctor.sh relit products.conf), pas de témoin ;
+#   - dans git-push-garde-h.sh, le refus explicite de supprimer une v4-h : une suppression échoue aussi au contrôle de
+#     l'avance rapide (le commit vide n'a pas l'ancien pour ancêtre), seul le message diffère ;
+#   - dans _dbt_push_guard_h_problem, [ -f "$D" ] : un lien, un dossier ou rien à sa place échouent aussi à [ ! -L ], -x
+#     ou cmp ; dans dbt_v4_line_h_branch_problem, _dbt_has_ref avant merge-base (merge-base échoue sur une réf absente).
 PY
 python3 - "$WORK" "$REPO_ROOT" "$@" <<'PY'
 import sys
 work, root, only = sys.argv[1], sys.argv[2], sys.argv[3:]
 exec(open(f"{work}/mutants.py", encoding="utf-8").read())
-F = {k: f"{root}/template/.devcontainer/{{% if dbt_workspace %}}{n}{{% endif %}}" for k, n in
-     (("L", "lib-dbt.sh"), ("R", "dbt-run.sh"), ("D", "dbt-doctor.sh"))}
+F = {k: f"{root}/template/.devcontainer/{{% if {c} %}}{n}{{% endif %}}" for k, c, n in
+     (("L", "dbt_workspace", "lib-dbt.sh"), ("R", "dbt_workspace", "dbt-run.sh"), ("D", "dbt_workspace", "dbt-doctor.sh"),
+      ("G", "project_type == 'dbt-fleet'", "git-push-garde-h.sh"))}
 noms = [m[0] for m in M]
 assert len(set(noms)) == len(noms), "deux mutants du même nom"
 bad = [n for n in only if n not in noms]
@@ -249,8 +317,9 @@ muter() {   # muter NOM — la copie, la mutation, la suite ; écrit $WORK/NOM.r
 import sys
 work, root, nom = sys.argv[1:4]
 exec(open(f"{work}/mutants.py", encoding="utf-8").read())
-F = {k: f"{root}/template/.devcontainer/{{% if dbt_workspace %}}{n}{{% endif %}}" for k, n in
-     (("L", "lib-dbt.sh"), ("R", "dbt-run.sh"), ("D", "dbt-doctor.sh"))}
+F = {k: f"{root}/template/.devcontainer/{{% if {c} %}}{n}{{% endif %}}" for k, c, n in
+     (("L", "dbt_workspace", "lib-dbt.sh"), ("R", "dbt_workspace", "dbt-run.sh"), ("D", "dbt_workspace", "dbt-doctor.sh"),
+      ("G", "project_type == 'dbt-fleet'", "git-push-garde-h.sh"))}
 (_, f, old, new), = [m for m in M if m[0] == nom]
 s = open(F[f], encoding="utf-8").read()
 assert s.count(old) == 1

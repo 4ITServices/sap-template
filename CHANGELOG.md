@@ -340,6 +340,52 @@ and commit messages; this changelog starts at v0.8.12.
     in `dbt.conf`).
   Tests: 874 offline checks in `scripts/test-lib-dbt.sh`; 18 more mutants
   (121 in all), all killed.
+- **The harmonized line is apart in git too.** Until now flux `H` was
+  separated from the ISO line in BigQuery only: its v4 worktrees followed the
+  products' branch `v4`, so a convergence pushed from it reached the ISO line
+  at the main copy's next `just sync`, for good. Every change below is a guard
+  that restricts; none opens anything, and the main copy and the fluxes
+  `<A999>` do not change:
+  - **its own branches.** In flux `H`, the v4 worktrees follow
+    `<product>/v4-h`, tracking `v4-h` where the product's branches live
+    (`<product>/v4-h` on `origin`). A `v4-h` is opened THERE, from the
+    published v4 (`git push home-<p> home-<p>/v4:refs/heads/v4-h`, then
+    `just setup`), never created by the lifecycle. A v4 copy on any other
+    branch (the ISO line's `<product>/v4`), detached outside its own history,
+    or tracking anything but `v4-h` is refused — under `v4/<product>`, under
+    `global-v4/` (which reads them all) and by `just destinations` —, said by
+    `just setup` and `just doctor`, and never moved by `just sync`
+    (`dbt_v4_line_h_branch_problem`). A detached HEAD inside `<product>/v4-h`'s
+    history (a replay, `lock-checkout`) passes;
+  - **its push guard.** `.devcontainer/git-push-garde-h.sh` (dbt-fleet),
+    installed by the lifecycle as the copy's own `pre-push` hook, refuses any
+    push to `v1`, `v2`, `v4` (or `<x>/v1`, `<x>/v2`, `<x>/v4`) on any remote,
+    the creation of a `v4-h` anywhere but at the published v4 of the same
+    remote, its deletion and any update that is not a fast-forward. Every dbt
+    command of the copy is refused while git would not run it byte for byte
+    (missing, edited, not executable, a link, someone else's hook — never
+    overwritten —, or `core.hooksPath`, the copy's or one worktree's). Not
+    covered, and said: `git push --no-verify`, a hooks path given at push
+    time, `git send-pack`, a push from outside git;
+  - **its own lock**: `.devcontainer/products-h.lock` (its v4 lines are the
+    `v4-h` commits) for `just lock`, `lock-status`, `lock-checkout`, the
+    summary of `just sync` and `just doctor`; `products.lock` is never written
+    there;
+  - **no clone, no deferral, no foreign state**: `clone`, `--state`,
+    `--defer`, `--defer-state`, `--favor-state`, `--manage-state` (any word
+    of the command line) and their variables (`DBT_STATE`, `DBT_DEFER`,
+    `DBT_DEFER_STATE`, `DBT_FAVOR_STATE`, `DBT_ENGINE_MANAGE_STATE`,
+    `DBT_ENGINE_STATE_HOME`, `DBT_CLOUD_DEFER_ENV_ID`,
+    `DBT_CLOUD_DEFER_JOB_ID`) are refused in every space of flux `H` — `dbt
+    clone --state <the ISO line's manifest>` would copy ISO tables under
+    `<DBT_BQ_DATASET_PREFIX_V4>_H` —, until a later change of the template
+    opens them.
+  Also closed, for every copy that is not the main one: a project whose
+  packages are installed in part (fewer in `dbt_packages/` than declared, or
+  a name `package-lock.yml` locks missing) refuses `compile` and `show` there —
+  dbt v2 would install the rest by itself and run their hooks unread.
+  Tests: 957 offline checks in `scripts/test-lib-dbt.sh`, a real clone of the
+  harmonized line among them; 55 more mutants, all killed.
 
 ### Fixed (on the unreleased dbt-project type)
 

@@ -1,0 +1,66 @@
+#!/bin/bash
+# =============================================================================
+# git-push-garde-h.sh — the pre-push hook of the HARMONIZED line's working copy (TEMPLATE-OWNED)
+# sap-template: git-push-garde-h (marker: lib-dbt.sh replaces an installed hook only when it carries this line)
+# Updated by `copier update` — do not edit in projects.
+#
+# The harmonized line (flux H: .devcontainer/flux.conf, DBT_V4_FLUX=H) is a working copy of the fleet whose v4 copies
+# follow branches of their own, v4-h (<product>/v4-h when the product's branches live in this repository), beside the
+# main copy's ISO line (v4). lib-dbt.sh installs this file, byte for byte, as <git common dir>/hooks/pre-push of that
+# copy (dbt_ensure_push_guard_h) — never in the main copy — and refuses every dbt command of the copy while git would
+# not run it (_dbt_push_guard_h_problem). It stays when flux.conf is erased: an ex-H copy keeps refusing.
+#
+# git runs it before every `git push` of that copy, its worktrees included: $1 = the remote's name (or the URL pushed
+# to), one line per ref on stdin: <local ref> <local oid> <remote ref> <remote oid>. It refuses the whole push when:
+#   - a ref updated, created or deleted is a branch of the ISO line, or of the generations both lines share:
+#     v1, v2, v4 — or <x>/v1, <x>/v2, <x>/v4 (a product whose branches live in this repository) — on any remote:
+#     the harmonized line writes its v4-h branches only (committer-redescente.sh's `push home-<p> HEAD:v4`, run
+#     from here, would mix the two lines for good: published history is never rewritten);
+#   - a v4-h branch (or <x>/v4-h) is CREATED anywhere but at the published v4 of the same remote, as last fetched
+#     (refs/remotes/<remote>/v4, <remote>/<x>/v4) — the opening, and only it:
+#       git push home-<product> home-<product>/v4:refs/heads/v4-h
+#     (pushed to a URL rather than a remote: no published v4 to compare with, refused);
+#   - a v4-h branch is DELETED, or updated by anything but a fast-forward.
+# Any other ref (the coordinator's own branches on origin, a tag) is left to git.
+# Not covered — a guard against accidents, not against a deliberate bypass: `git push --no-verify`, a hooks path
+# given at push time (-c core.hooksPath=…, GIT_CONFIG_*), `git send-pack`, a push from outside git with the same key.
+# Offline: it reads this repository only.
+# =============================================================================
+set -u
+
+REMOTE="${1:-}"
+BAD=""
+# an all-zero object name (SHA-1 or SHA-256): the ref does not exist on that side
+nul() { case "${1:-}" in *[!0]*|"") return 1 ;; esac; return 0; }
+
+while read -r LREF LOID RREF ROID _; do
+  [ -n "${RREF:-}" ] || continue
+  case "$RREF" in refs/heads/*) ;; *) continue ;; esac
+  B="${RREF#refs/heads/}"
+  case "$B" in
+    v1|v2|v4|*/v1|*/v2|*/v4)
+      BAD="$BAD"$'\n'"   $RREF: a branch of the ISO line or of the generations both lines share — the harmonized line pushes its v4-h branches only"
+      continue ;;
+    v4-h|*/v4-h) ;;
+    *) continue ;;
+  esac
+  if nul "$LOID"; then
+    BAD="$BAD"$'\n'"   $RREF: deleting the harmonized line's branch — published history is never rewritten"
+  elif nul "$ROID"; then
+    # created: only at the published v4 of the same remote (its v4-h starts from there, and nowhere else)
+    P="$(git rev-parse -q --verify "refs/remotes/$REMOTE/${B%-h}^{commit}" 2>/dev/null)"
+    [ -n "$P" ] && [ "$P" = "$LOID" ] \
+      || BAD="$BAD"$'\n'"   $RREF: created from ${LREF:-?} (${LOID:0:9}), not at the published v4 (refs/remotes/$REMOTE/${B%-h}: ${P:-none}) — open it with: git push $REMOTE $REMOTE/${B%-h}:refs/heads/$B"
+  elif ! git cat-file -e "$ROID^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$ROID" "$LOID" 2>/dev/null; then
+    BAD="$BAD"$'\n'"   $RREF: not a fast-forward of ${ROID:0:9} — published history is never rewritten (fetch, then merge)"
+  fi
+done
+
+if [ -n "$BAD" ]; then
+  {
+    echo "⛔ push refused by the harmonized line's push guard (flux H — .devcontainer/git-push-garde-h.sh, pre-push):$BAD"
+    echo "   This copy's v4 work goes to v4-h only; v1, v2 and v4 belong to the main copy (the ISO line)."
+  } >&2
+  exit 1
+fi
+exit 0

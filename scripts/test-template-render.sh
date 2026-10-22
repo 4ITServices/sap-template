@@ -253,7 +253,7 @@ if render false "$WORK/fleet" --data project_type=dbt-fleet \
     [ -e "$D/$absent" ] && bad "FLEET: $absent ne devrait PAS exister" || pass "FLEET: pas de $absent"
   done
   for present in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh \
-                 .devcontainer/dbt.conf .devcontainer/products.conf \
+                 .devcontainer/dbt.conf .devcontainer/products.conf .devcontainer/git-push-garde-h.sh \
                  .devcontainer/features/google-cloud-cli/install.sh .ignore profiles/dbt.env \
                  global/dbt_project.yml global/packages.yml global/macros/generate_schema_name.sql \
                  global/.gitignore justfile CLAUDE.md README.md; do
@@ -295,14 +295,14 @@ else
   bad "FLEET: copier a échoué"
 fi
 grep -q 'dbt_workspace' "$WORK/off/.copier-answers.yml" && bad "OFF: dbt_workspace enregistrée dans les réponses" || pass "OFF: dbt_workspace absente des réponses"
-for leak in .devcontainer/products.conf global; do
+for leak in .devcontainer/products.conf global .devcontainer/git-push-garde-h.sh; do
   [ -e "$WORK/dbt/$leak" ] && bad "DBT: $leak (flotte) ne devrait PAS exister en dbt-project" || pass "DBT: pas de $leak"
 done
 grep -qF 'flux' "$WORK/dbt/.gitignore" && bad "DBT: le flux (flotte) ne devrait pas être dans le .gitignore d'un projet seul" || pass "DBT: pas de flux dans le .gitignore d'un projet seul"
 grep -q 'DBT_V4_MAIN_WS' "$WORK/dbt/.devcontainer/dbt.conf" && bad "DBT: DBT_V4_MAIN_WS (flotte) ne devrait pas être dans le dbt.conf d'un projet seul" || pass "DBT: pas de DBT_V4_MAIN_WS dans le dbt.conf d'un projet seul"
 
 echo "== Les autres types n'héritent de rien du type dbt-project (rendu OFF = mcp-server) =="
-for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/dbt.conf \
+for leak in .devcontainer/lib-dbt.sh .devcontainer/dbt-run.sh .devcontainer/dbt-doctor.sh .devcontainer/git-ssh-garde.sh .devcontainer/git-push-garde-h.sh .devcontainer/dbt.conf \
             .devcontainer/features .ignore profiles; do
   [ -e "$WORK/off/$leak" ] && bad "OFF: $leak ne devrait PAS exister" || pass "OFF: pas de $leak"
 done
