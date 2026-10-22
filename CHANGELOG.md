@@ -194,6 +194,74 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Fixed (on the unreleased dbt-project type)
 
+- **No push by git reaches an upstream host, however it is written or
+  reached.** The lock rested on three textual `pushInsteadOf` prefixes per
+  host (`git@<host>:`, `ssh://git@<host>/`, `https://<host>/`) plus the
+  remote's `pushurl`: of 23 ways of pushing to a GitLab host, 20 still
+  reached it with the user's key or asked for an https identifier —
+  `git+ssh://`, `ssh+git://`, `ssh://…:22/`, no user, another user, upper
+  case, a trailing dot, `http://`, `https://…:443/`, any remote with an
+  explicit pushurl (pushInsteadOf ignores it, and the https -> ssh rewrite
+  turns `https://<host>/…` into `git@<host>:`), and `git send-pack`, which
+  never reads pushInsteadOf. `dbt_git_setup` now adds three layers,
+  idempotent and replayed on every start, removing nothing it did not write:
+  (a) git's `core.sshCommand` is a new template-owned script,
+  `.devcontainer/git-ssh-garde.sh`, run from its copy in
+  `~/.local/libexec/` (a `git checkout` of an older commit, `just
+  lock-checkout`, cannot take it away): to an upstream host only
+  `git-upload-pack` and `git-upload-archive` with one quoted path go through
+  — `git-receive-pack`, `git-lfs-authenticate`, a read followed by anything
+  else are refused before ssh runs. The host is recognised by name — the
+  destination, and what `ssh -G` reads from `~/.ssh/config` and the options:
+  HostName, HostKeyAlias, the ProxyJump hops, the words of ProxyCommand, the
+  CanonicalDomains suffixes — and, for a write, by address: every one of
+  those names resolved by `getent ahosts`, an IPv4-mapped `::ffff:a.b.c.d`
+  brought back to `a.b.c.d`, against the upstream hosts' addresses (an IP
+  address in any writing, another name of the same server, a search domain);
+  an upstream host that does not resolve makes an IP address refused (fail
+  closed). A read without a terminal runs with `BatchMode=yes`. The pinned
+  host keys ride along; every other host and git's `ssh -G` probe go to ssh
+  unchanged.
+  (b) an upstream host read over ssh gets no https: `http.https://<host>.proxy`
+  and `http.http://<host>.proxy` are a dead proxy (`http://127.0.0.1:9`; the
+  most specific urlmatch key wins whatever the order, so a general
+  `http.proxy`, a reset of the credential helpers, a password in the URL or
+  an `http.extraHeader` do not get round it), and behind it
+  `credential.https://<host>.helper` = `""` then a quitter (`quit=1`): no
+  other helper is asked, no prompt opens. An upstream read over https keeps
+  its credentials and its proxy.
+  (c) ten more `pushInsteadOf` prefixes per host, which still hold for
+  `git push` (not `git send-pack`) when an exported `GIT_SSH_COMMAND`
+  replaces the guard.
+  A customised `core.sshCommand` is left as is and reported.
+  `DBT_UPSTREAM_PUSH_LOCK=0` removes the three layers of its hosts (the
+  pinned keys come back alone). `just doctor` checks each layer and proves it
+  offline (ssh stubbed: a `git-receive-pack` to `git@<host>`, `jb@<HOST>`,
+  `<host>.`, `git@[::ffff:<address>]` refused, a `git-upload-pack` let
+  through; `git ls-remote https://…@<host>/…` and `http://…` meet the dead
+  proxy on 127.0.0.1), checks the installed copy against the worktree's, and
+  reports an exported `GIT_SSH_COMMAND` (❌), `GIT_SSH` (information only:
+  git prefers `core.sshCommand`), `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT`
+  touching the lock, `GIT_CONFIG_GLOBAL`, a `NO_PROXY` covering the host, a
+  workspace-level `core.sshCommand`, proxy or credential helper.
+  **Limits, said in the guard, the README and CLAUDE.md** — "no push by git"
+  is not "no push": the key that can write stays available to every process
+  (ssh outside git: a `git-receive-pack` typed by hand, gitlab-shell's
+  `personal_access_token` then an https push with that token); a pure tunnel
+  (`ssh -L`, socat to 127.0.0.1) without a HostKeyAlias naming the host, a
+  shared `ControlPath`, https on another port; a deliberate override of git's
+  configuration (`GIT_SSH_COMMAND`, `-c core.sshCommand=…`,
+  `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, a repository's own
+  `core.sshCommand`, `ext::` with `protocol.ext.allow=always`,
+  `GIT_CONFIG_GLOBAL=/dev/null` or another `HOME`). Only a read-only access
+  on the server covers those. Tests: the 23 forms one by one, one mutant per
+  layer (and the lib-dbt.sh of before: 20 leaks), the guard by address and by
+  ssh configuration (10 cases, one mutant per mechanism: the `::ffff:`
+  normalisation, the resolution, HostKeyAlias, ProxyCommand, ProxyJump,
+  CanonicalDomains, BatchMode), the dead proxy against six ways round the
+  quitter, reads (ls-remote, fetch, clone, archive), GitHub untouched, the
+  guard missing from the worktree, the doctor line by line — 113 more
+  offline checks in `scripts/test-lib-dbt.sh` (539 in all).
 - **`dbt-run.sh`: what the seal of global-v4's hook proof cannot see is
   refused there, and dbt can no longer load packages from elsewhere.** On
   global-v4's compile/show under a proof of its hooks, `--vars` (it overrides
