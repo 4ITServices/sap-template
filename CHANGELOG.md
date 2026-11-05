@@ -80,6 +80,20 @@ and commit messages; this changelog starts at v0.8.12.
   target (`cp -L`) and replaces a dangling link already in the profile.
   Rendered only with a profile: without one nothing changes.
 
+- **`claude_profile`: the history migration is automatic.** Seen on sap-excel:
+  the manual host step (`claude-profile-migrate.sh --apply` between closing
+  the window and rebuilding) was skipped, and `claude --resume` came up empty
+  after the rebuild. `claude-profile-host.sh` now gets the workspace folder
+  (`${localWorkspaceFolderBasename}`) and, on the first start, runs the
+  migration script, now shipped as `.devcontainer/claude-profile-migrate.sh`
+  (same file as `scripts/`), for `/workspaces/<folder>`. It leaves a marker
+  `~/.claude-profiles/<profile>/.migrated-<folder>` and a log
+  `.migrate-<folder>.log`. A session that wrote less than 2 minutes earlier
+  is waited for (2½ min at most); on failure the container starts anyway and
+  the next start tries again. It never overwrites the profile and only reads
+  `~/.claude`. A repo already migrated by hand is merged once (files it lacks
+  only). Upgrading: close the window, rebuild, `/login`.
+
 - **New `enable_dotnet` question (default `false`) with `dotnet_version`
   (default `10.0`)** for projects with C#: the `devcontainers/dotnet` feature
   and a Docker volume `devcontainer-nuget-packages` on `~/.nuget/packages`

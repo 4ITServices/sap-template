@@ -64,7 +64,10 @@
   // claude-profile-host.sh then makes its settings.json a REAL file (a symlink
   // to a host path, e.g. ~/dotfiles, is dangling in the container): /model and
   // the effort level are saved per container, the host's files are never written.
-  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"{% if dbt_workspace %} \"${localEnv:HOME}/.config/gcloud\"{% endif %} && sh \"${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\" \"{{ claude_profile }}\"",
+  // On the first start it also migrates this repo's Claude history (sessions,
+  // memory, prompt history) from the host's ~/.claude into the profile, once:
+  // see claude-profile-migrate.sh. ~/.claude is only ever read.
+  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"{% if dbt_workspace %} \"${localEnv:HOME}/.config/gcloud\"{% endif %} && sh \"${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\" \"{{ claude_profile }}\" \"${localWorkspaceFolderBasename}\"",
 {%- else %}
 
   "initializeCommand": "mkdir -p ${HOME}/.claude{% if dbt_workspace %} ${HOME}/.config/gcloud{% endif %}",

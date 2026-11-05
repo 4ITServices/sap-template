@@ -122,6 +122,7 @@ grep -qxF "    $LEGACY_MOUNT" "$WORK/off/$DC" && pass "OFF: montage ~/.claude hi
 grep -qxF "  $LEGACY_INIT" "$WORK/off/$DC" && pass "OFF: initializeCommand historique" || bad "OFF: initializeCommand modifié"
 grep -q 'claude-profiles' "$WORK/off/$DC" && bad "OFF: référence à .claude-profiles" || pass "OFF: aucune référence à .claude-profiles"
 [ -e "$WORK/off/.devcontainer/claude-profile-host.sh" ] && bad "OFF: claude-profile-host.sh rendu sans profil" || pass "OFF: pas de claude-profile-host.sh sans profil"
+[ -e "$WORK/off/.devcontainer/claude-profile-migrate.sh" ] && bad "OFF: claude-profile-migrate.sh rendu sans profil" || pass "OFF: pas de claude-profile-migrate.sh sans profil"
 jsonc_ok "$WORK/off/$DC" && pass "OFF: devcontainer.json valide (JSONC)" || bad "OFF: devcontainer.json invalide"
 
 echo "== claude_profile=render-profile : montage du profil =="
@@ -129,8 +130,8 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
   PROF_SRC='${localEnv:HOME}/.claude-profiles/render-profile'
   grep -qF "\"source=$PROF_SRC,target=/home/vscode/.claude,type=bind\"" "$WORK/prof/$DC" \
     && pass "PROFIL: ~/.claude-profiles/render-profile monté sur ~/.claude" || bad "PROFIL: montage du profil absent"
-  grep -qF "\"initializeCommand\": \"mkdir -p \\\"$PROF_SRC\\\" && sh \\\"\${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\\\" \\\"render-profile\\\"\"" "$WORK/prof/$DC" \
-    && pass "PROFIL: initializeCommand crée CE dossier puis lance claude-profile-host.sh" || bad "PROFIL: initializeCommand incomplet"
+  grep -qF "\"initializeCommand\": \"mkdir -p \\\"$PROF_SRC\\\" && sh \\\"\${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\\\" \\\"render-profile\\\" \\\"\${localWorkspaceFolderBasename}\\\"\"" "$WORK/prof/$DC" \
+    && pass "PROFIL: initializeCommand crée CE dossier puis lance claude-profile-host.sh (profil, dépôt)" || bad "PROFIL: initializeCommand incomplet"
   # claude-profile-host.sh, sur un faux HOME d'hôte : settings.json propre au container
   CPH="$WORK/prof/.devcontainer/claude-profile-host.sh"
   [ -f "$CPH" ] && sh -n "$CPH" && pass "PROFIL: claude-profile-host.sh présent, sh -n OK" || bad "PROFIL: claude-profile-host.sh absent ou invalide"
@@ -155,6 +156,48 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
   [ "$(cat "$pd/settings.json" 2>/dev/null)" = "{}" ] && pass "PROFIL/host: sans ~/.claude → {}" || bad "PROFIL/host: pas de settings.json vide"
   HOME="$hh" sh "$CPH" ../x >/dev/null 2>&1; rc=$?
   [ "$rc" = 0 ] && [ ! -e "$hh/.claude-profiles/../x" ] && [ ! -e "$hh/x" ] && pass "PROFIL/host: profil « ../x » ignoré, sortie 0" || bad "PROFIL/host: « ../x » mal traité"
+  # Migration automatique de l'historique (2e argument = dossier du dépôt)
+  CPM="$WORK/prof/.devcontainer/claude-profile-migrate.sh"
+  [ -f "$CPM" ] && [ ! -L "$CPM" ] && cmp -s "$CPM" "$REPO_ROOT/scripts/claude-profile-migrate.sh" \
+    && pass "PROFIL: claude-profile-migrate.sh livré (vrai fichier = scripts/)" || bad "PROFIL: claude-profile-migrate.sh absent ou différent"
+  hm="$WORK/hote-mig"; pm="$hm/.claude-profiles/render-profile"; sp="$hm/.claude/projects/-workspaces-repo-a"
+  mkdir -p "$sp/memory" "$hm/.claude/projects/-workspaces-repo-b"
+  printf '{"cwd":"/workspaces/repo-a","n":1}\n' >"$sp/s1.jsonl"
+  printf '# mémoire\n' >"$sp/memory/MEMORY.md"
+  printf '{"cwd":"/workspaces/repo-b"}\n' >"$hm/.claude/projects/-workspaces-repo-b/b1.jsonl"
+  printf '{"display":"a","timestamp":1,"project":"/workspaces/repo-a"}\n{"display":"b","timestamp":2,"project":"/workspaces/repo-b"}\n' >"$hm/.claude/history.jsonl"
+  printf '{}\n' >"$hm/.claude/settings.json"
+  find "$hm/.claude" -exec touch -t 202001010000 {} +
+  avant=$(cd "$hm/.claude" && find . -type f -exec cksum {} + | sort)
+  out=$(HOME="$hm" CLAUDE_PROFILE_WAIT=0 sh "$CPH" render-profile repo-a 2>&1); rc=$?
+  [ "$rc" = 0 ] && [ -f "$pm/projects/-workspaces-repo-a/s1.jsonl" ] && [ -f "$pm/projects/-workspaces-repo-a/memory/MEMORY.md" ] \
+    && [ ! -e "$pm/projects/-workspaces-repo-b" ] && grep -q '"display":"a"' "$pm/history.jsonl" && ! grep -q '"display":"b"' "$pm/history.jsonl" \
+    && [ -e "$pm/.migrated-repo-a" ] && echo "$out" | grep -q "migré" \
+    && pass "MIGR: 1er démarrage → sessions, mémoire, historique de CE dépôt seulement, marqueur posé" \
+    || bad "MIGR: 1er démarrage (rc=$rc) : $out"
+  [ "$avant" = "$(cd "$hm/.claude" && find . -type f -exec cksum {} + | sort)" ] && pass "MIGR: ~/.claude de l'hôte inchangé" || bad "MIGR: ~/.claude de l'hôte modifié"
+  printf '{"cwd":"/workspaces/repo-a","n":2}\n' >"$sp/s2.jsonl"; touch -t 202001010000 "$sp/s2.jsonl"
+  HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  [ ! -e "$pm/projects/-workspaces-repo-a/s2.jsonl" ] && pass "MIGR: 2e démarrage → marqueur présent, rien de recopié" || bad "MIGR: migration rejouée malgré le marqueur"
+  rm -f "$pm/.migrated-repo-a"; printf '{"cwd":"/workspaces/repo-a","n":"profil"}\n' >"$pm/projects/-workspaces-repo-a/s1.jsonl"
+  find "$pm" -exec touch -t 202001010000 {} +   # profil au repos (aucun container ne l'écrit)
+  HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  grep -q '"profil"' "$pm/projects/-workspaces-repo-a/s1.jsonl" && [ -f "$pm/projects/-workspaces-repo-a/s2.jsonl" ] && [ -e "$pm/.migrated-repo-a" ] \
+    && pass "MIGR: profil déjà rempli → fusion, rien d'écrasé" || bad "MIGR: fusion incorrecte"
+  rm -rf "$pm"; touch "$sp/s1.jsonl"
+  out=$(HOME="$hm" CLAUDE_PROFILE_WAIT=0 sh "$CPH" render-profile repo-a 2>&1); rc=$?
+  [ "$rc" = 0 ] && [ ! -e "$pm/.migrated-repo-a" ] && echo "$out" | grep -q "attente" && echo "$out" | grep -q "nouvel essai" && grep -q "stop the container" "$pm/.migrate-repo-a.log" \
+    && pass "MIGR: session encore active → attente, puis report au démarrage suivant (sortie 0, pas de marqueur)" || bad "MIGR: session active mal traitée (rc=$rc) : $out"
+  touch -t 202001010000 "$sp/s1.jsonl"
+  HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  [ -e "$pm/.migrated-repo-a" ] && [ -f "$pm/projects/-workspaces-repo-a/s1.jsonl" ] && pass "MIGR: démarrage suivant → migré" || bad "MIGR: pas de reprise après report"
+  rm -rf "$pm"; HOME="$hm" sh "$CPH" render-profile >/dev/null 2>&1
+  [ ! -e "$pm/projects" ] && [ -f "$pm/settings.json" ] && pass "MIGR: sans 2e argument (ancien devcontainer.json) → pas de migration" || bad "MIGR: migration sans dépôt"
+  HOME="$hm" sh "$CPH" render-profile ../x >/dev/null 2>&1; rc=$?
+  [ "$rc" = 0 ] && [ ! -e "$pm/projects" ] && pass "MIGR: dépôt « ../x » ignoré" || bad "MIGR: dépôt « ../x » accepté"
+  rm -rf "$pm"; mkdir -p "$pm"; : >"$pm/.migrated-repo-a"
+  HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  [ ! -e "$pm/projects" ] && pass "MIGR: marqueur posé à la main → jamais migré" || bad "MIGR: marqueur manuel ignoré"
   grep -qF "$LEGACY_MOUNT" "$WORK/prof/$DC" && bad "PROFIL: le ~/.claude partagé est encore monté" || pass "PROFIL: ~/.claude partagé non monté"
   jsonc_ok "$WORK/prof/$DC" && pass "PROFIL: devcontainer.json valide (JSONC)" || bad "PROFIL: devcontainer.json invalide"
 else

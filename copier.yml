@@ -249,7 +249,9 @@ claude_profile:
     Donner le même profil à deux dépôts leur fait partager le même compte.
     Les réglages (/model, effort) vont dans le settings.json du profil : un
     profil par dépôt = des réglages propres au container.
-    Migration de l'historique : .devcontainer/README.md (« Claude profiles »).
+    Au premier démarrage, l'historique du dépôt (sessions, mémoire) est copié
+    automatiquement de ~/.claude dans le profil (voir .devcontainer/README.md,
+    « Claude profiles »).
   validator: >-
     {% if claude_profile and not (claude_profile | regex_search('^[a-z0-9][a-z0-9_-]{0,62}$')) %}
     Profil invalide : minuscules, chiffres, - et _ uniquement, 63 caractères max (ex: sap-testing)

@@ -95,11 +95,26 @@ once from `~/.claude/settings.json`. A real file is never touched; the host's
 own files are only read. To start again from the host settings, delete
 `~/.claude-profiles/<profile>/settings.json` and restart the container.
 {%- endif %}
-
+{% if claude_profile %}
+**Migrating an existing repo** (the step where history could be lost) is
+**automatic**: on the first start with a profile, `claude-profile-host.sh`
+runs `.devcontainer/claude-profile-migrate.sh --apply` on the host for this
+repo (`/workspaces/<folder>`), then leaves the marker
+`~/.claude-profiles/<profile>/.migrated-<folder>` so it never runs again; its
+output is in `.migrate-<folder>.log` next to it. If a session of the repo
+wrote to `~/.claude` less than 2 minutes earlier (container just stopped), it
+waits up to 2½ minutes; if the copy still cannot run, it starts the container
+anyway, without a marker, and tries again at the next start. To skip it,
+create the marker by hand before the first start. The same script (also
+`scripts/claude-profile-migrate.sh` in sap-template) can be run by hand, a
+dry run unless you pass `--apply`. It only **copies** (the host-wide
+`~/.claude` is only ever read) and never overwrites what the profile has:
+{%- else %}
 **Migrating an existing repo** (the step where history could be lost):
 `scripts/claude-profile-migrate.sh` in the sap-template repo, run **on the
 host** with the repo's container **stopped**. It is a dry run unless you pass
 `--apply`, and it only **copies** (the host-wide `~/.claude` is only ever read):
+{%- endif %}
 
 - user config: settings, skills, plugins…
 - the repo's `projects/<slug>/` (transcripts and memory)
@@ -107,8 +122,9 @@ host** with the repo's container **stopped**. It is a dry run unless you pass
 - its `file-history/`
 
 It never copies `.credentials.json` (you `/login` again), `backups/` or
-runtime state. Then `copier update` with the profile, rebuild, `/login`, and
-check with `claude --resume`. To roll back, set `claude_profile` back to empty
+runtime state. {% if claude_profile %}So: `copier update` with the profile, close the VS Code
+window, rebuild, `/login`, and check with `claude --resume`.{% else %}Then `copier update` with the profile, rebuild, `/login`, and
+check with `claude --resume`.{% endif %} To roll back, set `claude_profile` back to empty
 and rebuild: `~/.claude` was never modified.
 {%- if secrets_source == 'keyvault' %}
 
@@ -580,10 +596,18 @@ do for you:
    rebuilding: `bash .devcontainer/post-start.sh` (self-heals /opt
    installs, launches the servers, health-checks the ports). Do not run
    it on the host: it appends to `~/.bashrc` and provisions `/opt`.
+{%- if claude_profile %}
+6. **First time `claude_profile` is set**: close the VS Code window, then
+   rebuild. The first start migrates the repo's history into the profile
+   (see *Claude profiles*). If `claude --resume` is empty, read
+   `~/.claude-profiles/<profile>/.migrate-<folder>.log` on the host: nothing
+   is lost, it is still in the host's `~/.claude`.
+{%- else %}
 6. **First time `claude_profile` is set**: stop the container and migrate
    the history (see *Claude profiles*) **before** rebuilding. Otherwise the
    rebuilt container starts with an empty history. Nothing is lost: it is
    still in the host's `~/.claude`, and migrating later works too.
+{%- endif %}
 
 ### Explicit MCP permissions
 
