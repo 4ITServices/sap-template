@@ -126,6 +126,14 @@ else
 fi
 
 # =============================================================================
+# Secrets Key Vault (dogfood of secrets_source=keyvault): launcher, git
+# credential helper for github.com, terminal functions profil / claude / gh.
+# No .env: the variables come from .env.refs, resolved in memory.
+# =============================================================================
+source "$WORKSPACE_DIR/.devcontainer/lib-secrets.sh"
+secrets_install "$WORKSPACE_DIR"
+
+# =============================================================================
 # Project-specific setup (not managed by template — safe from template updates)
 # =============================================================================
 PROJECT_POST_CREATE="$WORKSPACE_DIR/.devcontainer/post-create-project.sh"

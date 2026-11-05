@@ -40,7 +40,17 @@ echo "[2/4] Securing sensitive files..."
 chmod 600 "$WORKSPACE_DIR/.env"      2>/dev/null && echo "  .env" || true
 chmod 600 "$WORKSPACE_DIR/.env.ecc"  2>/dev/null && echo "  .env.ecc" || true
 chmod 600 "$WORKSPACE_DIR/.mcp.json" 2>/dev/null && echo "  .mcp.json" || true
-
+{% if secrets_source == 'keyvault' %}
+# --- Secrets : .env.refs résolu depuis Key Vault, en mémoire ---
+# Le .env n'est plus lu (un .env restant est ignoré, jamais supprimé). Les
+# variables chargées ici passent aux serveurs MCP et à post-start-project.sh
+# (NetBird…), qui en héritent sans relire de fichier.
+echo "[3/4] Secrets (Key Vault)..."
+source "$WORKSPACE_DIR/.devcontainer/lib-secrets.sh"
+secrets_install "$WORKSPACE_DIR"
+SECRETS_OK=0
+secrets_load_env "$WORKSPACE_DIR/.env.refs" && SECRETS_OK=1
+{%- else %}
 # --- Chargement du .env ---
 echo "[3/4] Loading .env..."
 if [ -f "$WORKSPACE_DIR/.env" ]; then
@@ -49,6 +59,7 @@ if [ -f "$WORKSPACE_DIR/.env" ]; then
 else
   echo "  .env not found — copy from .env.example if needed"
 fi
+{%- endif %}
 
 # =============================================================================
 # MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
@@ -59,14 +70,29 @@ fi
 echo ""
 echo "[4/4] MCP servers (mcp-servers.conf)..."
 source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
+{%- if secrets_source == 'keyvault' %}
+secrets_override_mcp_link_env
+if [ "$SECRETS_OK" = 1 ]; then
+  mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
+else
+  echo "[mcp] skipped: .env.refs not resolved (see [3/4]) — az login, then"
+  echo "      bash .devcontainer/post-start.sh   (or restart the container)"
+fi
+{%- else %}
 mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
+{%- endif %}
 
 # Optional second sap-adt-mcp instance targeting SAP ECC EHP8 on port 8001.
 # Runtime-gated, not Jinja-gated: starts only when both .env.ecc and the ECC
 # launcher exist, so ECC can be flipped on/off without re-running copier.
 SAP_ADT_ECC_LAUNCHER="/opt/sap-adt-mcp/scripts/mcp-server-ecc.sh"
 if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
+{%- if secrets_source == 'keyvault' %}
+  # sans les variables S/4HANA de .env.refs : elles l'emporteraient sur .env.ecc
+  secrets_sans_refs "$WORKSPACE_DIR/.env.refs" "$SAP_ADT_ECC_LAUNCHER" start
+{%- else %}
   "$SAP_ADT_ECC_LAUNCHER" start
+{%- endif %}
   mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
 fi
 {%- if dbt_workspace %}

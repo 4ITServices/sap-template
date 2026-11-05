@@ -56,19 +56,14 @@ chmod 600 "$WORKSPACE_DIR/.mcp.json"  2>/dev/null && echo "  .mcp.json" || true
 chmod 600 "$CLAUDE_PROJECT"           2>/dev/null && echo "  .claude.json" || true
 
 # =============================================================================
-# 5. Source .env
+# 5. Secrets — .env.refs resolved from Key Vault, in memory (dogfood of
+#    secrets_source=keyvault). A leftover .env is ignored, never deleted.
 # =============================================================================
-echo "[4/6] Loading .env..."
-ENV_FILE="$WORKSPACE_DIR/.env"
-
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  source "$ENV_FILE"
-  set +a
-  echo "  .env loaded"
-else
-  echo "  .env not found — skipping (create from .env.example if needed)"
-fi
+echo "[4/6] Secrets (Key Vault)..."
+export PATH="$HOME/.local/bin:$PATH"
+source "$WORKSPACE_DIR/.devcontainer/lib-secrets.sh"
+secrets_install "$WORKSPACE_DIR"
+secrets_load_env "$WORKSPACE_DIR/.env.refs" || true
 
 # =============================================================================
 # 6. AWS credentials

@@ -17,12 +17,17 @@
 
   "mounts": [
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
-    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly"
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+    // Secrets Key Vault (dogfood of secrets_source=keyvault): the az sessions
+    // (one dir per profile) live in a Docker volume shared by every container
+    // of this Docker host — one `az login` survives rebuilds.
+    "source=devcontainer-azure-profils,target=/home/vscode/.azure-profils,type=volume"
   ],
 
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/azure-cli:1": {}
   },
 
   "initializeCommand": "mkdir -p ${HOME}/.claude",
@@ -73,7 +78,9 @@
 
   "onCreateCommand": {
     "git-config": "git config --global --add safe.directory ${containerWorkspaceFolder} && git config --global user.email 'jeanbaptiste.mack@outlook.com' && git config --global user.name 'jeanbaptistemack'",
-    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"
+    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code",
+    // a fresh Docker volume belongs to root
+    "azure-profils": "sudo chown vscode:vscode /home/vscode/.azure-profils && mkdir -p /home/vscode/.azure-profils/defaut"
   },
 
   "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/post-create.sh",
@@ -86,6 +93,9 @@
   },
 
   "containerEnv": {
-    "HISTFILE": "${containerWorkspaceFolder}/.bash_history"
+    "HISTFILE": "${containerWorkspaceFolder}/.bash_history",
+    // default az session: container lifecycle + every terminal until
+    // `profil <alias>` picks another one
+    "AZURE_CONFIG_DIR": "/home/vscode/.azure-profils/defaut"
   }
 }

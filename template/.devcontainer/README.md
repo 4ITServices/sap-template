@@ -56,7 +56,7 @@ devcontainer.json
 **post-start.sh** (runs on every start):
 1. Claude alias (`--dangerously-skip-permissions` in .bashrc)
 2. `chmod 600` on sensitive files (.env, .mcp.json)
-3. Source `.env`
+3. Source `.env` (or, with `secrets_source: keyvault`, resolve `.env.refs` from Key Vault in memory)
 4. MCP servers: self-heal (re-clone if absent/broken), update, launch,
    port health-check (`lib-mcp.sh` over `mcp-servers.conf`)
 
@@ -95,6 +95,101 @@ It never copies `.credentials.json` (you `/login` again), `backups/` or
 runtime state. Then `copier update` with the profile, rebuild, `/login`, and
 check with `claude --resume`. To roll back, set `claude_profile` back to empty
 and rebuild: `~/.claude` was never modified.
+
+## Secrets Key Vault (`secrets_source: keyvault`)
+
+Avec `secrets_source: keyvault`, le projet n'a plus de `.env` en clair. Ses
+variables viennent de **`.env.refs`**, versionné, qui ne contient **aucune
+valeur secrète** : seulement des références que le lanceur `secrets` résout
+**en mémoire** avec l'identité `az login` de la personne. Rien n'est écrit sur
+disque, aucune valeur ne passe sur une ligne de commande, chaque lecture est
+journalisée au nom de la personne (Key Vault).
+
+```bash
+GITHUB_PERSONAL_ACCESS_TOKEN=kv://perso/github-pat          # coffre perso de la personne connectée
+SAP_HANA_PASSWORD=kv://kv-4it-dev-partage/sap-hana-password  # coffre partagé
+SAP_URL=https://192.168.50.112:44300                         # configuration non secrète : en clair
+```
+
+| Pièce | Où | Rôle |
+|---|---|---|
+| `secrets/secrets`, `secrets/personnes.conf` | copie **figée** de `4ITServices/4it-azure/outils/secrets` (commit dans `secrets/SOURCE`) | le lanceur : `run`, `check`, `qui`, `set`, `mcp-headers`. Mise à jour : `scripts/secrets-sync.sh [REF]` dans sap-template, puis une version du modèle |
+| `secrets/git-credential-secrets`, `secrets/github.refs` | modèle | assistant d'identifiants git pour `https://github.com` → `kv://perso/github-pat` |
+| `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude`, `gh` |
+| `.env.refs` | **projet** (`_skip_if_exists`) | les références du projet ; `copier update` ne l'écrase jamais |
+| volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, partagé par les containers du même Docker host |
+
+### Démarrer (une fois par Docker host et par personne)
+
+```bash
+az login --use-device-code --tenant 53a0f5d2-129f-454e-9ed3-1f5fed0e66e5
+secrets qui                          # compte az, coffre perso
+secrets set kv://perso/github-pat    # ton jeton GitHub (fine-grained PAT 4ITServices), saisie masquée
+secrets check                        # chaque référence se résout ? (noms seulement)
+bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les secrets
+```
+
+`az login` suffit ensuite à tout : `gh` (fonction qui lit le jeton une fois par
+terminal), `git` en https (assistant d'identifiants), `claude` (lancé sous
+`secrets run`), les serveurs MCP et les hooks projet (post-start).
+
+### Ce que fait le cycle de vie
+
+- **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
+  assistant git, bloc `~/.bashrc`), puis `secrets_load_env .env.refs` exporte les
+  variables dans le script. Les serveurs MCP (`mcp-server.sh start`) et
+  `post-start-project.sh` (NetBird…) en **héritent** : pydantic-settings lit
+  l'environnement avant tout fichier. Le lien `/opt/<serveur>/.env` n'est plus
+  posé, et celui d'une version antérieure est retiré.
+- **Sans session az** (premier build) : rien n'échoue. Les serveurs MCP sont
+  sautés avec la marche à suivre ; après `az login`, relancer
+  `bash .devcontainer/post-start.sh` ou redémarrer le container.
+- **Instance ECC** (`.env.ecc`) : toujours lue dans son fichier ; elle est lancée
+  **sans** les variables de `.env.refs`, qui masqueraient les siennes.
+- **`.env` restant** : ignoré par les scripts du container, jamais supprimé
+  d'office (post-start le signale). Attention : un programme qui lit `.env`
+  lui-même (pydantic-settings `env_file=".env"`, python-dotenv, `set dotenv-load`
+  de just) y prend encore les variables **absentes** de l'environnement. Le
+  supprimer quand `.env.refs` couvre tout.
+
+### Container partagé : qui est connecté ?
+
+`kv://perso/…` lit le coffre de **celui qui a fait `az login`** (le lanceur
+cherche son compte dans `personnes.conf` → `kv-4it-dev-perso-<alias>`). Les droits
+Azure garantissent qu'on ne lit jamais le coffre perso de l'autre.
+
+- **Profil par défaut** (`AZURE_CONFIG_DIR=~/.azure-profils/defaut`) : celui du
+  cycle de vie (serveurs MCP, NetBird) et de tout terminal. Un `az login` dans un
+  terminal sans profil change l'identité du container entier.
+- **`profil <alias>`** (alias de `personnes.conf`) : la session az de **ce
+  terminal** seulement, dans `~/.azure-profils/<alias>`. Tout ce qu'il lance suit :
+  `secrets`, `gh`, `git`, `claude`. Les commits y sont signés au nom du compte
+  GitHub du jeton (`GIT_AUTHOR_*`, adresse noreply). `profil` affiche le profil
+  courant, `profil -` revient au défaut. `profil` refuse une session az qui
+  n'est pas celle de l'alias.
+
+### Serveurs MCP et Claude Code
+
+`claude` dans un terminal = `secrets run -f .env.refs -- claude …` ; si les
+références ne se résolvent pas, il prévient et démarre sans. Le panneau Claude
+Code de l'extension VS Code n'est **pas** lancé par cette fonction : il n'a pas
+ces variables. Pour un en-tête lu au moment de la connexion, indépendamment du
+lancement, `.mcp.json` accepte :
+
+```json
+"sap-adt-mcp": {
+  "type": "http",
+  "url": "http://127.0.0.1:8000/mcp",
+  "headersHelper": "secrets mcp-headers 'Authorization=Bearer kv://kv-4it-dev-partage/sap-adt-mcp-token'"
+}
+```
+
+### Ce qui n'est pas ici
+
+Les coffres, groupes et droits vivent dans `4ITServices/4it-azure`
+(`tofu/stacks/secrets`). Ajouter une personne : sa ligne dans `personnes.conf`
+de 4it-azure, `tofu apply`, puis `scripts/secrets-sync.sh` ici et une version du
+modèle. Le hub, la CI et les déploiements lisent Key Vault par identité managée.
 
 ## Managed MCP servers (mcp-servers.conf)
 

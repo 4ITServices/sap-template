@@ -103,6 +103,15 @@ fi
 # 8. Bootstrap .env and .mcp.json from examples
 # =============================================================================
 echo "[8/9] Bootstrap config files..."
+{%- if secrets_source == 'keyvault' %}
+# secrets_source=keyvault : pas de .env. Les variables viennent de .env.refs
+# (versionné, sans valeur secrète), résolu en mémoire depuis Key Vault.
+if [ -f "$WORKSPACE_DIR/.env.refs" ]; then
+  echo "  .env.refs present — no .env bootstrapped (Key Vault)"
+else
+  echo "  WARNING: .env.refs missing — copier update re-creates it"
+fi
+{%- else %}
 if [ ! -f "$WORKSPACE_DIR/.env" ] && [ -f "$WORKSPACE_DIR/.env.example" ]; then
   cp "$WORKSPACE_DIR/.env.example" "$WORKSPACE_DIR/.env"
   chmod 600 "$WORKSPACE_DIR/.env"
@@ -110,6 +119,7 @@ if [ ! -f "$WORKSPACE_DIR/.env" ] && [ -f "$WORKSPACE_DIR/.env.example" ]; then
 else
   echo "  .env already exists or no .env.example"
 fi
+{%- endif %}
 
 if [ ! -f "$WORKSPACE_DIR/.mcp.json" ] && [ -f "$WORKSPACE_DIR/.mcp.json.example" ]; then
   cp "$WORKSPACE_DIR/.mcp.json.example" "$WORKSPACE_DIR/.mcp.json"
@@ -151,12 +161,28 @@ fi
 # 9. MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
 # =============================================================================
 echo "[9/9] MCP servers..."
+{%- if secrets_source == 'keyvault' %}
+# Variables de .env.refs résolues en mémoire (GITHUB_PERSONAL_ACCESS_TOKEN pour
+# cloner les serveurs privés, identifiants SAP…). Au premier build personne
+# n'a encore fait `az login` : les serveurs sont alors sautés, post-start les
+# installe et les démarre au redémarrage suivant.
+source "$WORKSPACE_DIR/.devcontainer/lib-secrets.sh"
+secrets_install "$WORKSPACE_DIR"
+source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
+secrets_override_mcp_link_env
+if secrets_load_env "$WORKSPACE_DIR/.env.refs"; then
+  mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" create
+else
+  echo "[mcp] skipped until .env.refs resolves — post-start installs them"
+fi
+{%- else %}
 # .env was bootstrapped above; source it for GITHUB_PERSONAL_ACCESS_TOKEN
 if [ -f "$WORKSPACE_DIR/.env" ]; then
   set -a; source "$WORKSPACE_DIR/.env"; set +a
 fi
 source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
 mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" create
+{%- endif %}
 {%- if dbt_workspace %}
 
 # =============================================================================

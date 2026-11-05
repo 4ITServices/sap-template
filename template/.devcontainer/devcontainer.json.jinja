@@ -31,14 +31,19 @@
     // `gcloud auth application-default login` (the ADC that dbt's
     // `method: oauth` reads) survives every rebuild and is shared by all the
     // containers mounting it. No service-account key ever enters the image.
-    "source=${localEnv:HOME}/.config/gcloud,target=/home/vscode/.config/gcloud,type=bind"{% endif %}
+    "source=${localEnv:HOME}/.config/gcloud,target=/home/vscode/.config/gcloud,type=bind"{% endif %}{% if secrets_source == 'keyvault' %},
+    // secrets_source=keyvault: the az sessions (one dir per profile, default
+    // one = AZURE_CONFIG_DIR below) live in a Docker volume shared by every
+    // container of this Docker host — one `az login` survives rebuilds
+    // (even without cache) and serves all the projects.
+    "source=devcontainer-azure-profils,target=/home/vscode/.azure-profils,type=volume"{% endif %}
   ],
 
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
-    "ghcr.io/devcontainers/features/git-lfs:1": {}{% if enable_iac %},
-    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/devcontainers/features/git-lfs:1": {}{% if enable_iac or secrets_source == 'keyvault' %},
+    "ghcr.io/devcontainers/features/azure-cli:1": {}{% endif %}{% if enable_iac %},
     "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}{% if dbt_workspace %},
     // gcloud + bq, installed from Google's apt repo by a LOCAL feature: the
     // public ghcr.io/dhoeric one is abandoned and breaks on current Debian
@@ -126,7 +131,9 @@
 
   "onCreateCommand": {
     "git-config": "git config --global --add safe.directory ${containerWorkspaceFolder} && git config --global user.email '{{ author_email }}' && git config --global user.name '{{ author_name }}'",
-    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"{% if dbt_workspace %},
+    "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"{% if secrets_source == 'keyvault' %},
+    // a fresh Docker volume belongs to root
+    "azure-profils": "sudo chown vscode:vscode /home/vscode/.azure-profils && mkdir -p /home/vscode/.azure-profils/defaut"{% endif %}{% if dbt_workspace %},
     // the engines live in the container filesystem: installed BEFORE the
     // editor connects, so dbt Power User finds /opt/dbt-v1/bin/python on the
     // first start after a rebuild (postCreateCommand runs once it is connected)
@@ -147,7 +154,10 @@
 
   "containerEnv": {
     "HOME": "/home/vscode",
-    "HISTFILE": "${containerWorkspaceFolder}/.bash_history"{% if dbt_workspace %},
+    "HISTFILE": "${containerWorkspaceFolder}/.bash_history"{% if secrets_source == 'keyvault' %},
+    // default az session: the container lifecycle (post-start: MCP servers,
+    // NetBird…) and every terminal until `profil <alias>` picks another one
+    "AZURE_CONFIG_DIR": "/home/vscode/.azure-profils/defaut"{% endif %}{% if dbt_workspace %},
     // Profile hub lock: every process of the container (terminals, both dbt
     // extensions, hooks, `docker exec`) resolves dbt profiles from the
     // workspace hub, never from the profiles.yml shipped inside v1/ or v2/

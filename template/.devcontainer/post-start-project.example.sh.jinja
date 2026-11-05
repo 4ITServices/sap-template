@@ -14,11 +14,17 @@
 # =============================================================================
 
 WORKSPACE_DIR="${1:-$(pwd)}"
-
+{% if secrets_source == 'keyvault' %}
+# Secrets: post-start.sh has already resolved .env.refs from Key Vault, in
+# memory — the variables (e.g. NETBIRD_SETUP_KEY_DEVCONTAINER) are INHERITED.
+# Never `source .env`. Run standalone, wrap it the same way:
+#   secrets run -- bash .devcontainer/post-start-project.sh
+{%- else %}
 # .env is already sourced by post-start.sh; re-source when run standalone
 if [ -f "$WORKSPACE_DIR/.env" ]; then
   set -a; source "$WORKSPACE_DIR/.env"; set +a
 fi
+{%- endif %}
 
 # The shared helpers (ensure_mcp_server, start_mcp_server, mcp_wait_port, …)
 # are available if custom steps need them:

@@ -11,6 +11,40 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Added
 
+- **New `secrets_source` question (`env` | `keyvault`, default `env`): read
+  the project secrets from Azure Key Vault instead of a cleartext `.env`.**
+  With `env` nothing changes — every script and config file renders
+  byte-identical to the previous release; only `.copier-answers.yml` gains the
+  answer and `.devcontainer/README.md` gains the documentation of the option
+  (checked by `ENV_BASE_REF=<ref> scripts/test-template-render.sh`). With `keyvault`:
+  - `.env.refs` (versioned, `_skip_if_exists`) holds **references only** —
+    `kv://<vault>/<secret>`, `kv://perso/<secret>` (the vault of whoever ran
+    `az login`, resolved through `personnes.conf`), `gh://token` — plus
+    non-secret config in clear. `.env.example` becomes the how-to.
+  - The `secrets` launcher of `4ITServices/4it-azure` (`outils/secrets`) ships
+    as a **frozen copy** in `.devcontainer/secrets/` (commit recorded in
+    `SOURCE`, refreshed by `scripts/secrets-sync.sh [REF]`).
+  - New template-owned `.devcontainer/lib-secrets.sh`: post-create and
+    post-start resolve `.env.refs` **in memory** (no `source .env` anywhere);
+    MCP servers and `post-start-project.sh` (NetBird…) inherit the variables;
+    the `/opt/<server>/.env` symlink is no longer laid down (a stale one is
+    removed); the ECC instance starts without the S/4 variables. Without an
+    `az` session nothing fails: the MCP servers are skipped with the steps to
+    follow.
+  - GitHub without a shared PAT: `gh` (shell function) and `git` over https
+    (`git-credential-secrets` helper for github.com) read the person's
+    `kv://perso/github-pat`. `az login` is the only login.
+  - Terminal: `claude` runs under `secrets run` (falls back, with a warning,
+    when the references do not resolve); `profil <alias>` gives a terminal its
+    own `az` session (`AZURE_CONFIG_DIR`) — for a container shared by two
+    people — and signs its commits with the GitHub account of the token.
+  - `devcontainer.json`: `azure-cli` feature, `az` sessions in the Docker
+    volume `devcontainer-azure-profils` (survives rebuilds),
+    `AZURE_CONFIG_DIR` for the default session.
+  - Docs: `.devcontainer/README.md` « Secrets Key Vault », a secrets section in
+    `CLAUDE.md`. The template repository's own `.devcontainer` dogfoods it
+    (links to the template files, `.env.refs` versioned).
+
 - **New `dbt-project` project type (`project_type: dbt-project`): take over an
   existing dbt BigQuery project and migrate it from dbt Core 1.x to dbt v2,
   both versions side by side in one container.** The repository's `main`

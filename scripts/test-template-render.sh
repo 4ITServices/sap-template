@@ -14,6 +14,9 @@
 # de squelette Python, l'outillage dbt (lib-dbt.sh, git-ssh-garde.sh, dbt.conf, feature gcloud,
 # hub de profils, products.conf et global/ pour la flotte) présent et valide,
 # et rien de tout cela ne fuit dans les autres types.
+# Puis secrets_source : env = rien de Key Vault (identité stricte avec une réf.
+# antérieure si ENV_BASE_REF est donné) ; keyvault = lanceur, .env.refs sans
+# valeur secrète, aucun `source .env`, scripts et JSON valides.
 #
 # Copier rend depuis une réf git : par défaut HEAD du repo courant. Les fichiers
 # NON COMMITÉS ne sont pas pris en compte -> committez avant de tester, ou
@@ -301,6 +304,94 @@ grep -q 'lib-dbt' "$WORK/off/.devcontainer/post-create.sh" "$WORK/off/.devcontai
 for kept in pyproject.toml Dockerfile src/render_test/__init__.py tests/__init__.py .github/workflows/ci.yml CLAUDE.md README.md justfile; do
   [ -f "$WORK/off/$kept" ] && pass "OFF: $kept toujours généré" || bad "OFF: $kept a disparu"
 done
+
+echo "== secrets_source=env (défaut) : rien de Key Vault =="
+grep -q 'secrets_source: env' "$WORK/off/.copier-answers.yml" && pass "ENV: secrets_source=env enregistré" || bad "ENV: secrets_source absent des réponses"
+for leak in .env.refs .devcontainer/lib-secrets.sh .devcontainer/secrets; do
+  [ -e "$WORK/off/$leak" ] && bad "ENV: $leak ne devrait PAS exister" || pass "ENV: pas de $leak"
+done
+grep -qE 'AZURE_CONFIG_DIR|azure-profils|azure-cli' "$WORK/off/$DC" && bad "ENV: devcontainer.json référence Key Vault/az" || pass "ENV: devcontainer.json sans az ni volume"
+grep -q 'source "$WORKSPACE_DIR/.env"' "$WORK/off/.devcontainer/post-start.sh" && pass "ENV: post-start lit toujours .env" || bad "ENV: post-start ne lit plus .env"
+# Identité stricte avec une réf. antérieure (opt-in : ENV_BASE_REF=origin/main) :
+# en mode env, le rendu ne doit différer QUE par .copier-answers.yml (et la
+# doc .devcontainer/README.md, qui décrit l'option dans tous les modes).
+if [ -n "${ENV_BASE_REF:-}" ]; then
+  copier copy --vcs-ref "$ENV_BASE_REF" --defaults --quiet --data project_name=render-test \
+    --data project_description="Render smoke test" --data enable_tmux_claude_code_config=false \
+    "$REPO_ROOT" "$WORK/envbase" >/dev/null 2>&1
+  # .devcontainer/README.md documente l'option dans tous les modes : seule exception
+  d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' | grep -v '\.devcontainer/README\.md' || true)"
+  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF (hors .copier-answers.yml et doc .devcontainer/README.md)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
+else
+  echo "  (identité stricte avec une réf. antérieure : ENV_BASE_REF=<réf> pour l'activer)"
+fi
+
+kv_checks() {  # kv_checks LABEL DIR
+  local L="$1" D="$2" f sh_ok=1 bad_refs
+  for f in .env.refs .env.example .devcontainer/lib-secrets.sh .devcontainer/secrets/personnes.conf \
+           .devcontainer/secrets/SOURCE .devcontainer/secrets/github.refs; do
+    [ -f "$D/$f" ] && pass "$L: $f présent" || bad "$L: $f absent"
+  done
+  for f in secrets git-credential-secrets; do
+    [ -x "$D/.devcontainer/secrets/$f" ] && pass "$L: secrets/$f exécutable" || bad "$L: secrets/$f absent ou non exécutable"
+  done
+  for f in "$D"/.devcontainer/*.sh "$D/.devcontainer/secrets/secrets" "$D/.devcontainer/secrets/git-credential-secrets"; do
+    bash -n "$f" 2>/dev/null || { bad "$L: erreur de syntaxe dans ${f#"$D"/}"; sh_ok=0; }
+  done
+  [ "$sh_ok" -eq 1 ] && pass "$L: tous les scripts passent bash -n"
+  jsonc_ok "$D/$DC" && pass "$L: devcontainer.json valide (JSONC)" || bad "$L: devcontainer.json invalide"
+  python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$D/.mcp.json.example" 2>/dev/null \
+    && pass "$L: .mcp.json.example valide" || bad "$L: .mcp.json.example invalide"
+  [ "$(grep -c 'features/azure-cli' "$D/$DC")" = 1 ] && pass "$L: feature azure-cli (une fois)" || bad "$L: feature azure-cli absente ou en double"
+  grep -q '"AZURE_CONFIG_DIR": "/home/vscode/.azure-profils/defaut"' "$D/$DC" && grep -q 'target=/home/vscode/.azure-profils,type=volume' "$D/$DC" \
+    && pass "$L: sessions az dans un volume (AZURE_CONFIG_DIR)" || bad "$L: volume/AZURE_CONFIG_DIR manquant"
+  if grep -rnE '(source|\.)[[:space:]]+[^#]*\.env"?[[:space:]]*(;|$)' "$D/.devcontainer" | grep -q .; then
+    bad "$L: un script lit encore .env :"; grep -rnE '(source|\.)[[:space:]]+[^#]*\.env"?[[:space:]]*(;|$)' "$D/.devcontainer"
+  else pass "$L: aucun source .env dans .devcontainer/"; fi
+  grep -q 'secrets_override_mcp_link_env' "$D/.devcontainer/post-start.sh" && pass "$L: serveurs MCP sans lien .env" || bad "$L: lien .env des serveurs MCP non neutralisé"
+  # .env.refs : chaque référence est bien formée, et aucune variable « secrète » n'a de valeur en clair
+  bad_refs="$(grep -vE '^[[:space:]]*(#|$)' "$D/.env.refs" | awk -F= '
+    { v = substr($0, index($0, "=") + 1) }
+    v ~ /^(kv|gh):\/\// && v !~ /^(kv:\/\/[A-Za-z0-9-]+\/[A-Za-z0-9-]+|gh:\/\/token)$/ { print "réf. mal formée : " $1 }
+    $1 ~ /(PASSWORD|SECRET|TOKEN|_KEY)$/ && v != "" && v !~ /^(kv|gh):\/\// { print "valeur en clair : " $1 }')"
+  [ -z "$bad_refs" ] && pass "$L: .env.refs sans valeur secrète, références bien formées" || { bad "$L: .env.refs :"; echo "$bad_refs"; }
+  grep -qE '\{\{|\{%' "$D/.env.refs" "$D/.env.example" "$D"/.devcontainer/*.sh "$D/$DC" \
+    && bad "$L: marqueurs Jinja non résolus" || pass "$L: aucun marqueur Jinja non résolu"
+  (cd "$D" && git init -q . 2>/dev/null && ! git check-ignore -q .env.refs && git check-ignore -q .env) \
+    && pass "$L: .env.refs versionnable, .env ignoré" || bad "$L: .gitignore : .env.refs ignoré ou .env suivi"
+}
+
+echo "== secrets_source=keyvault (mcp-server) =="
+if render false "$WORK/kv" --data secrets_source=keyvault; then
+  kv_checks KV "$WORK/kv"
+  grep -q 'kv://perso/github-pat' "$WORK/kv/.env.refs" && pass "KV: jeton GitHub = kv://perso/github-pat" || bad "KV: jeton GitHub non référencé"
+  grep -q 'secrets_sans_refs' "$WORK/kv/.devcontainer/post-start.sh" && pass "KV: instance ECC lancée sans les variables S/4" || bad "KV: instance ECC hérite des variables S/4"
+  # lib-secrets.sh en vrai : az simulé, .env.refs en clair -> secrets_load_env exporte
+  # exactement les variables du fichier, sans toucher au reste
+  mkdir -p "$WORK/kvbin"
+  printf '#!/bin/sh\necho essai@example.com\n' >"$WORK/kvbin/az"; chmod +x "$WORK/kvbin/az"
+  printf 'ESSAI_A=1\nESSAI_B="deux mots"\n' >"$WORK/kv/essai.refs"
+  out="$(PATH="$WORK/kvbin:$WORK/kv/.devcontainer/secrets:$PATH" HOME="$WORK/kvhome" SECRETS_COFFRE_PERSO=x bash -c '
+    mkdir -p "$HOME"; source "$1/.devcontainer/lib-secrets.sh"
+    secrets_load_env "$1/essai.refs" >/dev/null && printf "%s|%s|%s" "$ESSAI_A" "$ESSAI_B" "${PATH_ESSAI_ABSENT:-}"' _ "$WORK/kv")"
+  [ "$out" = "1|deux mots|" ] && pass "KV: secrets_load_env exporte les variables de .env.refs" || bad "KV: secrets_load_env a rendu « $out »"
+else
+  bad "KV: copier a échoué"
+fi
+echo "== secrets_source=keyvault + IaC (azure-cli pas en double) =="
+if render false "$WORK/kviac" --data secrets_source=keyvault --data enable_iac=true --data iac_short_name=rt; then
+  [ "$(grep -c 'features/azure-cli' "$WORK/kviac/$DC")" = 1 ] && pass "KV+IAC: feature azure-cli une seule fois" || bad "KV+IAC: feature azure-cli en double"
+  jsonc_ok "$WORK/kviac/$DC" && pass "KV+IAC: devcontainer.json valide" || bad "KV+IAC: devcontainer.json invalide"
+else
+  bad "KV+IAC: copier a échoué"
+fi
+echo "== secrets_source=keyvault (base) =="
+if render false "$WORK/kvbase" --data secrets_source=keyvault --data project_type=base; then
+  kv_checks KV-BASE "$WORK/kvbase"
+  grep -q 'SAP_' "$WORK/kvbase/.env.refs" && bad "KV-BASE: variables SAP dans .env.refs" || pass "KV-BASE: pas de variable SAP"
+else
+  bad "KV-BASE: copier a échoué"
+fi
 
 echo "== Vérif marqueurs Jinja non résolus (les deux rendus) =="
 if grep -rlE '\{\{|\{%' "$WORK/off" "$WORK/on" --include='*.md' --include='*.conf' --include='*.toml' 2>/dev/null | grep -q .; then
