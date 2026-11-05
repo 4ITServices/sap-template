@@ -81,6 +81,20 @@ same profile share its account: that is how two repos share a login.
 Everything under `~/.claude` becomes per-profile, including user settings,
 skills and plugins. They are seeded once when a repo is migrated and diverge
 afterwards.
+{%- if claude_profile %}
+
+**Model and effort per container.** `/model` and the effort level are saved in
+the user `settings.json`, i.e. the profile's: with one profile per repo they
+belong to that container alone. Before every start, `initializeCommand` runs
+`.devcontainer/claude-profile-host.sh` **on the host**: it creates the profile
+dir, replaces a symlinked `settings.json` / `settings.local.json` / `CLAUDE.md`
+/ `keybindings.json` by a copy of its target (a link to a host path such as
+`~/dotfiles/…` is dangling in the container: settings ignored, and `/model`
+fails with « can't be written (ENOENT) »), and seeds a missing `settings.json`
+once from `~/.claude/settings.json`. A real file is never touched; the host's
+own files are only read. To start again from the host settings, delete
+`~/.claude-profiles/<profile>/settings.json` and restart the container.
+{%- endif %}
 
 **Migrating an existing repo** (the step where history could be lost):
 `scripts/claude-profile-migrate.sh` in the sap-template repo, run **on the

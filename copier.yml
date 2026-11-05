@@ -247,6 +247,8 @@ claude_profile:
     sap-testing) = ~/.claude-profiles/<profil> de l'hôte monté sur ~/.claude :
     login, historique et mémoire propres au profil, persistés côté hôte.
     Donner le même profil à deux dépôts leur fait partager le même compte.
+    Les réglages (/model, effort) vont dans le settings.json du profil : un
+    profil par dépôt = des réglages propres au container.
     Migration de l'historique : .devcontainer/README.md (« Claude profiles »).
   validator: >-
     {% if claude_profile and not (claude_profile | regex_search('^[a-z0-9][a-z0-9_-]{0,62}$')) %}

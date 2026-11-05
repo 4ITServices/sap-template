@@ -1,0 +1,47 @@
+#!/bin/sh
+# =============================================================================
+# claude-profile-host.sh PROFIL — tourne SUR L'HÔTE (initializeCommand), avant
+# chaque démarrage du container (TEMPLATE-OWNED, rendu avec claude_profile).
+#
+# Le container monte ~/.claude-profiles/PROFIL (hôte) sur ~/.claude : son
+# settings.json est celui de CE container. /model et l'effort y écrivent.
+# Un lien symbolique vers un chemin de l'hôte (ex. ~/dotfiles/…) serait cassé
+# dans le container : réglages ignorés, et « can't be written (ENOENT) ».
+#
+#   - dossier du profil absent        → créé (un montage sans source échoue) ;
+#   - fichier de config = lien        → remplacé par une copie de sa cible ;
+#     (settings.json, settings.local.json, CLAUDE.md, keybindings.json)
+#   - settings.json absent / cassé    → copié une fois depuis ~/.claude/settings.json
+#                                       (lien suivi), sinon {} ;
+#   - vrai fichier                    → jamais touché : il est au container.
+# Ne lit que ~/.claude ; n'écrit que dans le dossier du profil. Rend toujours 0 :
+# ne bloque jamais le démarrage. sh POSIX (bash 3.2 de macOS, Linux).
+# =============================================================================
+p="${1:-}"
+case "$p" in "" | */* | *..*) echo "claude-profile-host: profil invalide « $p »" >&2; exit 0 ;; esac
+dir="$HOME/.claude-profiles/$p"
+mkdir -p "$dir" || exit 0
+
+for f in settings.json settings.local.json CLAUDE.md keybindings.json; do
+  c="$dir/$f"
+  [ -L "$c" ] || continue
+  if [ -f "$c" ]; then
+    # cible lisible ici (hôte) : copie, puis le renommage remplace le lien
+    cp "$c" "$c.tmp.$$" && mv -f "$c.tmp.$$" "$c" && echo "claude-profile-host: $p/$f : lien remplacé par une copie de sa cible"
+  else
+    rm -f "$c" && echo "claude-profile-host: $p/$f : lien cassé retiré"
+  fi
+  rm -f "$c.tmp.$$"
+done
+
+c="$dir/settings.json"
+if [ ! -e "$c" ]; then
+  if [ -f "$HOME/.claude/settings.json" ]; then
+    cp "$HOME/.claude/settings.json" "$c.tmp.$$" && mv -f "$c.tmp.$$" "$c" \
+      && echo "claude-profile-host: $p/settings.json créé depuis ~/.claude/settings.json"
+  else
+    printf '{}\n' >"$c" && echo "claude-profile-host: $p/settings.json créé vide"
+  fi
+  rm -f "$c.tmp.$$"
+fi
+exit 0

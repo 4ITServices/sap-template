@@ -65,6 +65,21 @@ and commit messages; this changelog starts at v0.8.12.
   - Piloted on sap-excel (rebuild without cache, then every check without any
     `.env`); the defects it found are fixed above.
 
+- **`claude_profile`: model and effort level per container.** `/model` and
+  the effort level are saved in the user `settings.json`, i.e. the profile's;
+  but a `settings.json` symlinked to a host path (`~/dotfiles/…`) is dangling
+  in the container — settings silently ignored, and `/model` fails with
+  « couldn't save it as your default: ~/.claude/settings.json can't be written
+  (ENOENT) ». `initializeCommand` now also runs the new template-owned
+  `.devcontainer/claude-profile-host.sh` **on the host** before every start:
+  a symlinked `settings.json` / `settings.local.json` / `CLAUDE.md` /
+  `keybindings.json` of the profile becomes a copy of its target, a missing
+  `settings.json` is seeded once from `~/.claude/settings.json`, a real file
+  is never touched, the host's files are only read.
+  `scripts/claude-profile-migrate.sh` copies a symlinked config entry as its
+  target (`cp -L`) and replaces a dangling link already in the profile.
+  Rendered only with a profile: without one nothing changes.
+
 - **New `enable_dotnet` question (default `false`) with `dotnet_version`
   (default `10.0`)** for projects with C#: the `devcontainers/dotnet` feature
   and a Docker volume `devcontainer-nuget-packages` on `~/.nuget/packages`

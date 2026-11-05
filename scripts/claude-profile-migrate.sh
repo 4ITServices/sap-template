@@ -243,7 +243,14 @@ fail=0
 say ""
 say "== Applying"
 for e in $CONFIG; do
-  if [ -e "$SRC/$e" ] && [ ! -e "$DEST/$e" ]; then cp -R -p "$SRC/$e" "$DEST/$e"; say "   copied $e"; fi
+  # A symlinked entry (e.g. settings.json -> ~/dotfiles/…) is copied as its
+  # TARGET (-L): the link would be dangling in the container. A dangling link
+  # already in the profile is replaced.
+  [ -L "$DEST/$e" ] && [ ! -e "$DEST/$e" ] && rm -f "$DEST/$e"
+  if [ -e "$SRC/$e" ] && [ ! -e "$DEST/$e" ]; then
+    if [ -L "$SRC/$e" ]; then cp -R -p -L "$SRC/$e" "$DEST/$e"; say "   copied $e (symlink dereferenced)"
+    else cp -R -p "$SRC/$e" "$DEST/$e"; say "   copied $e"; fi
+  fi
 done
 
 for name in $SELECTED; do

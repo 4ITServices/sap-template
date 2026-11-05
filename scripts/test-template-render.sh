@@ -121,6 +121,7 @@ echo "== claude_profile vide (rendu OFF) : montage historique, à l'identique ==
 grep -qxF "    $LEGACY_MOUNT" "$WORK/off/$DC" && pass "OFF: montage ~/.claude historique" || bad "OFF: montage historique absent/modifié"
 grep -qxF "  $LEGACY_INIT" "$WORK/off/$DC" && pass "OFF: initializeCommand historique" || bad "OFF: initializeCommand modifié"
 grep -q 'claude-profiles' "$WORK/off/$DC" && bad "OFF: référence à .claude-profiles" || pass "OFF: aucune référence à .claude-profiles"
+[ -e "$WORK/off/.devcontainer/claude-profile-host.sh" ] && bad "OFF: claude-profile-host.sh rendu sans profil" || pass "OFF: pas de claude-profile-host.sh sans profil"
 jsonc_ok "$WORK/off/$DC" && pass "OFF: devcontainer.json valide (JSONC)" || bad "OFF: devcontainer.json invalide"
 
 echo "== claude_profile=render-profile : montage du profil =="
@@ -128,8 +129,32 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
   PROF_SRC='${localEnv:HOME}/.claude-profiles/render-profile'
   grep -qF "\"source=$PROF_SRC,target=/home/vscode/.claude,type=bind\"" "$WORK/prof/$DC" \
     && pass "PROFIL: ~/.claude-profiles/render-profile monté sur ~/.claude" || bad "PROFIL: montage du profil absent"
-  grep -qF "\"initializeCommand\": \"mkdir -p \\\"$PROF_SRC\\\"\"" "$WORK/prof/$DC" \
-    && pass "PROFIL: initializeCommand crée CE dossier (même chemin que la source)" || bad "PROFIL: initializeCommand ne crée pas le dossier du profil"
+  grep -qF "\"initializeCommand\": \"mkdir -p \\\"$PROF_SRC\\\" && sh \\\"\${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\\\" \\\"render-profile\\\"\"" "$WORK/prof/$DC" \
+    && pass "PROFIL: initializeCommand crée CE dossier puis lance claude-profile-host.sh" || bad "PROFIL: initializeCommand incomplet"
+  # claude-profile-host.sh, sur un faux HOME d'hôte : settings.json propre au container
+  CPH="$WORK/prof/.devcontainer/claude-profile-host.sh"
+  [ -f "$CPH" ] && sh -n "$CPH" && pass "PROFIL: claude-profile-host.sh présent, sh -n OK" || bad "PROFIL: claude-profile-host.sh absent ou invalide"
+  hh="$WORK/hote"; pd="$hh/.claude-profiles/render-profile"
+  mkdir -p "$hh/dotfiles/claude" "$hh/.claude"
+  echo '{"model":"dotfiles"}' >"$hh/dotfiles/claude/settings.json"
+  ln -s "$hh/dotfiles/claude/settings.json" "$hh/.claude/settings.json"
+  HOME="$hh" sh "$CPH" render-profile >/dev/null; rc=$?
+  [ "$rc" = 0 ] && [ -f "$pd/settings.json" ] && [ ! -L "$pd/settings.json" ] && grep -q dotfiles "$pd/settings.json" \
+    && pass "PROFIL/host: profil neuf → settings.json créé depuis ~/.claude (lien suivi)" || bad "PROFIL/host: création du settings.json"
+  echo '{"model":"opus","effortLevel":"high"}' >"$pd/settings.json"
+  HOME="$hh" sh "$CPH" render-profile >/dev/null
+  grep -q '"effortLevel":"high"' "$pd/settings.json" && pass "PROFIL/host: vrai fichier jamais touché (/model du container gardé)" || bad "PROFIL/host: settings.json du profil écrasé"
+  rm "$pd/settings.json"; ln -s "$hh/dotfiles/claude/settings.json" "$pd/settings.json"
+  HOME="$hh" sh "$CPH" render-profile >/dev/null
+  [ ! -L "$pd/settings.json" ] && grep -q dotfiles "$pd/settings.json" && [ -L "$hh/.claude/settings.json" ] && grep -q dotfiles "$hh/dotfiles/claude/settings.json" \
+    && pass "PROFIL/host: lien valide → copie de sa cible (dotfiles intacts)" || bad "PROFIL/host: lien valide mal traité"
+  rm "$pd/settings.json"; ln -s /Users/absent/dotfiles/claude/settings.json "$pd/settings.json"
+  HOME="$hh" sh "$CPH" render-profile >/dev/null
+  [ ! -L "$pd/settings.json" ] && grep -q dotfiles "$pd/settings.json" && pass "PROFIL/host: lien cassé → retiré puis recréé depuis ~/.claude" || bad "PROFIL/host: lien cassé mal traité"
+  rm -rf "$hh/.claude" "$pd"; HOME="$hh" sh "$CPH" render-profile >/dev/null
+  [ "$(cat "$pd/settings.json" 2>/dev/null)" = "{}" ] && pass "PROFIL/host: sans ~/.claude → {}" || bad "PROFIL/host: pas de settings.json vide"
+  HOME="$hh" sh "$CPH" ../x >/dev/null 2>&1; rc=$?
+  [ "$rc" = 0 ] && [ ! -e "$hh/.claude-profiles/../x" ] && [ ! -e "$hh/x" ] && pass "PROFIL/host: profil « ../x » ignoré, sortie 0" || bad "PROFIL/host: « ../x » mal traité"
   grep -qF "$LEGACY_MOUNT" "$WORK/prof/$DC" && bad "PROFIL: le ~/.claude partagé est encore monté" || pass "PROFIL: ~/.claude partagé non monté"
   jsonc_ok "$WORK/prof/$DC" && pass "PROFIL: devcontainer.json valide (JSONC)" || bad "PROFIL: devcontainer.json invalide"
 else

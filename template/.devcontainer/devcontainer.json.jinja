@@ -61,7 +61,10 @@
 
   // Host-side, before the container is created: the profile dir must exist,
   // since a missing bind source aborts `docker run --mount` (no auto-create).
-  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"{% if dbt_workspace %} \"${localEnv:HOME}/.config/gcloud\"{% endif %}",
+  // claude-profile-host.sh then makes its settings.json a REAL file (a symlink
+  // to a host path, e.g. ~/dotfiles, is dangling in the container): /model and
+  // the effort level are saved per container, the host's files are never written.
+  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.claude-profiles/{{ claude_profile }}\"{% if dbt_workspace %} \"${localEnv:HOME}/.config/gcloud\"{% endif %} && sh \"${localWorkspaceFolder}/.devcontainer/claude-profile-host.sh\" \"{{ claude_profile }}\"",
 {%- else %}
 
   "initializeCommand": "mkdir -p ${HOME}/.claude{% if dbt_workspace %} ${HOME}/.config/gcloud{% endif %}",

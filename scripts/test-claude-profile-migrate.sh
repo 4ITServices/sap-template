@@ -151,6 +151,20 @@ done
 "$SH" "$MIGRATE" --src "$SRC" --profiles "$SRC/profiles" --profile ok --repo demo >/dev/null 2>&1; rc=$?
 check "refusé : profil à l intérieur de la source" '[ "$rc" -eq 2 ]'
 
+echo "== 8. config en lien symbolique (dotfiles) : copiée comme sa cible"
+mkdir -p "$WORK/dotfiles" "$PROFILES/demo-lien"
+echo '{"ctrl+k":"x"}' > "$WORK/dotfiles/keybindings.json"
+ln -s "$WORK/dotfiles/keybindings.json" "$SRC/keybindings.json"
+ln -s /Users/absent/dotfiles/CLAUDE.md "$PROFILES/demo-lien/CLAUDE.md"   # lien cassé déjà dans le profil
+echo 'regles' > "$WORK/dotfiles/CLAUDE.md"; ln -s "$WORK/dotfiles/CLAUDE.md" "$SRC/CLAUDE.md"
+old "$SRC"
+run --profile demo-lien --repo demo --apply >/dev/null 2>&1; rc=$?
+D2="$PROFILES/demo-lien"
+check "migration OK (exit 0)" '[ "$rc" -eq 0 ]'
+check "keybindings.json : vrai fichier, contenu de la cible" '[ -f "$D2/keybindings.json" ] && [ ! -L "$D2/keybindings.json" ] && grep -q ctrl+k "$D2/keybindings.json"'
+check "lien cassé du profil remplacé par la cible" '[ ! -L "$D2/CLAUDE.md" ] && grep -q regles "$D2/CLAUDE.md"'
+check "source intacte (toujours un lien)" '[ -L "$SRC/keybindings.json" ]'
+
 echo
 if [ "$fail" -eq 0 ]; then echo -e "\033[32mTOUS LES CONTRÔLES PASSENT\033[0m ($SH)"; else echo -e "\033[31mECHECS DETECTES\033[0m ($SH)"; fi
 exit "$fail"
