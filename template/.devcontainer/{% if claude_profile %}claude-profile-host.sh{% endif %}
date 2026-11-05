@@ -47,11 +47,13 @@ mig="$(cd "$(dirname "$0")" && pwd)/claude-profile-migrate.sh"
 if [ -n "$ws" ] && [ -f "$mig" ] && [ -d "$HOME/.claude/projects" ] && [ ! -e "$dir/.migrated-$ws" ]; then
   log="$dir/.migrate-$ws.log"
   slug=$(printf '%s' "/workspaces/$ws" | sed 's/[^a-zA-Z0-9]/-/g')
-  # Une session de ce dépôt vient d'écrire (container arrêté à l'instant) :
-  # attendre qu'elle se taise, la migration refuse les fichiers vivants.
+  # Une session de ce dépôt vient d'écrire, dans ~/.claude ou dans le profil
+  # (container arrêté à l'instant) : attendre qu'elle se taise, la migration
+  # refuse les fichiers vivants.
   n=0
-  while [ "$n" -lt 10 ] && [ -n "$(find "$HOME/.claude/projects/$slug" "$HOME/.claude/projects/$slug"-* -type f -mmin -2 2>/dev/null | head -n 1)" ]; do
-    [ "$n" = 0 ] && echo "claude-profile-host: une session de $ws vient d'écrire dans ~/.claude, attente (2 min 30 au plus)…"
+  while [ "$n" -lt 10 ] && [ -n "$(find "$HOME/.claude/projects/$slug" "$HOME/.claude/projects/$slug"-* \
+      "$dir/history.jsonl" "$dir/projects/$slug" -type f -mmin -2 2>/dev/null | head -n 1)" ]; do
+    [ "$n" = 0 ] && echo "claude-profile-host: une session de $ws vient d'écrire (~/.claude ou le profil), attente (2 min 30 au plus)…"
     sleep "${CLAUDE_PROFILE_WAIT:-15}"; n=$((n + 1))
   done
   if sh "$mig" --profile "$p" --workspace "/workspaces/$ws" --apply >"$log" 2>&1; then

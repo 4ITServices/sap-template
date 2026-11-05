@@ -191,6 +191,12 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
   touch -t 202001010000 "$sp/s1.jsonl"
   HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
   [ -e "$pm/.migrated-repo-a" ] && [ -f "$pm/projects/-workspaces-repo-a/s1.jsonl" ] && pass "MIGR: démarrage suivant → migré" || bad "MIGR: pas de reprise après report"
+  rm -f "$pm/.migrated-repo-a"; touch "$pm/history.jsonl"
+  out=$(HOME="$hm" CLAUDE_PROFILE_WAIT=0 sh "$CPH" render-profile repo-a 2>&1)
+  [ ! -e "$pm/.migrated-repo-a" ] && echo "$out" | grep -q "attente" && echo "$out" | grep -q "nouvel essai" \
+    && pass "MIGR: profil écrit à l'instant (sap-excel) → attente puis report" || bad "MIGR: profil vivant mal traité : $out"
+  touch -t 202001010000 "$pm/history.jsonl"; HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  [ -e "$pm/.migrated-repo-a" ] && pass "MIGR: profil au repos → fusion faite" || bad "MIGR: pas de fusion après report"
   rm -rf "$pm"; HOME="$hm" sh "$CPH" render-profile >/dev/null 2>&1
   [ ! -e "$pm/projects" ] && [ -f "$pm/settings.json" ] && pass "MIGR: sans 2e argument (ancien devcontainer.json) → pas de migration" || bad "MIGR: migration sans dépôt"
   HOME="$hm" sh "$CPH" render-profile ../x >/dev/null 2>&1; rc=$?
