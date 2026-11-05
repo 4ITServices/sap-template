@@ -50,13 +50,14 @@ devcontainer.json
 5. Install Claude Code CLI
 6. Python dependencies (`uv sync`)
 7. Git submodules init
-8. Bootstrap `.env` / `.mcp.json` from examples
+8. Bootstrap {% if secrets_source == 'keyvault' %}`.mcp.json` from its example (no `.env`: `.env.refs` + Key Vault){% else %}`.env` / `.mcp.json` from examples{% endif %}
 9. MCP servers install (`lib-mcp.sh` over `mcp-servers.conf`)
 
 **post-start.sh** (runs on every start):
 1. Claude alias (`--dangerously-skip-permissions` in .bashrc)
-2. `chmod 600` on sensitive files (.env, .mcp.json)
-3. Source `.env` (or, with `secrets_source: keyvault`, resolve `.env.refs` from Key Vault in memory)
+2. `chmod 600` on sensitive files ({% if secrets_source == 'keyvault' %}.env.ecc, any leftover `.env*`, .mcp.json{% else %}.env, .mcp.json{% endif %})
+3. {% if secrets_source == 'keyvault' %}Resolve `.env.refs` from Key Vault in memory (`lib-secrets.sh`) — output
+   also kept in `~/.local/state/devcontainer/post-start.log`{% else %}Source `.env`{% endif %}
 4. MCP servers: self-heal (re-clone if absent/broken), update, launch,
    port health-check (`lib-mcp.sh` over `mcp-servers.conf`)
 
@@ -95,6 +96,7 @@ It never copies `.credentials.json` (you `/login` again), `backups/` or
 runtime state. Then `copier update` with the profile, rebuild, `/login`, and
 check with `claude --resume`. To roll back, set `claude_profile` back to empty
 and rebuild: `~/.claude` was never modified.
+{%- if secrets_source == 'keyvault' %}
 
 ## Secrets Key Vault (`secrets_source: keyvault`)
 
@@ -114,7 +116,7 @@ SAP_URL=https://192.168.50.112:44300                         # configuration non
 | Pièce | Où | Rôle |
 |---|---|---|
 | `secrets/secrets`, `secrets/personnes.conf` | copie **figée** de `4ITServices/4it-azure/outils/secrets` (commit dans `secrets/SOURCE`) | le lanceur : `run`, `check`, `qui`, `set`, `mcp-headers`. Mise à jour : `scripts/secrets-sync.sh [REF]` dans sap-template, puis une version du modèle |
-| `secrets/git-credential-secrets`, `secrets/github.refs` | modèle | assistant d'identifiants git pour `https://github.com` → `kv://perso/github-pat` |
+| `secrets/git-credential-secrets` | modèle | jeton GitHub de `git` (https://github.com) et de `gh` : voir « Jeton GitHub » |
 | `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude`, `gh` |
 | `.env.refs` | **projet** (`_skip_if_exists`) | les références du projet ; `copier update` ne l'écrase jamais |
 | volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, partagé par les containers du même Docker host |
@@ -133,6 +135,23 @@ bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les s
 terminal), `git` en https (assistant d'identifiants), `claude` (lancé sous
 `secrets run`), les serveurs MCP et les hooks projet (post-start).
 
+### Jeton GitHub (git, gh)
+
+`git` en https et la fonction `gh` prennent la **première** de ces références :
+
+1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. pour un essai) ;
+2. `GH_TOKEN`, sinon `GITHUB_PERSONAL_ACCESS_TOKEN`, dans le `.env.refs` du
+   dépôt courant, puis dans celui du workspace — s'ils valent une référence
+   (`kv://…`, `gh://token`), pas une valeur en clair ;
+3. `kv://perso/github-pat`.
+
+Un projet qui a son propre PAT fin le déclare donc dans `.env.refs`, par exemple
+`GH_TOKEN=kv://perso/github-pat-sap-excel`. `git-credential-secrets ref` affiche
+la référence retenue (jamais la valeur). Sous `claude` ou dans post-start (lancés
+sous `secrets run`), le `GH_TOKEN` déjà présent dans l'environnement sert tel
+quel. Après un changement de `.env.refs`, un nouveau terminal (ou
+`unset _SECRETS_GH`) relit le jeton de `gh`.
+
 ### Ce que fait le cycle de vie
 
 - **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
@@ -141,13 +160,25 @@ terminal), `git` en https (assistant d'identifiants), `claude` (lancé sous
   `post-start-project.sh` (NetBird…) en **héritent** : pydantic-settings lit
   l'environnement avant tout fichier. Le lien `/opt/<serveur>/.env` n'est plus
   posé, et celui d'une version antérieure est retiré.
+- **Journal** : la sortie de post-start est aussi écrite dans
+  `~/.local/state/devcontainer/post-start.log` (la précédente en `.1`), lisible
+  depuis un terminal ou Claude Code — on y retrouve « N variable(s) chargée(s) ».
+  Aucune valeur n'y figure ; un hook projet (`post-start-project.sh`) ne doit
+  pas en afficher non plus.
+- **Serveurs MCP déjà lancés** : post-start garde un serveur qui répond, avec
+  les variables reçues à son lancement. Il l'arrête puis le relance quand
+  `.env.refs` a changé depuis le passage précédent (empreinte dans
+  `~/.local/state/devcontainer/env-refs.sha256`). Pour une valeur changée dans
+  le coffre (même référence) : `bash .devcontainer/post-start.sh --relance-mcp`
+  (ou `/opt/<serveur>/scripts/mcp-server.sh stop`, puis post-start).
 - **Sans session az** (premier build) : rien n'échoue. Les serveurs MCP sont
   sautés avec la marche à suivre ; après `az login`, relancer
   `bash .devcontainer/post-start.sh` ou redémarrer le container.
 - **Instance ECC** (`.env.ecc`) : toujours lue dans son fichier ; elle est lancée
   **sans** les variables de `.env.refs`, qui masqueraient les siennes.
 - **`.env` restant** : ignoré par les scripts du container, jamais supprimé
-  d'office (post-start le signale). Attention : un programme qui lit `.env`
+  d'office (post-start le signale et le passe en 600 ; `.gitignore` ignore tout
+  `.env*` sauf `.env.refs` et les `*.example`). Attention : un programme qui lit `.env`
   lui-même (pydantic-settings `env_file=".env"`, python-dotenv, `set dotenv-load`
   de just) y prend encore les variables **absentes** de l'environnement. Le
   supprimer quand `.env.refs` couvre tout.
@@ -190,6 +221,24 @@ Les coffres, groupes et droits vivent dans `4ITServices/4it-azure`
 (`tofu/stacks/secrets`). Ajouter une personne : sa ligne dans `personnes.conf`
 de 4it-azure, `tofu apply`, puis `scripts/secrets-sync.sh` ici et une version du
 modèle. Le hub, la CI et les déploiements lisent Key Vault par identité managée.
+{%- endif %}
+{%- if enable_dotnet %}
+
+## .NET (`enable_dotnet`)
+
+The .NET SDK {{ dotnet_version }} comes from the `devcontainers/dotnet` feature
+(`/usr/share/dotnet`, on the PATH: launch `dotnet`, never `~/.dotnet/dotnet`).
+The NuGet cache `~/.nuget/packages` is the Docker volume
+`devcontainer-nuget-packages`, shared by the containers of the Docker host: it
+survives a rebuild (even without cache), like the `obj/project.assets.json` of
+the workspace, so the C# extension finds every package on the first start —
+no `dotnet restore` needed in a project hook. Inspect or reset it with
+`docker volume inspect|rm devcontainer-nuget-packages` (from the host, all
+containers using it stopped). After such a reset, or if the C# extension still
+reports missing packages, `dotnet restore` then « Developer: Reload Window ».
+VS Code does not wait for post-create (`waitFor`) on purpose: the volume leaves
+nothing to wait for, and waiting would delay every first open by minutes.
+{%- endif %}
 
 ## Managed MCP servers (mcp-servers.conf)
 
@@ -197,11 +246,14 @@ modèle. Le hub, la CI et les déploiements lisent Key Vault par identité manag
 manages — one `NAME REPO [REF] [PORT]` line per server (`-` = unset). The
 file is **project-owned** (`_skip_if_exists`): add or pin servers there,
 and the template-owned engine (`lib-mcp.sh`, updated by `copier update`)
-takes care of cloning into `/opt/<NAME>`, building (uv/npm), symlinking
-`.env`, launching `scripts/mcp-server.sh start` and waiting for the port.
+takes care of cloning into `/opt/<NAME>`, building (uv/npm), {% if secrets_source == 'keyvault' %}passing
+the variables of `.env.refs` (resolved from Key Vault; no `.env` symlink){% else %}symlinking
+`.env`{% endif %}, launching `scripts/mcp-server.sh start` and waiting for the port.
 
-Self-healing: if the first build could not clone (typically an empty
-`GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`), fill the token and simply
+Self-healing: if the first build could not clone (typically {% if secrets_source == 'keyvault' %}no `az login`
+yet, or a `GITHUB_PERSONAL_ACCESS_TOKEN` reference of `.env.refs` that does not
+resolve — `secrets check`), fix it and simply{% else %}an empty
+`GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`), fill the token and simply{% endif %}
 **restart** the container — post-start repairs the install, no rebuild
 needed. Broken half-clones are detected (not a valid git work tree) and
 re-cloned. Install/build details are logged to `/tmp/<NAME>.log`.
@@ -345,7 +397,7 @@ product side learns about the coordinator from the « Coordination » section
 of its `CLAUDE.md` (copier answer `fleet_coordinator`, set by
 `just product-new`). Hooks
 fetch the homes with the workspace token (`GITHUB_PERSONAL_ACCESS_TOKEN`,
-`.env`) for that invocation only. The rest is the single-product machinery,
+{% if secrets_source == 'keyvault' %}`.env.refs`{% else %}`.env`{% endif %}) for that invocation only. The rest is the single-product machinery,
 product by product: pinned host keys, locked and self-repairing worktrees,
 the profile hub (one profile per name asked by a product or by `global/`,
 appended when missing), the write guard.
@@ -484,7 +536,8 @@ cp .mcp.json.example .mcp.json
 ```
 
 Les credentials SAP (SAP_URL, SAP_USER, SAP_PASSWORD, etc.) sont lus automatiquement
-depuis `.env` par pydantic-settings. Le `.mcp.json` ne contient que la config
+{% if secrets_source == 'keyvault' %}dans l'environnement du serveur par pydantic-settings : post-start les y met,
+résolus depuis Key Vault (`.env.refs`).{% else %}depuis `.env` par pydantic-settings.{% endif %} Le `.mcp.json` ne contient que la config
 structurelle (commandes, chemins). Pas de secrets dedans.
 
 ## Post-`copier update` checklist

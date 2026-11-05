@@ -100,7 +100,7 @@ else
 fi
 
 # =============================================================================
-# 8. Bootstrap .env and .mcp.json from examples
+# 8. Bootstrap {% if secrets_source == 'keyvault' %}.mcp.json from its example (no .env: .env.refs + Key Vault){% else %}.env and .mcp.json from examples{% endif %}
 # =============================================================================
 echo "[8/9] Bootstrap config files..."
 {%- if secrets_source == 'keyvault' %}

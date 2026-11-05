@@ -1,4 +1,0 @@
-# Jeton GitHub de la personne connectée à az (son coffre perso), lu par
-# git-credential-secrets et par la fonction `gh` de lib-secrets.sh.
-# Le déposer une fois : secrets set kv://perso/github-pat
-GH_TOKEN=kv://perso/github-pat

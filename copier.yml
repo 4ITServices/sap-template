@@ -268,6 +268,21 @@ secrets_source:
     sessions az et les commandes de terminal profil / claude / gh.
     Voir .devcontainer/README.md (« Secrets Key Vault »).
 
+enable_dotnet:
+  type: bool
+  default: false
+  help: >-
+    Le projet contient-il du .NET (C#) ? Ajoute le SDK (feature dotnet) et un
+    volume Docker pour le cache NuGet (~/.nuget/packages) : les paquets
+    survivent au rebuild, et les obj/project.assets.json du dossier de travail
+    ne pointent plus vers des paquets disparus (alertes de l'extension C#).
+
+dotnet_version:
+  type: str
+  default: "10.0"
+  help: "Version du SDK .NET (feature devcontainers/dotnet, ex: 10.0, 8.0)"
+  when: "{{ enable_dotnet }}"
+
 workspace_color:
   type: str
   help: "Couleur de la barre d'activité VS Code (hex, ex: #6B7280)"

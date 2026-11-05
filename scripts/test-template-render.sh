@@ -312,16 +312,17 @@ for leak in .env.refs .devcontainer/lib-secrets.sh .devcontainer/secrets; do
 done
 grep -qE 'AZURE_CONFIG_DIR|azure-profils|azure-cli' "$WORK/off/$DC" && bad "ENV: devcontainer.json référence Key Vault/az" || pass "ENV: devcontainer.json sans az ni volume"
 grep -q 'source "$WORKSPACE_DIR/.env"' "$WORK/off/.devcontainer/post-start.sh" && pass "ENV: post-start lit toujours .env" || bad "ENV: post-start ne lit plus .env"
+grep -qE 'nuget|dotnet' "$WORK/off/$DC" && bad "ENV: devcontainer.json référence .NET sans enable_dotnet" || pass "ENV: pas de .NET sans enable_dotnet"
+grep -qE 'Key Vault|\.env\.refs|post-start\.log|relance-mcp' "$WORK/off/.devcontainer/README.md" "$WORK/off/.devcontainer/lib-mcp.sh" "$WORK/off/.devcontainer/post-start.sh" \
+  && bad "ENV: doc ou scripts parlent de Key Vault" || pass "ENV: doc et scripts sans Key Vault"
 # Identité stricte avec une réf. antérieure (opt-in : ENV_BASE_REF=origin/main) :
-# en mode env, le rendu ne doit différer QUE par .copier-answers.yml (et la
-# doc .devcontainer/README.md, qui décrit l'option dans tous les modes).
+# en mode env, le rendu ne doit différer QUE par .copier-answers.yml.
 if [ -n "${ENV_BASE_REF:-}" ]; then
   copier copy --vcs-ref "$ENV_BASE_REF" --defaults --quiet --data project_name=render-test \
     --data project_description="Render smoke test" --data enable_tmux_claude_code_config=false \
     "$REPO_ROOT" "$WORK/envbase" >/dev/null 2>&1
-  # .devcontainer/README.md documente l'option dans tous les modes : seule exception
-  d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' | grep -v '\.devcontainer/README\.md' || true)"
-  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF (hors .copier-answers.yml et doc .devcontainer/README.md)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
+  d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' || true)"
+  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF (hors .copier-answers.yml)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
 else
   echo "  (identité stricte avec une réf. antérieure : ENV_BASE_REF=<réf> pour l'activer)"
 fi
@@ -329,7 +330,7 @@ fi
 kv_checks() {  # kv_checks LABEL DIR
   local L="$1" D="$2" f sh_ok=1 bad_refs
   for f in .env.refs .env.example .devcontainer/lib-secrets.sh .devcontainer/secrets/personnes.conf \
-           .devcontainer/secrets/SOURCE .devcontainer/secrets/github.refs; do
+           .devcontainer/secrets/SOURCE; do
     [ -f "$D/$f" ] && pass "$L: $f présent" || bad "$L: $f absent"
   done
   for f in secrets git-credential-secrets; do
@@ -359,6 +360,18 @@ kv_checks() {  # kv_checks LABEL DIR
     && bad "$L: marqueurs Jinja non résolus" || pass "$L: aucun marqueur Jinja non résolu"
   (cd "$D" && git init -q . 2>/dev/null && ! git check-ignore -q .env.refs && git check-ignore -q .env) \
     && pass "$L: .env.refs versionnable, .env ignoré" || bad "$L: .gitignore : .env.refs ignoré ou .env suivi"
+  # défaut 3 : un .env mis de côté est ignoré, les modèles et .env.refs non
+  (cd "$D" && git check-ignore -q .env.avant-keyvault && git check-ignore -q .env.bak && git check-ignore -q .env.ecc \
+     && ! git check-ignore -q .env.example && ! git check-ignore -q .env.ecc.example && ! git check-ignore -q .envrc) \
+    && pass "$L: .gitignore : .env.* ignorés sauf .env.refs et *.example" || bad "$L: .gitignore : motifs .env.* incorrects"
+  # défaut 4 : plus aucun texte qui renvoie au .env
+  if grep -nE 'Fill it in .*\.env[^.]|in \.env\.|Fix \.env|depuis `\.env` par pydantic|reads \.env at runtime|symlinking$' \
+       "$D/.devcontainer/lib-mcp.sh" "$D/.devcontainer/README.md" "$D/$DC" "$D/.devcontainer/post-create.sh" | grep -q .; then
+    bad "$L: textes qui renvoient encore au .env :"; grep -nE 'Fill it in .*\.env[^.]|in \.env\.|Fix \.env|depuis `\.env` par pydantic|reads \.env at runtime|symlinking$' \
+       "$D/.devcontainer/lib-mcp.sh" "$D/.devcontainer/README.md" "$D/$DC" "$D/.devcontainer/post-create.sh"
+  else pass "$L: aucun texte ne renvoie au .env (lib-mcp, README, devcontainer.json, post-create)"; fi
+  grep -q 'Bootstrap .env' "$D/.devcontainer/post-create.sh" && bad "$L: post-create annonce un bootstrap .env" || pass "$L: post-create sans bootstrap .env"
+  grep -q 'chmod 600 "$WORKSPACE_DIR/.env" ' "$D/.devcontainer/post-start.sh" && bad "$L: post-start vise encore .env seul" || pass "$L: post-start protège tout .env* restant"
 }
 
 echo "== secrets_source=keyvault (mcp-server) =="
@@ -375,6 +388,75 @@ if render false "$WORK/kv" --data secrets_source=keyvault; then
     mkdir -p "$HOME"; source "$1/.devcontainer/lib-secrets.sh"
     secrets_load_env "$1/essai.refs" >/dev/null && printf "%s|%s|%s" "$ESSAI_A" "$ESSAI_B" "${PATH_ESSAI_ABSENT:-}"' _ "$WORK/kv")"
   [ "$out" = "1|deux mots|" ] && pass "KV: secrets_load_env exporte les variables de .env.refs" || bad "KV: secrets_load_env a rendu « $out »"
+
+  # --- défaut 1 : jeton GitHub par projet ---
+  H="$WORK/kv/.devcontainer/secrets/git-credential-secrets"
+  ref_de() { (cd "$1" && env -u SECRETS_GITHUB_REF -u SECRETS_WORKSPACE "$H" ref); }
+  [ "$(ref_de "$WORK/kv")" = "kv://perso/github-pat" ] && pass "KV/1: .env.refs du modèle → kv://perso/github-pat" || bad "KV/1: réf. du modèle : $(ref_de "$WORK/kv")"
+  mkdir -p "$WORK/gh1" "$WORK/gh2" "$WORK/gh3" "$WORK/gh4"
+  printf 'GITHUB_PERSONAL_ACCESS_TOKEN=kv://perso/github-pat-sap-excel\nGH_TOKEN="kv://perso/github-pat-sap-excel"  # PAT fin\n' >"$WORK/gh1/.env.refs"
+  printf 'GITHUB_PERSONAL_ACCESS_TOKEN=kv://kv-4it-dev-partage/pat-projet\n' >"$WORK/gh2/.env.refs"
+  printf 'GH_TOKEN=pas-une-reference\nexport GITHUB_PERSONAL_ACCESS_TOKEN=kv://perso/autre\n' >"$WORK/gh3/.env.refs"
+  [ "$(ref_de "$WORK/gh1")" = "kv://perso/github-pat-sap-excel" ] && pass "KV/1: GH_TOKEN (guillemets, commentaire) retenu" || bad "KV/1: gh1 → $(ref_de "$WORK/gh1")"
+  [ "$(ref_de "$WORK/gh2")" = "kv://kv-4it-dev-partage/pat-projet" ] && pass "KV/1: GITHUB_PERSONAL_ACCESS_TOKEN à défaut de GH_TOKEN" || bad "KV/1: gh2 → $(ref_de "$WORK/gh2")"
+  [ "$(ref_de "$WORK/gh3")" = "kv://perso/autre" ] && pass "KV/1: valeur en clair ignorée, export accepté" || bad "KV/1: gh3 → $(ref_de "$WORK/gh3")"
+  [ "$(ref_de "$WORK/gh4")" = "kv://perso/github-pat" ] && pass "KV/1: sans .env.refs → kv://perso/github-pat" || bad "KV/1: gh4 → $(ref_de "$WORK/gh4")"
+  [ "$(cd "$WORK/gh4" && SECRETS_WORKSPACE="$WORK/gh1" "$H" ref)" = "kv://perso/github-pat-sap-excel" ] && pass "KV/1: repli sur le .env.refs de SECRETS_WORKSPACE" || bad "KV/1: SECRETS_WORKSPACE ignoré"
+  [ "$(cd "$WORK/gh1" && SECRETS_GITHUB_REF=kv://perso/essai "$H" ref)" = "kv://perso/essai" ] && pass "KV/1: SECRETS_GITHUB_REF l'emporte" || bad "KV/1: SECRETS_GITHUB_REF ignoré"
+  # get : lanceur simulé (mcp-headers renvoie un faux jeton dérivé de la réf.)
+  mkdir -p "$WORK/ghbin"
+  cat >"$WORK/ghbin/secrets" <<'STUB'
+#!/bin/sh
+[ "$1" = mcp-headers ] || exit 2
+printf '{"t":"faux-%s"}\n' "${2#t=}"
+STUB
+  chmod +x "$WORK/ghbin/secrets"
+  out="$(cd "$WORK/gh1" && printf 'protocol=https\nhost=github.com\n\n' | env -u GH_TOKEN PATH="$WORK/ghbin:$PATH" "$H" get)"
+  [ "$out" = "$(printf 'username=x-access-token\npassword=faux-kv://perso/github-pat-sap-excel')" ] && pass "KV/1: git get → jeton de la réf. du projet" || bad "KV/1: git get a rendu « $out »"
+  out="$(cd "$WORK/gh1" && printf 'protocol=https\nhost=gitlab.com\n\n' | env -u GH_TOKEN PATH="$WORK/ghbin:$PATH" "$H" get)"
+  [ -z "$out" ] && pass "KV/1: git get muet hors github.com" || bad "KV/1: git get répond pour gitlab.com"
+  grep -q 'github.refs' "$WORK/kv/.devcontainer/lib-secrets.sh" "$H" && bad "KV/1: github.refs encore référencé" || pass "KV/1: plus de github.refs"
+
+  # --- défaut 2 : droits, même rendu sous umask 0000 ---
+  chmod 666 "$WORK/kv/.devcontainer/lib-secrets.sh" "$WORK/kv/.devcontainer/secrets"/*; chmod 777 "$WORK/kv/.devcontainer/secrets"
+  chmod 777 "$WORK/kv/.devcontainer/secrets/secrets" "$H"
+  PATH="$WORK/kvbin:$PATH" HOME="$WORK/kvhome2" bash -c 'mkdir -p "$HOME"; source "$1/.devcontainer/lib-secrets.sh"; secrets_install "$1" >/dev/null' _ "$WORK/kv"
+  ww="$(find "$WORK/kv/.devcontainer/lib-secrets.sh" "$WORK/kv/.devcontainer/secrets" -perm /022)"
+  [ -z "$ww" ] && pass "KV/2: secrets_install retire l'écriture groupe/autres" || { bad "KV/2: encore modifiables par d'autres :"; echo "$ww"; }
+  [ -x "$WORK/kvhome2/.local/bin/secrets" ] && [ -x "$WORK/kvhome2/.local/bin/git-credential-secrets" ] && pass "KV/2: lanceurs liés et exécutables" || bad "KV/2: liens ~/.local/bin absents"
+  grep -q 'SECRETS_WORKSPACE=' "$WORK/kvhome2/.bashrc" && pass "KV/2: bloc ~/.bashrc posé" || bad "KV/2: bloc ~/.bashrc absent"
+
+  # --- défaut 8 : relance des serveurs MCP qui tournent ---
+  mkdir -p "$WORK/opt/srv/scripts" "$WORK/rl"
+  printf '#!/bin/sh\necho "$1" >>"%s/opt/srv/appels"\n' "$WORK" >"$WORK/opt/srv/scripts/mcp-server.sh"
+  chmod +x "$WORK/opt/srv/scripts/mcp-server.sh"
+  printf '# commentaire\nsrv https://example.invalid/srv.git - 8000\nabsent https://example.invalid/x.git\n' >"$WORK/rl/mcp-servers.conf"
+  printf 'A=kv://perso/a\n' >"$WORK/rl/.env.refs"
+  relance() { MCP_OPT_DIR="$WORK/opt" HOME="$WORK/rlhome" bash -c 'source "$1/.devcontainer/lib-secrets.sh"; secrets_mcp_relance "$2/mcp-servers.conf" "$2/.env.refs" "$3"' _ "$WORK/kv" "$WORK/rl" "$1"; }
+  appels() { cat "$WORK/opt/srv/appels" 2>/dev/null | wc -l | tr -d ' '; }
+  relance 0 >/dev/null; [ "$(appels)" = 0 ] && pass "KV/8: premier passage : rien n'est arrêté" || bad "KV/8: arrêt au premier passage"
+  relance 0 >/dev/null; [ "$(appels)" = 0 ] && pass "KV/8: .env.refs inchangé : serveur gardé" || bad "KV/8: arrêt sans changement"
+  printf 'A=kv://perso/b\n' >"$WORK/rl/.env.refs"
+  out="$(relance 0)"; [ "$(appels)" = 1 ] && [ "$(cat "$WORK/opt/srv/appels")" = stop ] && pass "KV/8: .env.refs modifié → stop ($out)" || bad "KV/8: pas d'arrêt après modification"
+  relance 0 >/dev/null; [ "$(appels)" = 1 ] && pass "KV/8: une seule relance par modification" || bad "KV/8: arrêts répétés"
+  relance 1 >/dev/null; [ "$(appels)" = 2 ] && pass "KV/8: --relance-mcp force l'arrêt" || bad "KV/8: --relance-mcp sans effet"
+  grep -q 'secrets_mcp_relance' "$WORK/kv/.devcontainer/post-start.sh" && grep -q -- '--relance-mcp' "$WORK/kv/.devcontainer/post-start.sh" \
+    && pass "KV/8: post-start appelle la relance (option --relance-mcp)" || bad "KV/8: post-start sans relance"
+
+  # --- défauts 2, 7 : post-start rendu, lancé pour de vrai (az simulé, refs en clair, aucun serveur) ---
+  cp -a "$WORK/kv" "$WORK/ps"
+  printf 'ESSAI_A=1\nESSAI_B=deux\n' >"$WORK/ps/.env.refs"
+  sed -i 's/^[^#]/# &/' "$WORK/ps/.devcontainer/mcp-servers.conf"
+  (umask 0000; : >"$WORK/ps/.env.avant-keyvault")
+  ps_run() { (cd "$WORK/ps" && env -u WORKSPACE_DIR containerWorkspaceFolder="$WORK/ps" PATH="$WORK/kvbin:/usr/bin:/bin" HOME="$WORK/pshome" \
+               AZURE_CONFIG_DIR="$WORK/pshome/az" bash .devcontainer/post-start.sh "$@" >/dev/null 2>&1); }
+  mkdir -p "$WORK/pshome"; ps_run; ps_run
+  LOGF="$WORK/pshome/.local/state/devcontainer/post-start.log"
+  [ -f "$LOGF" ] && [ -f "$LOGF.1" ] && pass "KV/7: post-start.log écrit (et le précédent en .1)" || bad "KV/7: post-start.log absent"
+  grep -q '2 variable(s) chargée(s) en mémoire' "$LOGF" && pass "KV/7: le journal dit « 2 variable(s) chargée(s) »" || { bad "KV/7: journal incomplet :"; tail -5 "$LOGF"; }
+  grep -q 'Post-start complete' "$LOGF" && pass "KV/7: le journal va jusqu'au bout" || bad "KV/7: journal tronqué"
+  [ "$(stat -c %a "$LOGF")" = 600 ] && pass "KV/7: journal en 600" || bad "KV/7: journal en $(stat -c %a "$LOGF")"
+  [ "$(stat -c %a "$WORK/ps/.env.avant-keyvault")" = 600 ] && pass "KV/4: .env mis de côté passé en 600" || bad "KV/4: .env.avant-keyvault en $(stat -c %a "$WORK/ps/.env.avant-keyvault")"
 else
   bad "KV: copier a échoué"
 fi
@@ -391,6 +473,22 @@ if render false "$WORK/kvbase" --data secrets_source=keyvault --data project_typ
   grep -q 'SAP_' "$WORK/kvbase/.env.refs" && bad "KV-BASE: variables SAP dans .env.refs" || pass "KV-BASE: pas de variable SAP"
 else
   bad "KV-BASE: copier a échoué"
+fi
+
+echo "== enable_dotnet (SDK + volume du cache NuGet) =="
+if render false "$WORK/net" --data enable_dotnet=true --data dotnet_version=8.0; then
+  grep -q '"ghcr.io/devcontainers/features/dotnet:2": { "version": "8.0" }' "$WORK/net/$DC" && pass "NET: feature dotnet 8.0" || bad "NET: feature dotnet absente"
+  grep -q 'source=devcontainer-nuget-packages,target=/home/vscode/.nuget/packages,type=volume' "$WORK/net/$DC" && pass "NET: volume ~/.nuget/packages" || bad "NET: volume NuGet absent"
+  grep -q '"nuget-packages": "sudo chown vscode:vscode /home/vscode/.nuget /home/vscode/.nuget/packages"' "$WORK/net/$DC" && pass "NET: volume rendu à vscode (onCreate)" || bad "NET: chown du volume absent"
+  jsonc_ok "$WORK/net/$DC" && pass "NET: devcontainer.json valide" || bad "NET: devcontainer.json invalide"
+  grep -q '^## .NET (`enable_dotnet`)' "$WORK/net/.devcontainer/README.md" && pass "NET: section .NET du README" || bad "NET: section .NET absente"
+else
+  bad "NET: copier a échoué"
+fi
+if render false "$WORK/netkv" --data enable_dotnet=true --data secrets_source=keyvault --data enable_iac=true --data iac_short_name=rt; then
+  jsonc_ok "$WORK/netkv/$DC" && pass "NET+KV+IAC: devcontainer.json valide" || bad "NET+KV+IAC: devcontainer.json invalide"
+else
+  bad "NET+KV+IAC: copier a échoué"
 fi
 
 echo "== Vérif marqueurs Jinja non résolus (les deux rendus) =="

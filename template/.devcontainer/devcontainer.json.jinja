@@ -36,7 +36,13 @@
     // one = AZURE_CONFIG_DIR below) live in a Docker volume shared by every
     // container of this Docker host — one `az login` survives rebuilds
     // (even without cache) and serves all the projects.
-    "source=devcontainer-azure-profils,target=/home/vscode/.azure-profils,type=volume"{% endif %}
+    "source=devcontainer-azure-profils,target=/home/vscode/.azure-profils,type=volume"{% endif %}{% if enable_dotnet %},
+    // .NET: the NuGet cache lives in a Docker volume shared by the containers
+    // of this Docker host. The obj/project.assets.json of the workspace (bind
+    // mount) survive a rebuild; without this volume they would point at
+    // packages the new container no longer has (C# extension errors until a
+    // `dotnet restore`).
+    "source=devcontainer-nuget-packages,target=/home/vscode/.nuget/packages,type=volume"{% endif %}
   ],
 
   "features": {
@@ -44,7 +50,8 @@
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers/features/git-lfs:1": {}{% if enable_iac or secrets_source == 'keyvault' %},
     "ghcr.io/devcontainers/features/azure-cli:1": {}{% endif %}{% if enable_iac %},
-    "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}{% if dbt_workspace %},
+    "ghcr.io/devcontainers-extra/features/opentofu:1": {}{% endif %}{% if enable_dotnet %},
+    "ghcr.io/devcontainers/features/dotnet:2": { "version": "{{ dotnet_version }}" }{% endif %}{% if dbt_workspace %},
     // gcloud + bq, installed from Google's apt repo by a LOCAL feature: the
     // public ghcr.io/dhoeric one is abandoned and breaks on current Debian
     // (it relies on the removed `apt-key`).
@@ -107,8 +114,10 @@
         "terminal.integrated.scrollback": 20000,
         "terminal.integrated.persistentSessionScrollback": 1000,
         // Silence the Python extension's env-collection churn (venv activation
-        // + .env injection) — the main trigger of the relaunch prompt. The
-        // project reads .env at runtime via pydantic-settings, not the shell.
+        // + .env injection) — the main trigger of the relaunch prompt.{% if secrets_source == 'keyvault' %} The
+        // project gets its variables from .env.refs (Key Vault, resolved in
+        // memory by the lifecycle and `secrets run`), never from a file.{% else %} The
+        // project reads .env at runtime via pydantic-settings, not the shell.{% endif %}
         "python.terminal.activateEnvironment": false,
 {%- if dbt_workspace %}
         // dbt Power User = the legacy engine only. It runs dbt Core 1.x through
@@ -133,7 +142,9 @@
     "git-config": "git config --global --add safe.directory ${containerWorkspaceFolder} && git config --global user.email '{{ author_email }}' && git config --global user.name '{{ author_name }}'",
     "claude-dirs": "mkdir -p /home/vscode/.claude/tmp /home/vscode/.claude/logs /tmp/claude-code"{% if secrets_source == 'keyvault' %},
     // a fresh Docker volume belongs to root
-    "azure-profils": "sudo chown vscode:vscode /home/vscode/.azure-profils && mkdir -p /home/vscode/.azure-profils/defaut"{% endif %}{% if dbt_workspace %},
+    "azure-profils": "sudo chown vscode:vscode /home/vscode/.azure-profils && mkdir -p /home/vscode/.azure-profils/defaut"{% endif %}{% if enable_dotnet %},
+    // Docker creates the volume AND its parent ~/.nuget as root
+    "nuget-packages": "sudo chown vscode:vscode /home/vscode/.nuget /home/vscode/.nuget/packages"{% endif %}{% if dbt_workspace %},
     // the engines live in the container filesystem: installed BEFORE the
     // editor connects, so dbt Power User finds /opt/dbt-v1/bin/python on the
     // first start after a rebuild (postCreateCommand runs once it is connected)

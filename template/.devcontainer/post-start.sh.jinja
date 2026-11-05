@@ -19,6 +19,25 @@ BASHRC="$HOME/.bashrc"
 # subprocess we launch (notably post-start-project.sh and the MCP servers it
 # spawns). Re-export the same PATH that post-create.sh sets up.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.claude/bin:$PATH"
+{%- if secrets_source == 'keyvault' %}
+
+# Journal : aussi dans ~/.local/state/devcontainer/post-start.log (le précédent
+# en .1), relisible depuis un terminal ou Claude Code — la sortie « Dev
+# Containers » de VS Code ne l'est pas. Aucune valeur secrète : rien ici n'en
+# affiche (noms, références et longueurs seulement).
+POST_START_LOG="$HOME/.local/state/devcontainer/post-start.log"
+mkdir -p "$(dirname "$POST_START_LOG")"
+[ -f "$POST_START_LOG" ] && mv -f "$POST_START_LOG" "$POST_START_LOG.1"
+( umask 077; : >"$POST_START_LOG" )
+exec > >(tee -a "$POST_START_LOG") 2>&1
+echo "post-start $(date -Is)"
+
+# --relance-mcp (ou SECRETS_RELANCE_MCP=1) : arrête les serveurs MCP qui
+# répondent déjà, pour les relancer avec les valeurs du moment (secret changé
+# dans le coffre). Un .env.refs modifié depuis le dernier passage suffit.
+SECRETS_RELANCE_MCP="${SECRETS_RELANCE_MCP:-0}"
+[ "${1:-}" = "--relance-mcp" ] && SECRETS_RELANCE_MCP=1
+{%- endif %}
 
 echo "============================================"
 echo "  Post-start checks..."
@@ -37,9 +56,20 @@ fi
 
 # --- Sécurisation des fichiers sensibles ---
 echo "[2/4] Securing sensitive files..."
+{%- if secrets_source == 'keyvault' %}
+# .env.ecc et tout .env restant ou mis de côté (.env, .env.bak…) : 600.
+# .env.refs et les modèles *.example ne contiennent aucune valeur secrète.
+for f in "$WORKSPACE_DIR"/.env "$WORKSPACE_DIR"/.env.*; do
+  [ -f "$f" ] || continue
+  case "${f##*/}" in .env.refs | *.example) continue ;; esac
+  chmod 600 "$f" && echo "  ${f##*/}"
+done
+chmod 600 "$WORKSPACE_DIR/.mcp.json" 2>/dev/null && echo "  .mcp.json" || true
+{%- else %}
 chmod 600 "$WORKSPACE_DIR/.env"      2>/dev/null && echo "  .env" || true
 chmod 600 "$WORKSPACE_DIR/.env.ecc"  2>/dev/null && echo "  .env.ecc" || true
 chmod 600 "$WORKSPACE_DIR/.mcp.json" 2>/dev/null && echo "  .mcp.json" || true
+{%- endif %}
 {% if secrets_source == 'keyvault' %}
 # --- Secrets : .env.refs résolu depuis Key Vault, en mémoire ---
 # Le .env n'est plus lu (un .env restant est ignoré, jamais supprimé). Les
@@ -73,6 +103,7 @@ source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
 {%- if secrets_source == 'keyvault' %}
 secrets_override_mcp_link_env
 if [ "$SECRETS_OK" = 1 ]; then
+  secrets_mcp_relance "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" "$WORKSPACE_DIR/.env.refs" "$SECRETS_RELANCE_MCP"
   mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
 else
   echo "[mcp] skipped: .env.refs not resolved (see [3/4]) — az login, then"

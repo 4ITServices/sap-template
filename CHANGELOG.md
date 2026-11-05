@@ -13,10 +13,11 @@ and commit messages; this changelog starts at v0.8.12.
 
 - **New `secrets_source` question (`env` | `keyvault`, default `env`): read
   the project secrets from Azure Key Vault instead of a cleartext `.env`.**
-  With `env` nothing changes — every script and config file renders
-  byte-identical to the previous release; only `.copier-answers.yml` gains the
-  answer and `.devcontainer/README.md` gains the documentation of the option
-  (checked by `ENV_BASE_REF=<ref> scripts/test-template-render.sh`). With `keyvault`:
+  With `env` nothing changes — the whole project renders byte-identical to the
+  previous release, docs included; only `.copier-answers.yml` gains the answers
+  (checked by `ENV_BASE_REF=<ref> scripts/test-template-render.sh`).
+  `.devcontainer/README.md` and `.devcontainer/lib-mcp.sh` become `.jinja` so
+  that their texts follow the mode. With `keyvault`:
   - `.env.refs` (versioned, `_skip_if_exists`) holds **references only** —
     `kv://<vault>/<secret>`, `kv://perso/<secret>` (the vault of whoever ran
     `az login`, resolved through `personnes.conf`), `gh://token` — plus
@@ -32,8 +33,24 @@ and commit messages; this changelog starts at v0.8.12.
     `az` session nothing fails: the MCP servers are skipped with the steps to
     follow.
   - GitHub without a shared PAT: `gh` (shell function) and `git` over https
-    (`git-credential-secrets` helper for github.com) read the person's
-    `kv://perso/github-pat`. `az login` is the only login.
+    (`git-credential-secrets` helper for github.com) read the token **of the
+    project**: `GH_TOKEN`, else `GITHUB_PERSONAL_ACCESS_TOKEN`, of the
+    `.env.refs` of the current repository (then of the workspace) when it is a
+    reference, else `kv://perso/github-pat`; `SECRETS_GITHUB_REF` overrides.
+    `git-credential-secrets ref` shows the choice (never the value). `az
+    login` is the only login.
+  - Hardening: `secrets_install` removes group/other write on
+    `lib-secrets.sh` and `.devcontainer/secrets/*` (copier renders them with
+    the container umask 0000); post-start puts every leftover `.env*` (not
+    `.env.refs` nor `*.example`) in 600; `.gitignore` ignores `.env.*` except
+    `.env.refs` and the `*.example` templates, so a set-aside `.env.bak` is
+    never committed by a `git add -A`.
+  - post-start keeps its output in `~/.local/state/devcontainer/post-start.log`
+    (previous run in `.1`, mode 600, no value in it), readable from a terminal
+    or Claude Code. It restarts the MCP servers already answering when
+    `.env.refs` changed since its previous run (fingerprint of the file only),
+    or on demand with `bash .devcontainer/post-start.sh --relance-mcp` (a value
+    changed in the vault under the same reference).
   - Terminal: `claude` runs under `secrets run` (falls back, with a warning,
     when the references do not resolve); `profil <alias>` gives a terminal its
     own `az` session (`AZURE_CONFIG_DIR`) — for a container shared by two
@@ -42,8 +59,21 @@ and commit messages; this changelog starts at v0.8.12.
     volume `devcontainer-azure-profils` (survives rebuilds),
     `AZURE_CONFIG_DIR` for the default session.
   - Docs: `.devcontainer/README.md` « Secrets Key Vault », a secrets section in
-    `CLAUDE.md`. The template repository's own `.devcontainer` dogfoods it
+    `CLAUDE.md`; no text of the lifecycle or of `lib-mcp.sh` points at a
+    `.env` any more. The template repository's own `.devcontainer` dogfoods it
     (links to the template files, `.env.refs` versioned).
+  - Piloted on sap-excel (rebuild without cache, then every check without any
+    `.env`); the defects it found are fixed above.
+
+- **New `enable_dotnet` question (default `false`) with `dotnet_version`
+  (default `10.0`)** for projects with C#: the `devcontainers/dotnet` feature
+  and a Docker volume `devcontainer-nuget-packages` on `~/.nuget/packages`
+  (made over to `vscode` by `onCreateCommand`). The workspace's
+  `obj/project.assets.json` survive a rebuild; the packages they point at now
+  do too, so the C# extension no longer reports missing packages after a
+  rebuild and no project hook needs a `dotnet restore`. VS Code is not made to
+  wait for post-create (`waitFor`): with the volume there is nothing left to
+  wait for, and the first open would be minutes slower on every rebuild.
 
 - **New `dbt-project` project type (`project_type: dbt-project`): take over an
   existing dbt BigQuery project and migrate it from dbt Core 1.x to dbt v2,
