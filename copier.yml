@@ -87,6 +87,26 @@ dbt_workspace:
   default: "{{ project_type in ['dbt-project', 'dbt-fleet'] }}"
   when: false
 
+# Versions des outils de base, fixées par le MODÈLE (when: false : jamais
+# demandées ni écrites dans .copier-answers.yml ; chaque version du modèle
+# apporte les siennes). Reprises par post-create, la CI et le Dockerfile, pour
+# que le poste, la CI et l'image aient la même. Monter = une PR du modèle, avec
+# une version publiée depuis au moins deux semaines.
+uv_version:
+  type: str
+  default: "0.13.5"
+  when: false
+
+just_version:
+  type: str
+  default: "1.59.0"
+  when: false
+
+copier_version:
+  type: str
+  default: "9.19.1"
+  when: false
+
 python_version:
   type: str
   help: "Version Python"
