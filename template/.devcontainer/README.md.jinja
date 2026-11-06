@@ -204,7 +204,8 @@ l'ordre :
    **Moindre privilège pour `claude`** : il tourne sous `.env.refs`, donc sous
    son `GH_TOKEN`. Y mettre le jeton le plus étroit qui suffise (ex. un PAT des
    sessions), et prendre un jeton admin à la demande :
-   `SECRETS_GITHUB_REF=kv://perso/github-pat gh …`.
+   `SECRETS_GITHUB_REF=kv://perso/github-pat gh …` (git et `gh` le préfèrent
+   au `GH_TOKEN` hérité).
 
    **Un script qui sème un coffre partagé ne lit jamais l'environnement de la
    session** : sous `claude` ou `secrets run`, `SAP_USER` (ou tout identifiant
@@ -259,7 +260,9 @@ l'ordre :
 
 `git` en https et `gh` prennent la **première** de ces références :
 
-1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. pour un essai) ;
+1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. le PAT admin le temps
+   d'une commande) : elle l'emporte aussi sur un `GH_TOKEN` déjà dans
+   l'environnement (sous `claude`, c'est toujours le cas) ;
 2. `GH_TOKEN`, sinon `GITHUB_PERSONAL_ACCESS_TOKEN`, dans le `.env.refs` du
    dépôt courant, puis dans celui du workspace — s'ils valent une référence
    (`kv://…`, `gh://token`), pas une valeur en clair ;

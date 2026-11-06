@@ -9,6 +9,7 @@
 # sans jeton. Cette enveloppe donne à gh le jeton GitHub du projet, partout :
 #
 # Même ordre que git (git-credential-secrets get) :
+#   0. SECRETS_GITHUB_REF défini → cette référence, même si GH_TOKEN est là ;
 #   1. GH_TOKEN déjà défini → gh tel quel ;
 #   2. sinon la référence de `git-credential-secrets ref` (SECRETS_GITHUB_REF,
 #      puis GH_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN de .env.refs, puis
@@ -37,6 +38,11 @@ IFS=$IFS_AVANT
 
 # Garde : la référence gh://token se résout par `gh auth token`, donc par cette
 # enveloppe ; sans garde, elle se relancerait sans fin. Appel imbriqué → gh nu.
+# SECRETS_GITHUB_REF est un choix explicite (ex. le PAT admin le temps d'une
+# commande) : il l'emporte sur un GH_TOKEN hérité (claude, post-start).
+if [ -n "${SECRETS_GITHUB_REF:-}" ] && [ -z "${_SECRETS_GH_ENVELOPPE:-}" ]; then
+  unset GH_TOKEN GITHUB_TOKEN
+fi
 if [ -z "${GH_TOKEN:-}" ] && [ -z "${_SECRETS_GH_ENVELOPPE:-}" ]; then
   _SECRETS_GH_ENVELOPPE=1; export _SECRETS_GH_ENVELOPPE
   aide="$(dirname "$moi")/git-credential-secrets"

@@ -76,6 +76,10 @@ and commit messages; this changelog starts at v0.8.12.
     l'hôte (une connexion pour tous) ; dans un container partagé, c'est de la
     confiance mutuelle, pas une séparation des coffres perso.
   - L'aide de `node_version` ne prétend plus que la CI du modèle lit `.nvmrc`.
+  - `SECRETS_GITHUB_REF` l'emporte sur un `GH_TOKEN` hérité, pour l'enveloppe
+    `gh` comme pour `git-credential-secrets get`. Avant, sous `claude`
+    (toujours un `GH_TOKEN`), il était ignoré alors que
+    `git-credential-secrets source` le donnait pour retenu.
   - Guide de migration : `outils.refs` pour les secrets réservés à des outils,
     moindre privilège du `GH_TOKEN` de `claude`, et un script qui sème un coffre
     partagé ne lit jamais l'environnement de la session.
