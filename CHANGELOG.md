@@ -9,6 +9,59 @@ and commit messages; this changelog starts at v0.8.12.
 
 ## [Unreleased]
 
+- **(v0.13.0) Tunnels SSH et instances MCP supplémentaires, pour tous les
+  projets.** Pour un système joignable seulement depuis un relais (les SAP de
+  MH derrière le VPN de `vm-mh-win11`) : la VM ne sert que de relais, rien
+  n'y est installé, aucune identité SAP n'y est déposée ; les serveurs MCP
+  tournent dans le container. Nouveaux fichiers du modèle
+  `.devcontainer/lib-tunnels.sh`, `tunnel.sh`, `mcp-instance.sh` ; nouveaux
+  fichiers du projet (`_skip_if_exists`, livrés en commentaires, donc
+  inactifs) `tunnels.conf`, `tunnels.known_hosts`, `mcp-instances.conf`.
+  Tunnels : une session `ssh -N` supervisée par relais (`setsid -f`, relance
+  5 s → 60 s), démarrée par post-start avant les serveurs MCP ; clé d'hôte
+  stricte ; clé SSH tirée d'une variable (référence Key Vault en PEM ou base64,
+  ou chemin) vers un `ssh-agent` propre au relais, jamais sur disque ; cible
+  nommée mise en 127.0.0.1 dans `/etc/hosts` (le certificat TLS reste valide).
+  Instances : un serveur de `/opt` relancé sur un autre port avec les seules
+  variables `PRÉFIXE_*` reprises sans préfixe (même mécanisme que
+  `mcp-server-ecc.sh`) ; `--relance-mcp` et un `.env.refs` modifié les
+  arrêtent aussi. Origine : `infra/vm-mh/` de mh-dbt-global-vault (déploiement
+  sur la VM, identité BCA partagée) et `scripts/tunnel-daemon.sh` de
+  sap-fiori-mh (le modèle repris ici). Rendu par défaut : seulement ces
+  fichiers en plus et des ajouts à post-start et au README.
+- **(v0.13.0) sap-gui-mcp par le tunnel local 8021, avec jeton (PR #15).**
+  L'entrée `sap-gui-mcp` de `.mcp.json.example` vise désormais
+  `http://127.0.0.1:8021/mcp` (tunnel `mh-gui` de `tunnels.conf` vers
+  `127.0.0.1:8001` de la VM relais) et envoie
+  `Authorization: Bearer ${SAP_MCP_TOKEN}`, lu dans l'environnement par
+  Claude Code, jamais écrit dans le fichier. **Changement de défaut :** elle
+  ne vise plus la VM du labo (`http://192.168.50.119:8001/mcp`). Les projets
+  existants ne bougent pas (`.mcp.json` leur appartient) ; un nouveau projet
+  qui utilise la VM du labo remet cette URL dans son entrée `sap-gui-mcp`.
+- **(keyvault) Retour du pilote mh-dbt-global-vault (sap-template#14).**
+  - **`.env.refs` n'est plus tout-ou-rien** : une référence en échec est
+    nommée (ATTENTION dans post-start) et laissée de côté, les autres sont
+    chargées. Seuls ses consommateurs sautent : le tunnel dont la clé manque,
+    l'instance dont une variable `PRÉFIXE_*` manque (`SECRETS_ECHECS`, des noms
+    seulement). `claude` démarre de même avec ce qui se résout. Avant, une
+    seule référence expirée éteignait serveurs MCP, tunnels et instances.
+  - **`ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` refusés** : jamais
+    exportés depuis `.env.refs`, ni par post-start ni pour `claude` (qui serait
+    parti vers un proxy avec une clé d'API au lieu du `/login`). Les identités
+    implicites des SDK (`AZURE_CLIENT_*`, `GOOGLE_APPLICATION_CREDENTIALS`,
+    `AWS_*`) sont signalées.
+  - **`gh://token` ne boucle plus** : l'enveloppe `gh` ne se rappelle pas
+    elle-même quand la référence se résout par `gh auth token`. Post-start
+    conseille `kv://perso/github-pat`.
+  - **Post-start signale** un assistant git de github.com remplacé par un hook
+    projet, et, sans `.env`, les fichiers versionnés qui le lisent encore.
+  - `tunnel.sh epingler` garde l'en-tête de `tunnels.known_hosts` en tête.
+  - Le guide « Passer un projet existant à keyvault » reprend la liste du
+    pilote (lecteurs du fichier `.env`, y compris dans d'autres dépôts ; ce
+    qui est perdu au rebuild ; tri de `.env.refs` ; `secrets check` à 0
+    avant le rebuild ; versions de moteurs fixées ; conflits dbt-fleet ;
+    abonnement az du profil neuf ; preuve sans `.env`).
+
 ### Added
 
 - **New `secrets_source` question (`env` | `keyvault`, default `env`): read

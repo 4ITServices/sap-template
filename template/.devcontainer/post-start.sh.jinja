@@ -97,6 +97,18 @@ fi
 {%- endif %}
 
 # =============================================================================
+# Tunnels SSH (template-managed — lib-tunnels.sh + tunnels.conf, projet)
+# Avant les serveurs MCP : ceux qui visent un système derrière un relais
+# (ex. un SAP joignable seulement par le VPN d'une VM) le joignent par ici.
+# =============================================================================
+if [ -n "$(grep -vE '^[[:space:]]*(#|$)' "$WORKSPACE_DIR/.devcontainer/tunnels.conf" 2>/dev/null)" ]; then
+  echo ""
+  echo "[tunnels] tunnels.conf..."
+  source "$WORKSPACE_DIR/.devcontainer/lib-tunnels.sh"
+  tunnels_start
+fi
+
+# =============================================================================
 # MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
 # Self-healing: a failed post-create install (e.g. missing
 # GITHUB_PERSONAL_ACCESS_TOKEN at first build) is repaired here on a plain
@@ -130,6 +142,20 @@ if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
   "$SAP_ADT_ECC_LAUNCHER" start
 {%- endif %}
   mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
+fi
+
+# Instances supplémentaires (mcp-instances.conf, projet) : un serveur de /opt
+# relancé vers un autre système, avec ses variables PRÉFIXE_* (mcp-instance.sh).
+if [ -n "$(grep -vE '^[[:space:]]*(#|$)' "$WORKSPACE_DIR/.devcontainer/mcp-instances.conf" 2>/dev/null)" ]; then
+{%- if secrets_source == 'keyvault' %}
+  if [ "$SECRETS_OK" = 1 ]; then
+    bash "$WORKSPACE_DIR/.devcontainer/mcp-instance.sh" start
+  else
+    echo "[mcp] instances skipped: .env.refs not resolved (see [3/4])"
+  fi
+{%- else %}
+  bash "$WORKSPACE_DIR/.devcontainer/mcp-instance.sh" start
+{%- endif %}
 fi
 {%- if dbt_workspace %}
 
@@ -173,6 +199,27 @@ if [ "${n_ecrit:-0}" -gt 0 ]; then
   echo "  Correction : chmod -R go-w \"$WORKSPACE_DIR\""
 else
   echo "  aucun"
+fi
+
+# Assistant git de github.com : un hook projet qui pose le sien (après
+# secrets_install) remplace git-credential-secrets sans rien dire.
+h="$(git config --global --get-all credential.https://github.com.helper 2>/dev/null | tail -n 1)"
+if [ "$h" != secrets ]; then
+  echo ""
+  echo "[secrets] ATTENTION : l'assistant git de github.com n'est plus git-credential-secrets (dernier : « ${h:-aucun} »)."
+  echo "  Un hook projet l'a remplacé ? Le rendre compatible (environnement, puis git-credential-secrets), ou le retirer."
+fi
+
+# Lecteurs du FICHIER .env : sans .env, ils cassent en silence (le jour de sa
+# suppression). Fichiers versionnés hors .devcontainer et doc qui l'ouvrent.
+if [ ! -e "$WORKSPACE_DIR/.env" ] && git -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  lecteurs="$(git -C "$WORKSPACE_DIR" grep -lE "[\"'/(]\.env[\"')]|load_dotenv\(|env_file *=|dotenv-load" -- . \
+      ':!.devcontainer' ':!*.md' ':!.gitignore' ':!*.example' ':!.copier-answers.yml' 2>/dev/null | head -n 20)"
+  if [ -n "$lecteurs" ]; then
+    echo ""
+    echo "[secrets] pas de .env, mais ces fichiers versionnés le lisent peut-être (environnement d'abord, .env en repli ?) :"
+    printf '%s\n' "$lecteurs" | sed 's/^/    /'
+  fi
 fi
 {%- endif %}
 

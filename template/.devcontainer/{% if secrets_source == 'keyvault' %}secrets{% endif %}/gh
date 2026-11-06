@@ -17,6 +17,8 @@
 #      variable est déjà dans l'environnement (claude et post-start tournent
 #      sous `secrets run`), c'est la même valeur ;
 #   3. échec → gh sans jeton (GITHUB_TOKEN ou son propre `gh auth login`).
+# gh://token (`gh auth token`) dépend d'un `gh auth login`, perdu au rebuild :
+# préférer kv://perso/github-pat.
 # Le jeton passe par l'environnement de gh, jamais sur une ligne de commande.
 # =============================================================================
 reel=''
@@ -33,7 +35,10 @@ done
 IFS=$IFS_AVANT
 [ -n "$reel" ] || { echo "gh : binaire gh introuvable dans le PATH" >&2; exit 127; }
 
-if [ -z "${GH_TOKEN:-}" ]; then
+# Garde : la référence gh://token se résout par `gh auth token`, donc par cette
+# enveloppe ; sans garde, elle se relancerait sans fin. Appel imbriqué → gh nu.
+if [ -z "${GH_TOKEN:-}" ] && [ -z "${_SECRETS_GH_ENVELOPPE:-}" ]; then
+  _SECRETS_GH_ENVELOPPE=1; export _SECRETS_GH_ENVELOPPE
   aide="$(dirname "$moi")/git-credential-secrets"
   command -v git-credential-secrets >/dev/null 2>&1 && aide=git-credential-secrets
   if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && [ "$("$aide" source 2>/dev/null)" = GITHUB_PERSONAL_ACCESS_TOKEN ]; then
@@ -43,5 +48,6 @@ if [ -z "${GH_TOKEN:-}" ]; then
     [ -n "$t" ] && { GH_TOKEN=$t; export GH_TOKEN; }
     unset t
   fi
+  unset _SECRETS_GH_ENVELOPPE
 fi
 exec "$reel" "$@"
