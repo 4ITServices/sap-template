@@ -564,6 +564,9 @@ using the current `.example.sh` files as reference.
   relay VM**, bound to `127.0.0.1:8001` there, and reached through an SSH
   tunnel on local port 8021 (`http://127.0.0.1:8021/mcp`; declare the
   `mh-gui` line in `.devcontainer/tunnels.conf`, see "Tunnels" below).
+  The `.mcp.json` entry sends `Authorization: Bearer ${SAP_MCP_TOKEN}`,
+  expanded by Claude Code from the environment — the token is never written
+  in the file.
   Never installed locally in the devcontainer.
 
 ### Dual-stack: ECC EHP8 second instance (optional)

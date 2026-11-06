@@ -146,7 +146,7 @@ Attention : le port 8001 désigne deux choses distinctes — l'instance ECC
 toujours en 8021.
 {%- endif %}
 
-Configuration : `.mcp.json` est créé automatiquement depuis `.mcp.json.example` au premier build. Les credentials SAP vivent dans `.env` (lus par pydantic-settings) ; `.mcp.json` ne contient que la config structurelle (URLs, noms de serveurs) — sap-gui-mcp n'y répond que si le tunnel `mh-gui` (port local 8021) est déclaré dans `.devcontainer/tunnels.conf`. Pas de secrets dedans : un Bearer passe par `headersHelper` (voir `.devcontainer/README.md`).
+Configuration : `.mcp.json` est créé automatiquement depuis `.mcp.json.example` au premier build. Les credentials SAP vivent dans `.env` (lus par pydantic-settings) ; `.mcp.json` ne contient que la config structurelle (URLs, noms de serveurs) — sap-gui-mcp n'y répond que si le tunnel `mh-gui` (port local 8021) est déclaré dans `.devcontainer/tunnels.conf`. Pas de secrets dedans : le jeton de sap-gui-mcp est lu dans l'environnement (`Bearer ${SAP_MCP_TOKEN}`), jamais écrit dans le fichier.
 {%- endif %}
 
 ## Conventions SYNKRONIC
