@@ -561,9 +561,10 @@ using the current `.example.sh` files as reference.
   (PID file, log at `/opt/sap-adt-mcp/logs/server.log`, idempotent).
 - [sap-gui-mcp](https://github.com/4ITServices/sap-gui-mcp) — SAP GUI
   automation. Requires Windows (COM/pywin32): runs **remote on the Windows
-  VM** (`http://192.168.50.119:8001/mcp` by default — edit the
-  `sap-gui-mcp` entry in `.mcp.json` if the VM IP changes), never installed
-  locally in the devcontainer.
+  relay VM**, bound to `127.0.0.1:8001` there, and reached through an SSH
+  tunnel on local port 8021 (`http://127.0.0.1:8021/mcp`; declare the
+  `mh-gui` line in `.devcontainer/tunnels.conf`, see "Tunnels" below).
+  Never installed locally in the devcontainer.
 
 ### Dual-stack: ECC EHP8 second instance (optional)
 
@@ -591,8 +592,8 @@ the same canonical `mcp-server.sh`. To disable: delete `.env.ecc` — the
 post-start block becomes a no-op.
 
 Note: local port 8001 (ECC instance) is unrelated to the Windows VM's
-port 8001 (remote sap-gui-mcp) — different hosts, easy to mix up in
-`.mcp.json`.
+port 8001 (sap-gui-mcp, bound to the VM's loopback): the latter is only
+reached through the tunnel on local port 8021.
 
 The post-start ECC block is **runtime-gated for every project**, not only
 those generated with `enable_ecc_stack: true`. On a project generated
