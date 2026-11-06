@@ -95,8 +95,9 @@ python_version:
 node_version:
   type: str
   help: >-
-    Version majeure de Node (feature du devcontainer et .nvmrc ; en CI :
-    actions/setup-node avec node-version-file: .nvmrc). Fixée : un rebuild
+    Version majeure de Node (feature du devcontainer et .nvmrc). La CI du
+    modèle n'installe pas Node : une CI de projet qui en a besoin le lit dans
+    .nvmrc (actions/setup-node, node-version-file: .nvmrc). Fixée : un rebuild
     sans cache installait la dernière (Node 26), et le localStorage de
     Node ≥ 25 masque celui de jsdom (Vitest 2).
   default: "22"

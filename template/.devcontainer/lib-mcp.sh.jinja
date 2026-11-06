@@ -48,14 +48,21 @@ _mcp_rmtree() {
   rm -rf "$DIR" 2>/dev/null || sudo rm -rf "$DIR"
 }
 
-# Run git with ephemeral PAT auth. The insteadOf rewrite applies only to
-# this invocation; the URL stored in .git/config stays tokenless.
+# Run git with ephemeral PAT auth: an Authorization header for github.com,
+# for this invocation only; the URL stored in .git/config stays tokenless.
+# The header goes through git's environment (GIT_CONFIG_COUNT/KEY/VALUE,
+# git >= 2.31), never through argv, which every user can read (ps): neither
+# `git -c` nor an insteadOf URL with the token inlined (git hands the
+# rewritten URL to git-remote-https as an argument).
 # GIT_LFS_SKIP_SMUDGE: the LFS smudge filter calls `git credential fill`,
-# ignores the inline PAT and prompts (then fails) on private repos. MCP
+# ignores the header and prompts (then fails) on private repos. MCP
 # servers ship code, not LFS payloads — skipping is safe.
 _mcp_git() {
   if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
-    GIT_LFS_SKIP_SMUDGE=1 git -c "url.https://x-access-token:${GITHUB_PERSONAL_ACCESS_TOKEN}@github.com/.insteadOf=https://github.com/" "$@"
+    GIT_LFS_SKIP_SMUDGE=1 GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0="http.https://github.com/.extraHeader" \
+      GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_PERSONAL_ACCESS_TOKEN" | base64 | tr -d '\n')" \
+      git "$@"
   else
     GIT_LFS_SKIP_SMUDGE=1 git "$@"
   fi

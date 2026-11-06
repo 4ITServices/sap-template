@@ -62,6 +62,28 @@ and commit messages; this changelog starts at v0.8.12.
     avant le rebuild ; versions de moteurs fixées ; conflits dbt-fleet ;
     abonnement az du profil neuf ; preuve sans `.env`).
 
+- **Retour de sap_testing (migration v0.10.1 → keyvault).**
+  - `lib-mcp.sh` : le PAT des clones et fetch des serveurs MCP ne passe plus
+    dans les arguments d'un processus, lisibles par tous (`ps`). Avant, il y
+    était deux fois : `git -c url…insteadOf`, puis l'URL réécrite, jeton
+    compris, que git passe en argument à `git-remote-https` (3 processus
+    observés pendant un clone). Maintenant : un en-tête `Authorization`
+    transmis par l'environnement de git (`GIT_CONFIG_COUNT/KEY/VALUE`) ;
+    0 processus observé. Tous les projets.
+  - `NODE_TLS_REJECT_UNAUTHORIZED=0` retiré du `.env.refs` par défaut ; il est
+    refusé, comme `NODE_OPTIONS` (`claude` est un programme Node).
+  - README : le volume des sessions az est commun à tous les containers de
+    l'hôte (une connexion pour tous) ; dans un container partagé, c'est de la
+    confiance mutuelle, pas une séparation des coffres perso.
+  - L'aide de `node_version` ne prétend plus que la CI du modèle lit `.nvmrc`.
+  - `SECRETS_GITHUB_REF` l'emporte sur un `GH_TOKEN` hérité, pour l'enveloppe
+    `gh` comme pour `git-credential-secrets get`. Avant, sous `claude`
+    (toujours un `GH_TOKEN`), il était ignoré alors que
+    `git-credential-secrets source` le donnait pour retenu.
+  - Guide de migration : `outils.refs` pour les secrets réservés à des outils,
+    moindre privilège du `GH_TOKEN` de `claude`, et un script qui sème un coffre
+    partagé ne lit jamais l'environnement de la session.
+
 ## [0.12.0] — 2026-11-06
 
 Étiquette sur la fusion de la PR #13 (`00cc590`). Les entrées « (v0.13.0) » et

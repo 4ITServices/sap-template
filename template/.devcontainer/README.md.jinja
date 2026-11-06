@@ -150,7 +150,7 @@ SAP_URL=https://192.168.50.112:44300                         # configuration non
 | `secrets/gh` | modèle | enveloppe de `gh`, liée en `~/.local/bin/gh` : le jeton du projet pour **tous** les processus (Claude Code, scripts, MCP), pas seulement le terminal |
 | `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude` ; bloc `~/.bashrc` (umask 022) |
 | `.env.refs` | **projet** (`_skip_if_exists`) | les références du projet ; `copier update` ne l'écrase jamais |
-| volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, partagé par les containers du même Docker host |
+| volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, **commun à tous les containers** du même Docker host (une connexion pour tous ; confiance mutuelle, pas séparation) |
 
 ### Démarrer (une fois par Docker host et par personne)
 
@@ -186,13 +186,31 @@ l'ordre :
    références `kv://…` pour les secrets, config non secrète en clair, aucune
    valeur secrète. Retirer :
    - les variables d'autres projets ;
-   - `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` : `claude` tourne sous
+   - `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`,
+     `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_OPTIONS` : `claude` tourne sous
      ces variables (le modèle les refuse, post-start le dit) ;
    - les identités implicites des SDK (`AZURE_CLIENT_*`,
      `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_*`) qui ne sont pas celles du
      projet (post-start les signale) ;
    - toute variable qu'un outil du projet lit comme réglage alors qu'elle ne
      le concerne pas (ex. `GCP_PROJECT_ID` lu par dbt).
+
+   Ce dont seuls certains outils ont besoin (clé d'inscription d'un réseau,
+   clé JWT, jeton d'API d'admin, proxy LLM) n'a rien à faire dans
+   l'environnement de `claude` : un second fichier de références, versionné,
+   **`outils.refs`** (pas `.env.*`, que `.gitignore` ignore), lu seulement par
+   `secrets run -f outils.refs -- <outil>`.
+
+   **Moindre privilège pour `claude`** : il tourne sous `.env.refs`, donc sous
+   son `GH_TOKEN`. Y mettre le jeton le plus étroit qui suffise (ex. un PAT des
+   sessions), et prendre un jeton admin à la demande :
+   `SECRETS_GITHUB_REF=kv://perso/github-pat gh …` (git et `gh` le préfèrent
+   au `GH_TOKEN` hérité).
+
+   **Un script qui sème un coffre partagé ne lit jamais l'environnement de la
+   session** : sous `claude` ou `secrets run`, `SAP_USER` (ou tout identifiant
+   perso) est celui de la personne connectée, pas celui du compte partagé. Sa
+   source doit être nommée (un fichier, des références dédiées).
 
    `gh://token` → `kv://perso/github-pat` (ou un PAT fin du projet) :
    `gh://token` dépend d'un `gh auth login`, perdu au rebuild.
@@ -242,7 +260,9 @@ l'ordre :
 
 `git` en https et `gh` prennent la **première** de ces références :
 
-1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. pour un essai) ;
+1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. le PAT admin le temps
+   d'une commande) : elle l'emporte aussi sur un `GH_TOKEN` déjà dans
+   l'environnement (sous `claude`, c'est toujours le cas) ;
 2. `GH_TOKEN`, sinon `GITHUB_PERSONAL_ACCESS_TOKEN`, dans le `.env.refs` du
    dépôt courant, puis dans celui du workspace — s'ils valent une référence
    (`kv://…`, `gh://token`), pas une valeur en clair ;
@@ -280,8 +300,8 @@ tout de suite.
   variables dans le script. **Une référence en échec ne bloque pas les
   autres** : elle est nommée (ATTENTION dans le journal) et laissée de côté ;
   seuls ses consommateurs sautent (le tunnel dont la clé manque, l'instance
-  dont une variable `PRÉFIXE_*` manque). `ANTHROPIC_*`, `CLAUDE_CODE_*` et
-  `CLAUDE_CONFIG_DIR` ne sont jamais exportés (ni ici ni pour `claude`) ; les
+  dont une variable `PRÉFIXE_*` manque). `ANTHROPIC_*`, `CLAUDE_CODE_*`,
+  `CLAUDE_CONFIG_DIR`, `NODE_TLS_REJECT_UNAUTHORIZED` et `NODE_OPTIONS` ne sont jamais exportés (ni ici ni pour `claude`) ; les
   identités implicites des SDK (`AZURE_CLIENT_*`, `GOOGLE_APPLICATION_CREDENTIALS`,
   `AWS_*`) sont exportées mais signalées. Les serveurs MCP (`mcp-server.sh start`) et
   `post-start-project.sh` (NetBird…) en **héritent** : pydantic-settings lit
@@ -314,7 +334,12 @@ tout de suite.
 
 `kv://perso/…` lit le coffre de **celui qui a fait `az login`** (le lanceur
 cherche son compte dans `personnes.conf` → `kv-4it-dev-perso-<alias>`). Les droits
-Azure garantissent qu'on ne lit jamais le coffre perso de l'autre.
+Azure empêchent un compte de lire le coffre perso d'un autre compte, mais **pas
+une personne de se servir de la session de l'autre** : les sessions `az` vivent
+dans le volume `devcontainer-azure-profils`, commun à tous les containers du
+même hôte Docker (une seule connexion suffit pour tous). Dans un container
+partagé, c'est donc de la confiance mutuelle, pas une séparation : qui a un
+terminal peut faire `profil <alias>` et lire le coffre de cet alias.
 
 - **Profil par défaut** (`AZURE_CONFIG_DIR=~/.azure-profils/defaut`) : celui du
   cycle de vie (serveurs MCP, NetBird) et de tout terminal. Un `az login` dans un
