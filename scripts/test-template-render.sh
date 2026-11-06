@@ -201,6 +201,15 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
   [ ! -e "$pm/projects" ] && [ -f "$pm/settings.json" ] && pass "MIGR: sans 2e argument (ancien devcontainer.json) → pas de migration" || bad "MIGR: migration sans dépôt"
   HOME="$hm" sh "$CPH" render-profile ../x >/dev/null 2>&1; rc=$?
   [ "$rc" = 0 ] && [ ! -e "$pm/projects" ] && pass "MIGR: dépôt « ../x » ignoré" || bad "MIGR: dépôt « ../x » accepté"
+  [ "$(stat -c %a "$pm")" = 700 ] && pass "MIGR: dossier du profil en 700 sur l'hôte" || bad "MIGR: profil en $(stat -c %a "$pm")"
+  rm -f "$pm/.migrated-repo-a"; mkdir -p "$hm/.claude/plugins" "$pm/plugins/marketplaces"
+  printf '{"version":2,"plugins":{}}\n' >"$hm/.claude/plugins/installed_plugins.json"; find "$hm/.claude" "$pm" -exec touch -t 202001010000 {} +
+  HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
+  grep -q 'plugins installed on the host are NOT in the profile' "$pm/.migrate-repo-a.log" && [ ! -e "$pm/plugins/installed_plugins.json" ] \
+    && pass "MIGR: plugins/ du profil gardé → avertissement dans le journal" || bad "MIGR: pas d'avertissement plugins"
+  grep -q '== Done' "$pm/.migrate-repo-a.log" && ! grep -q 'Next:' "$pm/.migrate-repo-a.log" \
+    && pass "MIGR: journal auto sans « Next: copier update … »" || bad "MIGR: journal auto : « Next » présent ou « Done » absent"
+  rm -rf "$hm/.claude/plugins"
   rm -rf "$pm"; mkdir -p "$pm"; : >"$pm/.migrated-repo-a"
   HOME="$hm" sh "$CPH" render-profile repo-a >/dev/null 2>&1
   [ ! -e "$pm/projects" ] && pass "MIGR: marqueur posé à la main → jamais migré" || bad "MIGR: marqueur manuel ignoré"
@@ -522,6 +531,14 @@ STUB
   [ -z "$ww" ] && pass "KV/2: secrets_install retire l'écriture groupe/autres" || { bad "KV/2: encore modifiables par d'autres :"; echo "$ww"; }
   [ -x "$WORK/kvhome2/.local/bin/secrets" ] && [ -x "$WORK/kvhome2/.local/bin/git-credential-secrets" ] && pass "KV/2: lanceurs liés et exécutables" || bad "KV/2: liens ~/.local/bin absents"
   grep -q 'SECRETS_WORKSPACE=' "$WORK/kvhome2/.bashrc" && pass "KV/2: bloc ~/.bashrc posé" || bad "KV/2: bloc ~/.bashrc absent"
+  sed -n '/^# >>> secrets (sap-template) >>>$/,/^# <<< secrets/p' "$WORK/kvhome2/.bashrc" | sed -n 2p | grep -q '^umask 022' \
+    && pass "KV/umask: bloc ~/.bashrc commence par umask 022" || bad "KV/umask: pas d'umask 022 en tête du bloc ~/.bashrc"
+  grep -q '^function gh\b' "$WORK/kv/.devcontainer/lib-secrets.sh" && bad "KV/gh: fonction gh encore dans lib-secrets.sh" || pass "KV/gh: plus de fonction gh (l'enveloppe sert partout)"
+  for f in post-create.sh post-start.sh; do
+    n=$(grep -n '^umask 022$' "$WORK/kv/.devcontainer/$f" | head -1 | cut -d: -f1)
+    [ -n "$n" ] && [ "$n" -lt 40 ] && bash -n "$WORK/kv/.devcontainer/$f" && pass "KV/umask: $f pose umask 022 dès le début (ligne $n)" || bad "KV/umask: $f sans umask 022 en tête"
+    grep -q '^umask 022' "$WORK/off/.devcontainer/$f" 2>/dev/null && bad "KV/umask: umask dans $f du rendu par défaut" || pass "KV/umask: rendu par défaut sans umask dans $f"
+  done
 
   # --- défaut 8 : relance des serveurs MCP qui tournent ---
   mkdir -p "$WORK/opt/srv/scripts" "$WORK/rl"

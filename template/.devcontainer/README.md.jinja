@@ -148,7 +148,7 @@ SAP_URL=https://192.168.50.112:44300                         # configuration non
 | `secrets/secrets`, `secrets/personnes.conf` | copie **figée** de `4ITServices/4it-azure/outils/secrets` (commit dans `secrets/SOURCE`) | le lanceur : `run`, `check`, `qui`, `set`, `mcp-headers`. Mise à jour : `scripts/secrets-sync.sh [REF]` dans sap-template, puis une version du modèle |
 | `secrets/git-credential-secrets` | modèle | jeton GitHub de `git` (https://github.com) et de `gh` : voir « Jeton GitHub » |
 | `secrets/gh` | modèle | enveloppe de `gh`, liée en `~/.local/bin/gh` : le jeton du projet pour **tous** les processus (Claude Code, scripts, MCP), pas seulement le terminal |
-| `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude`, `gh` |
+| `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude` ; bloc `~/.bashrc` (umask 022) |
 | `.env.refs` | **projet** (`_skip_if_exists`) | les références du projet ; `copier update` ne l'écrase jamais |
 | volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, partagé par les containers du même Docker host |
 
@@ -162,8 +162,7 @@ secrets check                        # chaque référence se résout ? (noms seu
 bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les secrets
 ```
 
-`az login` suffit ensuite à tout : `gh` (enveloppe `~/.local/bin/gh` ; dans un
-terminal, la fonction `gh` lit le jeton une fois), `git` en https (assistant d'identifiants), `claude` (lancé sous
+`az login` suffit ensuite à tout : `gh` (enveloppe `~/.local/bin/gh`), `git` en https (assistant d'identifiants), `claude` (lancé sous
 `secrets run`), les serveurs MCP et les hooks projet (post-start).
 
 ### Jeton GitHub (git, gh)
@@ -180,17 +179,25 @@ Un projet qui a son propre PAT fin le déclare donc dans `.env.refs`, par exempl
 `GH_TOKEN=kv://perso/github-pat-sap-excel`. `git-credential-secrets ref` affiche
 la référence retenue (jamais la valeur).
 
-`gh` ne lit que `GH_TOKEN` / `GITHUB_TOKEN`. La fonction `gh` de `~/.bashrc`
-n'existe que dans un terminal interactif (le `~/.bashrc` de Debian s'arrête
-ailleurs) : les commandes de Claude Code, les scripts et les serveurs MCP
-passent par l'enveloppe `~/.local/bin/gh`. Elle garde un `GH_TOKEN` déjà
+`gh` ne lit que `GH_TOKEN` / `GITHUB_TOKEN`, et une fonction de `~/.bashrc`
+n'existerait que dans un terminal interactif (le `~/.bashrc` de Debian s'arrête
+ailleurs) : terminaux, commandes de Claude Code, scripts, recettes `just` et
+serveurs MCP passent tous par l'enveloppe `~/.local/bin/gh`. Elle garde un `GH_TOKEN` déjà
 défini, sinon reprend `GITHUB_PERSONAL_ACCESS_TOKEN` de l'environnement (sous
 `claude` ou post-start, lancés par `secrets run`), sinon lit la référence
-ci-dessus en mémoire ; à défaut, `gh` tourne sans jeton. Après un changement de `.env.refs`, un nouveau terminal (ou
-`unset _SECRETS_GH`) relit le jeton de `gh`.
+ci-dessus en mémoire ; à défaut, `gh` tourne sans jeton. Elle relit la référence à chaque appel : un changement de `.env.refs` vaut
+tout de suite.
 
 ### Ce que fait le cycle de vie
 
+- **umask 022** au début de post-create et de post-start, et dans les
+  terminaux (bloc `~/.bashrc`). Sous OrbStack, tout processus lancé par
+  `docker exec` (serveur VS Code, ses terminaux, `claude`, les scripts du cycle
+  de vie) a l'umask 0000, alors que le PID 1 du container a 0022 : fichiers
+  créés en 0666/0777 (Ansible ignore alors un `ansible.cfg` modifiable par
+  tous). Ce que VS Code crée lui-même (éditeur, panneau Claude Code) garde
+  0000 : aucun réglage de `devcontainer.json` ne fixe l'umask d'un `docker
+  exec`. Les fichiers déjà créés : `chmod -R go-w` une fois.
 - **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
   assistant git, bloc `~/.bashrc`), puis `secrets_load_env .env.refs` exporte les
   variables dans le script. Les serveurs MCP (`mcp-server.sh start`) et

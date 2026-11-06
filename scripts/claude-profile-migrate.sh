@@ -33,6 +33,8 @@
 #   --profiles DIR    profiles root           (default: $HOME/.claude-profiles)
 #   --apply           copy for real (default: dry-run)
 #   --force           apply even if files changed in the last 2 minutes
+#   --auto            run by claude-profile-host.sh at container start: no
+#                     "Next:" hints (copier update and rebuild are done)
 #
 # Rollback: nothing here writes to --src. Set claude_profile back to empty
 # (copier update) and rebuild: the container mounts ~/.claude again, history
@@ -47,7 +49,7 @@ die()   { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 say()   { printf '%s\n' "$*"; }
 usage() { sed -n '/^# Usage:/,/^# Rollback:/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^Rollback:/d'; exit "$1"; }
 
-PROFILE='' WS='' APPLY=0 FORCE=0
+PROFILE='' WS='' APPLY=0 FORCE=0 AUTO=0
 SRC="$HOME/.claude"
 ROOT="$HOME/.claude-profiles"
 while [ $# -gt 0 ]; do
@@ -65,6 +67,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --apply) APPLY=1; shift ;;
     --force) FORCE=1; shift ;;
+    --auto)  AUTO=1; shift ;;
     -h|--help) usage 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -111,6 +114,12 @@ for e in $CONFIG; do
   [ -e "$SRC/$e" ] || continue
   if [ -e "$DEST/$e" ]; then say "   keep  $e (already in the profile)"; else say "   COPY  $e"; fi
 done
+# plugins/ is created by Claude Code at the profile's first start: kept as is,
+# the host's installed plugins are then not carried over.
+if [ -f "$SRC/plugins/installed_plugins.json" ] && [ -e "$DEST/plugins" ] && [ ! -f "$DEST/plugins/installed_plugins.json" ]; then
+  say "   !! plugins installed on the host are NOT in the profile (its plugins/ came first):"
+  say "   !! reinstall them with /plugin in the container — list: $SRC/plugins/installed_plugins.json"
+fi
 
 say ""
 say "-- projects/ (transcripts, subagents, memory)"
@@ -292,5 +301,7 @@ fi
 say ""
 if [ "$fail" -ne 0 ]; then say "== FAILED — see above. $SRC was not modified."; exit 1; fi
 say "== Done. $SRC was not modified."
-say "   Next: copier update --data claude_profile=$PROFILE, rebuild the container,"
-say "   /login with this profile's account, then check: claude --resume"
+if [ "$AUTO" != 1 ]; then
+  say "   Next: copier update --data claude_profile=$PROFILE, rebuild the container,"
+  say "   /login with this profile's account, then check: claude --resume"
+fi

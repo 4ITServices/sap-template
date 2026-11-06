@@ -6,6 +6,13 @@
 
 WORKSPACE_DIR="${containerWorkspaceFolder:-$(pwd)}"
 cd "$WORKSPACE_DIR"
+{%- if secrets_source == 'keyvault' %}
+
+# umask : sous OrbStack, tout processus lancé par `docker exec` (serveur VS Code,
+# ses terminaux, claude, ce script) a l'umask 0000 — le PID 1 du container a
+# 0022 — et crée ses fichiers en 0666/0777. 022 ici et dans les terminaux.
+umask 022
+{%- endif %}
 
 echo "============================================"
 echo "  {{ project_name }} — post-create setup..."

@@ -8,7 +8,8 @@
 # Un lien symbolique vers un chemin de l'hôte (ex. ~/dotfiles/…) serait cassé
 # dans le container : réglages ignorés, et « can't be written (ENOENT) ».
 #
-#   - dossier du profil absent        → créé (un montage sans source échoue) ;
+#   - dossier du profil absent        → créé (un montage sans source échoue),
+#                                       puis mis en 700 (à nous seuls sur l'hôte) ;
 #   - fichier de config = lien        → remplacé par une copie de sa cible ;
 #     (settings.json, settings.local.json, CLAUDE.md, keybindings.json)
 #   - settings.json absent / cassé    → copié une fois depuis ~/.claude/settings.json
@@ -27,6 +28,9 @@ p="${1:-}"
 case "$p" in "" | */* | *..*) echo "claude-profile-host: profil invalide « $p »" >&2; exit 0 ;; esac
 dir="$HOME/.claude-profiles/$p"
 mkdir -p "$dir" || exit 0
+# Le profil (login, historique) n'est qu'à nous sur l'hôte. Le container le lit
+# toujours (virtiofs d'OrbStack : propriétaire = utilisateur du container).
+chmod 700 "$dir" 2>/dev/null
 
 for f in settings.json settings.local.json CLAUDE.md keybindings.json; do
   c="$dir/$f"
@@ -56,7 +60,7 @@ if [ -n "$ws" ] && [ -f "$mig" ] && [ -d "$HOME/.claude/projects" ] && [ ! -e "$
     [ "$n" = 0 ] && echo "claude-profile-host: une session de $ws vient d'écrire (~/.claude ou le profil), attente (2 min 30 au plus)…"
     sleep "${CLAUDE_PROFILE_WAIT:-15}"; n=$((n + 1))
   done
-  if sh "$mig" --profile "$p" --workspace "/workspaces/$ws" --apply >"$log" 2>&1; then
+  if sh "$mig" --profile "$p" --workspace "/workspaces/$ws" --apply --auto >"$log" 2>&1; then
     : >"$dir/.migrated-$ws" && echo "claude-profile-host: historique de /workspaces/$ws migré dans le profil $p (journal $log)"
   else
     echo "claude-profile-host: migration de /workspaces/$ws échouée, nouvel essai au prochain démarrage (journal $log)" >&2

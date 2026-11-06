@@ -91,6 +91,21 @@ and commit messages; this changelog starts at v0.8.12.
   project reference (`git-credential-secrets jeton`) in memory, otherwise runs
   `gh` without a token. The token goes through gh's environment only.
 
+- **`secrets_source=keyvault`: umask 022.** Under OrbStack every process
+  started by `docker exec` (the VS Code server, its terminals, `claude`, the
+  lifecycle scripts) has umask 0000, while the container's PID 1 has 0022:
+  files were created 0666/0777 (2,606 in sap-excel; Ansible then ignores a
+  world-writable `ansible.cfg`). `umask 022` now opens post-create, post-start
+  and the `~/.bashrc` block. What VS Code itself creates (editor, Claude Code
+  panel) keeps 0000: no `devcontainer.json` setting reaches a `docker exec`.
+  The `gh` shell function is gone: the `~/.local/bin/gh` wrapper serves
+  terminals too and re-reads the reference on each call.
+- **`claude_profile`:** `claude-profile-host.sh` sets the profile dir to 700 on
+  the host (still readable in the container through virtiofs). The automatic
+  migration (`--auto`) no longer ends its log with "Next: copier update…", and
+  warns when the host has installed plugins that the profile's own `plugins/`
+  (created by Claude Code at its first start) keeps out.
+
 - **`claude_profile`: the history migration is automatic.** Seen on sap-excel:
   the manual host step (`claude-profile-migrate.sh --apply` between closing
   the window and rebuilding) was skipped, and `claude --resume` came up empty
