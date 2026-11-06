@@ -29,6 +29,15 @@ and commit messages; this changelog starts at v0.8.12.
   sur la VM, identité BCA partagée) et `scripts/tunnel-daemon.sh` de
   sap-fiori-mh (le modèle repris ici). Rendu par défaut : seulement ces
   fichiers en plus et des ajouts à post-start et au README.
+- **(v0.13.0) sap-gui-mcp par le tunnel local 8021, avec jeton (PR #15).**
+  L'entrée `sap-gui-mcp` de `.mcp.json.example` vise désormais
+  `http://127.0.0.1:8021/mcp` (tunnel `mh-gui` de `tunnels.conf` vers
+  `127.0.0.1:8001` de la VM relais) et envoie
+  `Authorization: Bearer ${SAP_MCP_TOKEN}`, lu dans l'environnement par
+  Claude Code, jamais écrit dans le fichier. **Changement de défaut :** elle
+  ne vise plus la VM du labo (`http://192.168.50.119:8001/mcp`). Les projets
+  existants ne bougent pas (`.mcp.json` leur appartient) ; un nouveau projet
+  qui utilise la VM du labo remet cette URL dans son entrée `sap-gui-mcp`.
 
 ### Added
 
