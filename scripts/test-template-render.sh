@@ -636,6 +636,22 @@ else
   bad "NET+KV+IAC: copier a échoué"
 fi
 
+echo "== dbt-fleet + keyvault + claude_profile (forme du pilote mh-dbt-global-vault) =="
+if render false "$WORK/fleetkv" --data project_type=dbt-fleet --data secrets_source=keyvault --data claude_profile=fleet-kv \
+     --data bq_sandbox_project=sandbox-prj --data bq_sandbox_dataset=JDOE_run --data bq_dataset_prefix=JDOE --data dbt_target_name=prd; then
+  ok=1; for f in "$WORK/fleetkv/.devcontainer/"*.sh; do bash -n "$f" || ok=0; done
+  [ "$ok" = 1 ] && pass "FLEETKV: tous les scripts .devcontainer passent bash -n" || bad "FLEETKV: script invalide"
+  P="$WORK/fleetkv/.devcontainer/post-start.sh"
+  a=$(grep -n 'secrets_load_env' "$P" | head -1 | cut -d: -f1); b=$(grep -n 'tunnels_start' "$P" | head -1 | cut -d: -f1)
+  c=$(grep -n 'mcp-instance.sh" start' "$P" | head -1 | cut -d: -f1); d=$(grep -n 'dbt_process' "$P" | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] && [ "$c" -lt "$d" ] \
+    && pass "FLEETKV: post-start : secrets → tunnels → MCP et instances → dbt" || bad "FLEETKV: ordre post-start ($a $b $c $d)"
+  [ -f "$WORK/fleetkv/.env.refs" ] && [ -f "$WORK/fleetkv/.devcontainer/claude-profile-host.sh" ] && jsonc_ok "$WORK/fleetkv/$DC" \
+    && pass "FLEETKV: .env.refs, profil Claude, devcontainer.json valide" || bad "FLEETKV: rendu incomplet"
+else
+  bad "FLEETKV: copier a échoué"
+fi
+
 echo "== Tunnels SSH (tunnels.conf) et instances MCP (mcp-instances.conf) =="
 for D in "$WORK/off" "$WORK/kv"; do
   L=$(basename "$D")
