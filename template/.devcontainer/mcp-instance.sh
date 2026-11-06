@@ -42,6 +42,11 @@ instance() {  # VERBE NOM SERVEUR PORT PRÉFIXE
     for v in $(compgen -v "${pre}_"); do val["${v#"${pre}"_}"]="${!v}"; done
     if [ "$verbe" = start ] || [ "$verbe" = restart ]; then
       [ "${#val[@]}" -gt 0 ] || { echo "[mcp] $nom : aucune variable ${pre}_* (Key Vault : secrets run -- …)"; exit 0; }
+      # une de ses références n'a pas été résolue (post-start : SECRETS_ECHECS) :
+      # l'instance sauterait sur une config incomplète, on la saute
+      for n in ${SECRETS_ECHECS:-}; do
+        case "$n" in "${pre}"_*) echo "[mcp] $nom : sautée, $n non résolue (secrets check)"; exit 0 ;; esac
+      done
     fi
     # rien du projet ni d'une autre instance : seulement PRÉFIXE_*
     for n in $(noms_de "$WORKSPACE_DIR/.env.refs") $(noms_de "$WORKSPACE_DIR/.env") \

@@ -243,6 +243,10 @@ tunnels_epingler() {
     fi
   done < <(_tunnels_hotes)
   rm -f "$tmp"
-  [ -f "$TUNNELS_KNOWN_HOSTS" ] && sort -u -o "$TUNNELS_KNOWN_HOSTS" "$TUNNELS_KNOWN_HOSTS"
+  # dédoublonner les clés, l'en-tête de commentaires reste en tête
+  if [ -f "$TUNNELS_KNOWN_HOSTS" ]; then
+    { grep -E '^[[:space:]]*(#|$)' "$TUNNELS_KNOWN_HOSTS"; grep -vE '^[[:space:]]*(#|$)' "$TUNNELS_KNOWN_HOSTS" | sort -u; } \
+      >"$TUNNELS_KNOWN_HOSTS.tmp.$$" && mv -f "$TUNNELS_KNOWN_HOSTS.tmp.$$" "$TUNNELS_KNOWN_HOSTS"
+  fi
   return 0
 }

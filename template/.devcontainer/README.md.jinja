@@ -167,32 +167,76 @@ bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les s
 
 ### Passer un projet existant à keyvault (liste, une fois par projet)
 
-Validée sur sap-excel (sap-excel#37). Dans l'ordre :
+Validée sur sap-excel (sap-excel#37) et mh-dbt-global-vault (sa PR #1). Dans
+l'ordre :
 
-1. `copier update --vcs-ref <version> --data secrets_source=keyvault --data
+**Avant `copier update`**
+
+1. **Inventorier les lecteurs du *fichier* `.env`** : `grep -rn '\.env\b'
+   --exclude-dir=.git .`, plus les outils qui le lisent par conception
+   (python-dotenv, pydantic-settings `env_file`, `set dotenv-load` de just,
+   vite…), plus les **autres dépôts** qui lisent le `.env` de celui-ci. Les
+   faire lire l'environnement d'abord, `.env` seulement en repli, **avant** de
+   le retirer : ils cassent en silence le jour de sa suppression.
+2. **Noter ce qui vit dans le système de fichiers du container** (clés sous
+   `~/.ssh` ou `~/.local/share`, jetons d'outils) : c'est perdu au rebuild. Le
+   déposer dans Key Vault avant (une clé : `base64 -w0 <clé> | secrets set
+   kv://perso/<nom>`).
+3. **`.env.refs` écrit par la personne, trié, pas recopié** : noms et
+   références `kv://…` pour les secrets, config non secrète en clair, aucune
+   valeur secrète. Retirer :
+   - les variables d'autres projets ;
+   - `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` : `claude` tourne sous
+     ces variables (le modèle les refuse, post-start le dit) ;
+   - les identités implicites des SDK (`AZURE_CLIENT_*`,
+     `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_*`) qui ne sont pas celles du
+     projet (post-start les signale) ;
+   - toute variable qu'un outil du projet lit comme réglage alors qu'elle ne
+     le concerne pas (ex. `GCP_PROJECT_ID` lu par dbt).
+
+   `gh://token` → `kv://perso/github-pat` (ou un PAT fin du projet) :
+   `gh://token` dépend d'un `gh auth login`, perdu au rebuild.
+4. **Déposer chaque secret** (`secrets set kv://perso/<nom>`, saisie masquée),
+   puis **`secrets check` : 0 échec avant le rebuild**. L'ancien `.env` est mis
+   de côté, pas versionné.
+5. **Fixer les versions des moteurs** dont des tests ou des preuves dépendent
+   (pas de `latest`) ; `node_version` = la version de la CI.
+
+**La mise à jour**
+
+6. `copier update --vcs-ref <version> --data secrets_source=keyvault --data
    claude_profile=<projet>` (plus `enable_dotnet=true` s'il y a du C# : retirer
-   alors sa propre feature dotnet ; `node_version` = la version de la CI).
-   Relire le diff, régler les conflits.
-2. **`.env.refs` écrit par la personne** : noms et références `kv://…`, aucune
-   valeur. Chaque secret est déposé par elle, `secrets set kv://perso/<nom>`
-   (saisie masquée), puis `secrets check`. L'ancien `.env` est mis de côté, pas
-   versionné.
-3. **Un `claude_profile` propre au projet** : login, historique, mémoire,
+   alors sa propre feature dotnet). Relire le diff. Sur un conflit dans un
+   fichier que le projet a fait évoluer depuis (dbt-fleet : `dbt-doctor.sh`,
+   `dbt-run.sh`, `lib-dbt.sh`, `justfile`, `CLAUDE.md`), garder le côté projet
+   s'il est plus récent.
+7. **Un `claude_profile` propre au projet** : login, historique, mémoire,
    `/model` et effort de ce container seulement.
-4. **Les lecteurs directs de `.env` dans le code du projet** (scripts, tests,
-   recettes `just`, programmes) : `grep -rn '\.env\b' --exclude-dir=.git .`.
-   Les faire lire l'environnement d'abord, `.env` seulement en repli.
-5. **`origin` en https** : `git remote set-url origin
+8. **Un assistant git du projet** (`post-start-project.sh` qui pose son propre
+   `credential.https://github.com.helper`) remplace celui du modèle : le
+   rendre compatible (environnement, puis `git-credential-secrets`).
+   Post-start le signale.
+9. **`origin` en https** : `git remote set-url origin
    https://github.com/<org>/<dépôt>.git`. Le jeton du projet ne sert qu'en
    https ; une clé SSH n'a souvent pas le droit d'écrire.
-6. **Quitter VS Code (⌘Q), rouvrir, *Rebuild Container*, `/login`.** Puis
-   vérifier `ls -A ~/.claude | grep migrat` (`.migrated-<dossier>`) et
-   `claude --resume` (les sessions d'avant).
-7. **`chmod -R go-w .` une seule fois** : les fichiers créés avant l'umask 022
-   sont modifiables par tous ; post-start les compte et le signale.
-8. Vérifier : `secrets check`, `git-credential-secrets ref`, `gh api user`,
-   `git push --dry-run`, `~/.local/state/devcontainer/post-start.log`
-   (« N variable(s) chargée(s) », aucune valeur).
+
+**Après**
+
+10. **Quitter VS Code (⌘Q), rouvrir, *Rebuild Container*, `/login`.** Puis
+    vérifier `ls -A ~/.claude | grep migrat` (`.migrated-<dossier>`) et
+    `claude --resume` (les sessions d'avant).
+11. **`chmod -R go-w .` une seule fois** : les fichiers créés avant l'umask 022
+    sont modifiables par tous ; post-start les compte et le signale.
+12. Vérifier : `secrets check`, `git-credential-secrets ref`, `gh api user`,
+    `git push --dry-run`, `~/.local/state/devcontainer/post-start.log`
+    (« N variable(s) chargée(s) », aucune valeur, aucune ATTENTION).
+    `az` : le profil neuf a son propre abonnement par défaut (`az account set
+    --subscription …`, ou `--subscription` à chaque commande).
+13. **La preuve : mettre l'ancien `.env` de côté et tout revérifier sans lui.**
+14. Projet à relais (tunnels) : allumer la VM, monter son VPN si besoin, et
+    prévoir son arrêt automatique. Joindre le relais en ssh sans fichier
+    local : `SSH_AUTH_SOCK` = l'agent du tunnel (`tunnel.sh status`),
+    `UserKnownHostsFile=.devcontainer/tunnels.known_hosts`.
 
 ### Jeton GitHub (git, gh)
 
@@ -233,7 +277,13 @@ tout de suite.
   signale.
 - **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
   assistant git, bloc `~/.bashrc`), puis `secrets_load_env .env.refs` exporte les
-  variables dans le script. Les serveurs MCP (`mcp-server.sh start`) et
+  variables dans le script. **Une référence en échec ne bloque pas les
+  autres** : elle est nommée (ATTENTION dans le journal) et laissée de côté ;
+  seuls ses consommateurs sautent (le tunnel dont la clé manque, l'instance
+  dont une variable `PRÉFIXE_*` manque). `ANTHROPIC_*`, `CLAUDE_CODE_*` et
+  `CLAUDE_CONFIG_DIR` ne sont jamais exportés (ni ici ni pour `claude`) ; les
+  identités implicites des SDK (`AZURE_CLIENT_*`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `AWS_*`) sont exportées mais signalées. Les serveurs MCP (`mcp-server.sh start`) et
   `post-start-project.sh` (NetBird…) en **héritent** : pydantic-settings lit
   l'environnement avant tout fichier. Le lien `/opt/<serveur>/.env` n'est plus
   posé, et celui d'une version antérieure est retiré.
@@ -278,8 +328,9 @@ Azure garantissent qu'on ne lit jamais le coffre perso de l'autre.
 
 ### Serveurs MCP et Claude Code
 
-`claude` dans un terminal = `secrets run -f .env.refs -- claude …` ; si les
-références ne se résolvent pas, il prévient et démarre sans. Le panneau Claude
+`claude` dans un terminal = `claude` avec les variables de `.env.refs`, sauf
+celles qui échouent (nommées au lancement) et celles que le modèle refuse
+(`ANTHROPIC_*`…) ; si rien ne se résout, il prévient et démarre sans. Le panneau Claude
 Code de l'extension VS Code n'est **pas** lancé par cette fonction : il n'a pas
 ces variables. Pour un en-tête lu au moment de la connexion, indépendamment du
 lancement, `.mcp.json` accepte :

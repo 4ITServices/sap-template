@@ -200,6 +200,27 @@ if [ "${n_ecrit:-0}" -gt 0 ]; then
 else
   echo "  aucun"
 fi
+
+# Assistant git de github.com : un hook projet qui pose le sien (après
+# secrets_install) remplace git-credential-secrets sans rien dire.
+h="$(git config --global --get-all credential.https://github.com.helper 2>/dev/null | tail -n 1)"
+if [ "$h" != secrets ]; then
+  echo ""
+  echo "[secrets] ATTENTION : l'assistant git de github.com n'est plus git-credential-secrets (dernier : « ${h:-aucun} »)."
+  echo "  Un hook projet l'a remplacé ? Le rendre compatible (environnement, puis git-credential-secrets), ou le retirer."
+fi
+
+# Lecteurs du FICHIER .env : sans .env, ils cassent en silence (le jour de sa
+# suppression). Fichiers versionnés hors .devcontainer et doc qui l'ouvrent.
+if [ ! -e "$WORKSPACE_DIR/.env" ] && git -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  lecteurs="$(git -C "$WORKSPACE_DIR" grep -lE "[\"'/(]\.env[\"')]|load_dotenv\(|env_file *=|dotenv-load" -- . \
+      ':!.devcontainer' ':!*.md' ':!.gitignore' ':!*.example' ':!.copier-answers.yml' 2>/dev/null | head -n 20)"
+  if [ -n "$lecteurs" ]; then
+    echo ""
+    echo "[secrets] pas de .env, mais ces fichiers versionnés le lisent peut-être (environnement d'abord, .env en repli ?) :"
+    printf '%s\n' "$lecteurs" | sed 's/^/    /'
+  fi
+fi
 {%- endif %}
 
 echo ""

@@ -38,6 +38,29 @@ and commit messages; this changelog starts at v0.8.12.
   ne vise plus la VM du labo (`http://192.168.50.119:8001/mcp`). Les projets
   existants ne bougent pas (`.mcp.json` leur appartient) ; un nouveau projet
   qui utilise la VM du labo remet cette URL dans son entrée `sap-gui-mcp`.
+- **(keyvault) Retour du pilote mh-dbt-global-vault (sap-template#14).**
+  - **`.env.refs` n'est plus tout-ou-rien** : une référence en échec est
+    nommée (ATTENTION dans post-start) et laissée de côté, les autres sont
+    chargées. Seuls ses consommateurs sautent : le tunnel dont la clé manque,
+    l'instance dont une variable `PRÉFIXE_*` manque (`SECRETS_ECHECS`, des noms
+    seulement). `claude` démarre de même avec ce qui se résout. Avant, une
+    seule référence expirée éteignait serveurs MCP, tunnels et instances.
+  - **`ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` refusés** : jamais
+    exportés depuis `.env.refs`, ni par post-start ni pour `claude` (qui serait
+    parti vers un proxy avec une clé d'API au lieu du `/login`). Les identités
+    implicites des SDK (`AZURE_CLIENT_*`, `GOOGLE_APPLICATION_CREDENTIALS`,
+    `AWS_*`) sont signalées.
+  - **`gh://token` ne boucle plus** : l'enveloppe `gh` ne se rappelle pas
+    elle-même quand la référence se résout par `gh auth token`. Post-start
+    conseille `kv://perso/github-pat`.
+  - **Post-start signale** un assistant git de github.com remplacé par un hook
+    projet, et, sans `.env`, les fichiers versionnés qui le lisent encore.
+  - `tunnel.sh epingler` garde l'en-tête de `tunnels.known_hosts` en tête.
+  - Le guide « Passer un projet existant à keyvault » reprend la liste du
+    pilote (lecteurs du fichier `.env`, y compris dans d'autres dépôts ; ce
+    qui est perdu au rebuild ; tri de `.env.refs` ; `secrets check` à 0
+    avant le rebuild ; versions de moteurs fixées ; conflits dbt-fleet ;
+    abonnement az du profil neuf ; preuve sans `.env`).
 
 ### Added
 
