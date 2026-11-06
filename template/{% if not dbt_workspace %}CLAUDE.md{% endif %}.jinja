@@ -173,9 +173,11 @@ Pas de `.env` : les variables du projet viennent de `.env.refs` (versionné, **a
 - Ne JAMAIS afficher une valeur (`echo $SAP_PASSWORD`, `env`, `printenv`, `set`), ni l'écrire dans un fichier, un log ou une ligne de commande. Ne jamais `source .env` (un `.env` restant est ignoré).
 - Vérifier : `secrets check` (noms seulement). Lancer une commande avec les variables : `secrets run -- <commande>`.
 - Ajouter un secret : l'humain le dépose (`secrets set kv://perso/<nom>`, saisie masquée), puis une ligne `NOM=kv://perso/<nom>` dans `.env.refs`. Ne pas toucher aux coffres, groupes ni droits (4it-azure, `tofu/stacks/secrets`).
-- GitHub : `gh` et `git` en https lisent le jeton du projet (`GH_TOKEN`, sinon
+- GitHub : `gh` (enveloppe `~/.local/bin/gh`, aussi dans le shell de Claude Code)
+  et `git` en https lisent le jeton du projet (`GH_TOKEN`, sinon
   `GITHUB_PERSONAL_ACCESS_TOKEN` de `.env.refs`, sinon `kv://perso/github-pat`) —
-  plus de PAT dans un fichier. `git-credential-secrets ref` dit lequel.
+  plus de PAT dans un fichier, rien à passer à la main. `git-credential-secrets ref`
+  dit lequel. Un `origin` en SSH ne passe pas par ce jeton : le mettre en https.
 - Journal du dernier démarrage : `~/.local/state/devcontainer/post-start.log`.
   Après un changement de `.env.refs` ou d'un secret :
   `bash .devcontainer/post-start.sh --relance-mcp` (serveurs MCP relancés).

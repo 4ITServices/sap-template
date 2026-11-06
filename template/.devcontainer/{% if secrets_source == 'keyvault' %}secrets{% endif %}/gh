@@ -1,0 +1,44 @@
+#!/bin/sh
+# =============================================================================
+# gh — enveloppe de gh (TEMPLATE-OWNED, secrets_source=keyvault), liée en
+# ~/.local/bin/gh (avant /usr/bin dans le PATH) par secrets_install.
+#
+# La fonction de terminal `gh` (lib-secrets.sh, via ~/.bashrc) n'existe que
+# dans un shell interactif : ~/.bashrc s'arrête tout de suite ailleurs. Les
+# commandes de Claude Code, les scripts et les serveurs MCP lançaient donc gh
+# sans jeton. Cette enveloppe donne à gh le jeton GitHub du projet, partout :
+#
+#   1. GH_TOKEN ou GITHUB_TOKEN déjà défini → gh tel quel ;
+#   2. GITHUB_PERSONAL_ACCESS_TOKEN dans l'environnement (claude et post-start
+#      tournent sous `secrets run`) → passé à gh comme GH_TOKEN ;
+#   3. sinon `git-credential-secrets jeton` (référence du projet : voir
+#      `git-credential-secrets ref`), lu en mémoire ;
+#   4. échec → gh sans jeton (son propre `gh auth login`, s'il y en a un).
+# Le jeton passe par l'environnement de gh, jamais sur une ligne de commande.
+# =============================================================================
+reel=''
+moi="$0"
+case "$moi" in */*) ;; *) moi=$(command -v -- "$moi" 2>/dev/null) ;; esac
+IFS_AVANT=$IFS; IFS=:
+for d in $PATH; do
+  [ -n "$d" ] && [ -x "$d/gh" ] && [ ! -d "$d/gh" ] || continue
+  [ "$d/gh" -ef "$moi" ] && continue
+  # une autre copie de cette enveloppe (autre projet) : l'en-tête suffit
+  head -c 1024 "$d/gh" 2>/dev/null | grep -aqF 'enveloppe de gh (TEMPLATE-OWNED' && continue
+  reel="$d/gh"; break
+done
+IFS=$IFS_AVANT
+[ -n "$reel" ] || { echo "gh : binaire gh introuvable dans le PATH" >&2; exit 127; }
+
+if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+  if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+    GH_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN; export GH_TOKEN
+  else
+    aide="$(dirname "$moi")/git-credential-secrets"
+    command -v git-credential-secrets >/dev/null 2>&1 && aide=git-credential-secrets
+    t=$("$aide" jeton 2>/dev/null) || t=''
+    [ -n "$t" ] && { GH_TOKEN=$t; export GH_TOKEN; }
+    unset t
+  fi
+fi
+exec "$reel" "$@"

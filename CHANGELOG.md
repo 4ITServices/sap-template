@@ -80,6 +80,17 @@ and commit messages; this changelog starts at v0.8.12.
   target (`cp -L`) and replaces a dangling link already in the profile.
   Rendered only with a profile: without one nothing changes.
 
+- **`secrets_source=keyvault`: `gh` gets the project token in every process.**
+  Seen on sap-excel: Claude Code's Bash tool, scripts and MCP servers ran the
+  bare `gh` without a token. The `gh` shell function only exists in
+  interactive terminals (Debian's `~/.bashrc` returns early otherwise), and
+  `gh` does not read `GITHUB_PERSONAL_ACCESS_TOKEN`. New template-owned
+  `.devcontainer/secrets/gh`, linked as `~/.local/bin/gh` (ahead of `/usr/bin`)
+  by `secrets_install`. It keeps `GH_TOKEN`/`GITHUB_TOKEN`, otherwise passes
+  `GITHUB_PERSONAL_ACCESS_TOKEN` from the environment, otherwise reads the
+  project reference (`git-credential-secrets jeton`) in memory, otherwise runs
+  `gh` without a token. The token goes through gh's environment only.
+
 - **`claude_profile`: the history migration is automatic.** Seen on sap-excel:
   the manual host step (`claude-profile-migrate.sh --apply` between closing
   the window and rebuilding) was skipped, and `claude --resume` came up empty

@@ -490,6 +490,29 @@ STUB
   out="$(cd "$WORK/gh1" && printf 'protocol=https\nhost=gitlab.com\n\n' | env -u GH_TOKEN PATH="$WORK/ghbin:$PATH" "$H" get)"
   [ -z "$out" ] && pass "KV/1: git get muet hors github.com" || bad "KV/1: git get répond pour gitlab.com"
   grep -q 'github.refs' "$WORK/kv/.devcontainer/lib-secrets.sh" "$H" && bad "KV/1: github.refs encore référencé" || pass "KV/1: plus de github.refs"
+  # Enveloppe gh (~/.local/bin/gh) : jeton du projet hors terminal interactif
+  W="$WORK/kv/.devcontainer/secrets/gh"
+  mkdir -p "$WORK/vraigh" "$WORK/lbin"
+  cat >"$WORK/vraigh/gh" <<'STUB'
+#!/bin/sh
+printf 'jeton=%s|args=%s|n=%s\n' "${GH_TOKEN:-}" "$*" "$#"
+[ "${1:-}" = echec ] && exit 3
+exit 0
+STUB
+  chmod +x "$WORK/vraigh/gh"; chmod +x "$W" "$H"
+  ln -sfn "$W" "$WORK/lbin/gh"; ln -sfn "$H" "$WORK/lbin/git-credential-secrets"
+  PW="$WORK/lbin:$WORK/ghbin:$WORK/vraigh:/usr/bin:/bin"
+  gw() { env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN -u SECRETS_WORKSPACE -u SECRETS_GITHUB_REF PATH="$PW" "$@"; }
+  sh -n "$W" && grep -qF 'ln -sfn "$SECRETS_DIR/gh" "$HOME/.local/bin/gh"' "$WORK/kv/.devcontainer/lib-secrets.sh" \
+    && pass "KV/gh: enveloppe rendue, liée en ~/.local/bin/gh par secrets_install" || bad "KV/gh: enveloppe absente ou non liée"
+  [ "$(cd "$WORK/gh1" && gw GH_TOKEN=abc gh api user)" = "jeton=abc|args=api user|n=2" ] && pass "KV/gh: GH_TOKEN déjà là → inchangé" || bad "KV/gh: GH_TOKEN modifié"
+  [ "$(cd "$WORK/gh1" && gw GITHUB_PERSONAL_ACCESS_TOKEN=pat gh api user)" = "jeton=pat|args=api user|n=2" ] && pass "KV/gh: GITHUB_PERSONAL_ACCESS_TOKEN (sous secrets run) → GH_TOKEN" || bad "KV/gh: GITHUB_PERSONAL_ACCESS_TOKEN ignoré"
+  [ "$(cd "$WORK/gh1" && gw gh pr list)" = "jeton=faux-kv://perso/github-pat-sap-excel|args=pr list|n=2" ] && pass "KV/gh: sans variable → jeton de la réf. du projet (shell de Claude Code)" || bad "KV/gh: jeton du projet non lu : $(cd "$WORK/gh1" && gw gh pr list)"
+  out="$(cd "$WORK/gh1" && env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN PATH="$WORK/lbin:$WORK/vraigh:/usr/bin:/bin" gh api 'a b' "")"
+  [ "$out" = "jeton=|args=api a b |n=3" ] && pass "KV/gh: lecture impossible → gh sans jeton, arguments intacts" || bad "KV/gh: repli : $out"
+  (cd "$WORK/gh1" && gw GH_TOKEN=x gh echec >/dev/null); [ $? = 3 ] && pass "KV/gh: code de sortie de gh transmis" || bad "KV/gh: code de sortie perdu"
+  out="$(cd "$WORK/gh1" && env -u GH_TOKEN PATH="$WORK/lbin:$WORK/kv/.devcontainer/secrets:/usr/bin:/bin" GH_TOKEN=y timeout 5 gh --version 2>&1 | head -1)"
+  case "$out" in "gh version"*) pass "KV/gh: sans autre gh avant /usr/bin, pas de boucle (vrai gh trouvé)" ;; *) bad "KV/gh: boucle ou gh introuvable : $out" ;; esac
 
   # --- défaut 2 : droits, même rendu sous umask 0000 ---
   chmod 666 "$WORK/kv/.devcontainer/lib-secrets.sh" "$WORK/kv/.devcontainer/secrets"/*; chmod 777 "$WORK/kv/.devcontainer/secrets"
