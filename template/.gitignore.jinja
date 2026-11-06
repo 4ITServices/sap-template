@@ -41,9 +41,19 @@ htmlcov/
 Thumbs.db
 
 # Secrets & credentials — NE JAMAIS COMMITTER
+{%- if secrets_source == 'keyvault' %}
+# Tout .env, y compris mis de côté (.env.bak, .env.avant-keyvault…) ; seuls
+# .env.refs (références, aucune valeur) et les modèles *.example sont versionnés.
+.env
+.env.*
+!.env.refs
+!.env.example
+!.env.ecc.example
+{%- else %}
 .env
 .env.local
 .env.ecc
+{%- endif %}
 .mcp.json
 *.pem
 *.key

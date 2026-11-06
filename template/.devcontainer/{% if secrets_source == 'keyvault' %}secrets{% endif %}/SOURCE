@@ -1,0 +1,5 @@
+# Copie figée de 4ITServices/4it-azure/outils/secrets — ne pas modifier ici.
+# Mise à jour : scripts/secrets-sync.sh [REF] (dans sap-template).
+repo=4ITServices/4it-azure
+ref=7424930b565a0a4ec82dfbd51432040408133d78
+commit=7424930b565a0a4ec82dfbd51432040408133d78

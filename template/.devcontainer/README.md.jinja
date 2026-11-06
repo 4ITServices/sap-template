@@ -50,13 +50,14 @@ devcontainer.json
 5. Install Claude Code CLI
 6. Python dependencies (`uv sync`)
 7. Git submodules init
-8. Bootstrap `.env` / `.mcp.json` from examples
+8. Bootstrap {% if secrets_source == 'keyvault' %}`.mcp.json` from its example (no `.env`: `.env.refs` + Key Vault){% else %}`.env` / `.mcp.json` from examples{% endif %}
 9. MCP servers install (`lib-mcp.sh` over `mcp-servers.conf`)
 
 **post-start.sh** (runs on every start):
 1. Claude alias (`--dangerously-skip-permissions` in .bashrc)
-2. `chmod 600` on sensitive files (.env, .mcp.json)
-3. Source `.env`
+2. `chmod 600` on sensitive files ({% if secrets_source == 'keyvault' %}.env.ecc, any leftover `.env*`, .mcp.json{% else %}.env, .mcp.json{% endif %})
+3. {% if secrets_source == 'keyvault' %}Resolve `.env.refs` from Key Vault in memory (`lib-secrets.sh`) — output
+   also kept in `~/.local/state/devcontainer/post-start.log`{% else %}Source `.env`{% endif %}
 4. MCP servers: self-heal (re-clone if absent/broken), update, launch,
    port health-check (`lib-mcp.sh` over `mcp-servers.conf`)
 
@@ -80,11 +81,40 @@ same profile share its account: that is how two repos share a login.
 Everything under `~/.claude` becomes per-profile, including user settings,
 skills and plugins. They are seeded once when a repo is migrated and diverge
 afterwards.
+{%- if claude_profile %}
 
+**Model and effort per container.** `/model` and the effort level are saved in
+the user `settings.json`, i.e. the profile's: with one profile per repo they
+belong to that container alone. Before every start, `initializeCommand` runs
+`.devcontainer/claude-profile-host.sh` **on the host**: it creates the profile
+dir, replaces a symlinked `settings.json` / `settings.local.json` / `CLAUDE.md`
+/ `keybindings.json` by a copy of its target (a link to a host path such as
+`~/dotfiles/…` is dangling in the container: settings ignored, and `/model`
+fails with « can't be written (ENOENT) »), and seeds a missing `settings.json`
+once from `~/.claude/settings.json`. A real file is never touched; the host's
+own files are only read. To start again from the host settings, delete
+`~/.claude-profiles/<profile>/settings.json` and restart the container.
+{%- endif %}
+{% if claude_profile %}
+**Migrating an existing repo** (the step where history could be lost) is
+**automatic**: on the first start with a profile, `claude-profile-host.sh`
+runs `.devcontainer/claude-profile-migrate.sh --apply` on the host for this
+repo (`/workspaces/<folder>`), then leaves the marker
+`~/.claude-profiles/<profile>/.migrated-<folder>` so it never runs again; its
+output is in `.migrate-<folder>.log` next to it. If a session of the repo
+wrote to `~/.claude` less than 2 minutes earlier (container just stopped), it
+waits up to 2½ minutes; if the copy still cannot run, it starts the container
+anyway, without a marker, and tries again at the next start. To skip it,
+create the marker by hand before the first start. The same script (also
+`scripts/claude-profile-migrate.sh` in sap-template) can be run by hand, a
+dry run unless you pass `--apply`. It only **copies** (the host-wide
+`~/.claude` is only ever read) and never overwrites what the profile has:
+{%- else %}
 **Migrating an existing repo** (the step where history could be lost):
 `scripts/claude-profile-migrate.sh` in the sap-template repo, run **on the
 host** with the repo's container **stopped**. It is a dry run unless you pass
 `--apply`, and it only **copies** (the host-wide `~/.claude` is only ever read):
+{%- endif %}
 
 - user config: settings, skills, plugins…
 - the repo's `projects/<slug>/` (transcripts and memory)
@@ -92,9 +122,200 @@ host** with the repo's container **stopped**. It is a dry run unless you pass
 - its `file-history/`
 
 It never copies `.credentials.json` (you `/login` again), `backups/` or
-runtime state. Then `copier update` with the profile, rebuild, `/login`, and
-check with `claude --resume`. To roll back, set `claude_profile` back to empty
+runtime state. {% if claude_profile %}So: `copier update` with the profile, close the VS Code
+window, rebuild, `/login`, and check with `claude --resume`.{% else %}Then `copier update` with the profile, rebuild, `/login`, and
+check with `claude --resume`.{% endif %} To roll back, set `claude_profile` back to empty
 and rebuild: `~/.claude` was never modified.
+{%- if secrets_source == 'keyvault' %}
+
+## Secrets Key Vault (`secrets_source: keyvault`)
+
+Avec `secrets_source: keyvault`, le projet n'a plus de `.env` en clair. Ses
+variables viennent de **`.env.refs`**, versionné, qui ne contient **aucune
+valeur secrète** : seulement des références que le lanceur `secrets` résout
+**en mémoire** avec l'identité `az login` de la personne. Rien n'est écrit sur
+disque, aucune valeur ne passe sur une ligne de commande, chaque lecture est
+journalisée au nom de la personne (Key Vault).
+
+```bash
+GITHUB_PERSONAL_ACCESS_TOKEN=kv://perso/github-pat          # coffre perso de la personne connectée
+SAP_HANA_PASSWORD=kv://kv-4it-dev-partage/sap-hana-password  # coffre partagé
+SAP_URL=https://192.168.50.112:44300                         # configuration non secrète : en clair
+```
+
+| Pièce | Où | Rôle |
+|---|---|---|
+| `secrets/secrets`, `secrets/personnes.conf` | copie **figée** de `4ITServices/4it-azure/outils/secrets` (commit dans `secrets/SOURCE`) | le lanceur : `run`, `check`, `qui`, `set`, `mcp-headers`. Mise à jour : `scripts/secrets-sync.sh [REF]` dans sap-template, puis une version du modèle |
+| `secrets/git-credential-secrets` | modèle | jeton GitHub de `git` (https://github.com) et de `gh` : voir « Jeton GitHub » |
+| `secrets/gh` | modèle | enveloppe de `gh`, liée en `~/.local/bin/gh` : le jeton du projet pour **tous** les processus (Claude Code, scripts, MCP), pas seulement le terminal |
+| `lib-secrets.sh` | modèle | `secrets_install`, `secrets_load_env`, fonctions de terminal `profil`, `claude` ; bloc `~/.bashrc` (umask 022) |
+| `.env.refs` | **projet** (`_skip_if_exists`) | les références du projet ; `copier update` ne l'écrase jamais |
+| volume `devcontainer-azure-profils` → `~/.azure-profils` | Docker host | les sessions `az`, une par profil ; survit au rebuild, partagé par les containers du même Docker host |
+
+### Démarrer (une fois par Docker host et par personne)
+
+```bash
+az login --use-device-code --tenant 53a0f5d2-129f-454e-9ed3-1f5fed0e66e5
+secrets qui                          # compte az, coffre perso
+secrets set kv://perso/github-pat    # ton jeton GitHub (fine-grained PAT 4ITServices), saisie masquée
+secrets check                        # chaque référence se résout ? (noms seulement)
+bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les secrets
+```
+
+`az login` suffit ensuite à tout : `gh` (enveloppe `~/.local/bin/gh`), `git` en https (assistant d'identifiants), `claude` (lancé sous
+`secrets run`), les serveurs MCP et les hooks projet (post-start).
+
+### Passer un projet existant à keyvault (liste, une fois par projet)
+
+Validée sur sap-excel (sap-excel#37). Dans l'ordre :
+
+1. `copier update --vcs-ref <version> --data secrets_source=keyvault --data
+   claude_profile=<projet>` (plus `enable_dotnet=true` s'il y a du C# : retirer
+   alors sa propre feature dotnet ; `node_version` = la version de la CI).
+   Relire le diff, régler les conflits.
+2. **`.env.refs` écrit par la personne** : noms et références `kv://…`, aucune
+   valeur. Chaque secret est déposé par elle, `secrets set kv://perso/<nom>`
+   (saisie masquée), puis `secrets check`. L'ancien `.env` est mis de côté, pas
+   versionné.
+3. **Un `claude_profile` propre au projet** : login, historique, mémoire,
+   `/model` et effort de ce container seulement.
+4. **Les lecteurs directs de `.env` dans le code du projet** (scripts, tests,
+   recettes `just`, programmes) : `grep -rn '\.env\b' --exclude-dir=.git .`.
+   Les faire lire l'environnement d'abord, `.env` seulement en repli.
+5. **`origin` en https** : `git remote set-url origin
+   https://github.com/<org>/<dépôt>.git`. Le jeton du projet ne sert qu'en
+   https ; une clé SSH n'a souvent pas le droit d'écrire.
+6. **Quitter VS Code (⌘Q), rouvrir, *Rebuild Container*, `/login`.** Puis
+   vérifier `ls -A ~/.claude | grep migrat` (`.migrated-<dossier>`) et
+   `claude --resume` (les sessions d'avant).
+7. **`chmod -R go-w .` une seule fois** : les fichiers créés avant l'umask 022
+   sont modifiables par tous ; post-start les compte et le signale.
+8. Vérifier : `secrets check`, `git-credential-secrets ref`, `gh api user`,
+   `git push --dry-run`, `~/.local/state/devcontainer/post-start.log`
+   (« N variable(s) chargée(s) », aucune valeur).
+
+### Jeton GitHub (git, gh)
+
+`git` en https et `gh` prennent la **première** de ces références :
+
+1. `SECRETS_GITHUB_REF` (variable d'environnement, ex. pour un essai) ;
+2. `GH_TOKEN`, sinon `GITHUB_PERSONAL_ACCESS_TOKEN`, dans le `.env.refs` du
+   dépôt courant, puis dans celui du workspace — s'ils valent une référence
+   (`kv://…`, `gh://token`), pas une valeur en clair ;
+3. `kv://perso/github-pat`.
+
+Un projet qui a son propre PAT fin le déclare donc dans `.env.refs`, par exemple
+`GH_TOKEN=kv://perso/github-pat-sap-excel`. `git-credential-secrets ref` affiche
+la référence retenue (jamais la valeur).
+
+`gh` ne lit que `GH_TOKEN` / `GITHUB_TOKEN`, et une fonction de `~/.bashrc`
+n'existerait que dans un terminal interactif (le `~/.bashrc` de Debian s'arrête
+ailleurs) : terminaux, commandes de Claude Code, scripts, recettes `just` et
+serveurs MCP passent tous par l'enveloppe `~/.local/bin/gh`. Elle suit
+l'ordre de `git` : un `GH_TOKEN` déjà défini, sinon la référence ci-dessus,
+lue en mémoire (`git-credential-secrets source` dit d'où elle vient ; si
+c'est `GITHUB_PERSONAL_ACCESS_TOKEN` et que la variable est déjà là, sous
+`claude` ou post-start, elle est reprise sans relire le coffre) ; à défaut,
+`gh` tourne sans jeton. Elle relit la référence à chaque appel : un changement de `.env.refs` vaut
+tout de suite.
+
+### Ce que fait le cycle de vie
+
+- **umask 022** au début de post-create et de post-start, et dans les
+  terminaux (bloc `~/.bashrc`). Sous OrbStack, tout processus lancé par
+  `docker exec` (serveur VS Code, ses terminaux, `claude`, les scripts du cycle
+  de vie) a l'umask 0000, alors que le PID 1 du container a 0022 : fichiers
+  créés en 0666/0777 (Ansible ignore alors un `ansible.cfg` modifiable par
+  tous). Ce que VS Code crée lui-même (éditeur, panneau Claude Code) garde
+  0000 : aucun réglage de `devcontainer.json` ne fixe l'umask d'un `docker
+  exec`. Les fichiers déjà créés : `chmod -R go-w` une fois. Post-start
+  compte les fichiers modifiables par tous (hors `.git` et liens) et le
+  signale.
+- **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
+  assistant git, bloc `~/.bashrc`), puis `secrets_load_env .env.refs` exporte les
+  variables dans le script. Les serveurs MCP (`mcp-server.sh start`) et
+  `post-start-project.sh` (NetBird…) en **héritent** : pydantic-settings lit
+  l'environnement avant tout fichier. Le lien `/opt/<serveur>/.env` n'est plus
+  posé, et celui d'une version antérieure est retiré.
+- **Journal** : la sortie de post-start est aussi écrite dans
+  `~/.local/state/devcontainer/post-start.log` (la précédente en `.1`), lisible
+  depuis un terminal ou Claude Code — on y retrouve « N variable(s) chargée(s) ».
+  Aucune valeur n'y figure ; un hook projet (`post-start-project.sh`) ne doit
+  pas en afficher non plus.
+- **Serveurs MCP déjà lancés** : post-start garde un serveur qui répond, avec
+  les variables reçues à son lancement. Il l'arrête puis le relance quand
+  `.env.refs` a changé depuis le passage précédent (empreinte dans
+  `~/.local/state/devcontainer/env-refs.sha256`). Pour une valeur changée dans
+  le coffre (même référence) : `bash .devcontainer/post-start.sh --relance-mcp`
+  (ou `/opt/<serveur>/scripts/mcp-server.sh stop`, puis post-start).
+- **Sans session az** (premier build) : rien n'échoue. Les serveurs MCP sont
+  sautés avec la marche à suivre ; après `az login`, relancer
+  `bash .devcontainer/post-start.sh` ou redémarrer le container.
+- **Instance ECC** (`.env.ecc`) : toujours lue dans son fichier ; elle est lancée
+  **sans** les variables de `.env.refs`, qui masqueraient les siennes.
+- **`.env` restant** : ignoré par les scripts du container, jamais supprimé
+  d'office (post-start le signale et le passe en 600 ; `.gitignore` ignore tout
+  `.env*` sauf `.env.refs` et les `*.example`). Attention : un programme qui lit `.env`
+  lui-même (pydantic-settings `env_file=".env"`, python-dotenv, `set dotenv-load`
+  de just) y prend encore les variables **absentes** de l'environnement. Le
+  supprimer quand `.env.refs` couvre tout.
+
+### Container partagé : qui est connecté ?
+
+`kv://perso/…` lit le coffre de **celui qui a fait `az login`** (le lanceur
+cherche son compte dans `personnes.conf` → `kv-4it-dev-perso-<alias>`). Les droits
+Azure garantissent qu'on ne lit jamais le coffre perso de l'autre.
+
+- **Profil par défaut** (`AZURE_CONFIG_DIR=~/.azure-profils/defaut`) : celui du
+  cycle de vie (serveurs MCP, NetBird) et de tout terminal. Un `az login` dans un
+  terminal sans profil change l'identité du container entier.
+- **`profil <alias>`** (alias de `personnes.conf`) : la session az de **ce
+  terminal** seulement, dans `~/.azure-profils/<alias>`. Tout ce qu'il lance suit :
+  `secrets`, `gh`, `git`, `claude`. Les commits y sont signés au nom du compte
+  GitHub du jeton (`GIT_AUTHOR_*`, adresse noreply). `profil` affiche le profil
+  courant, `profil -` revient au défaut. `profil` refuse une session az qui
+  n'est pas celle de l'alias.
+
+### Serveurs MCP et Claude Code
+
+`claude` dans un terminal = `secrets run -f .env.refs -- claude …` ; si les
+références ne se résolvent pas, il prévient et démarre sans. Le panneau Claude
+Code de l'extension VS Code n'est **pas** lancé par cette fonction : il n'a pas
+ces variables. Pour un en-tête lu au moment de la connexion, indépendamment du
+lancement, `.mcp.json` accepte :
+
+```json
+"sap-adt-mcp": {
+  "type": "http",
+  "url": "http://127.0.0.1:8000/mcp",
+  "headersHelper": "secrets mcp-headers 'Authorization=Bearer kv://kv-4it-dev-partage/sap-adt-mcp-token'"
+}
+```
+
+### Ce qui n'est pas ici
+
+Les coffres, groupes et droits vivent dans `4ITServices/4it-azure`
+(`tofu/stacks/secrets`). Ajouter une personne : sa ligne dans `personnes.conf`
+de 4it-azure, `tofu apply`, puis `scripts/secrets-sync.sh` ici et une version du
+modèle. Le hub, la CI et les déploiements lisent Key Vault par identité managée.
+{%- endif %}
+{%- if enable_dotnet %}
+
+## .NET (`enable_dotnet`)
+
+The .NET SDK {{ dotnet_version }} comes from the `devcontainers/dotnet` feature
+(`/usr/share/dotnet`, on the PATH: launch `dotnet`, never `~/.dotnet/dotnet`).
+The NuGet cache `~/.nuget/packages` is the Docker volume
+`devcontainer-nuget-packages`, shared by the containers of the Docker host: it
+survives a rebuild (even without cache), like the `obj/project.assets.json` of
+the workspace, so the C# extension finds every package on the first start —
+no `dotnet restore` needed in a project hook. Inspect or reset it with
+`docker volume inspect|rm devcontainer-nuget-packages` (from the host, all
+containers using it stopped). After such a reset, or if the C# extension still
+reports missing packages, `dotnet restore` then « Developer: Reload Window ».
+VS Code does not wait for post-create (`waitFor`) on purpose: the volume leaves
+nothing to wait for, and waiting would delay every first open by minutes.
+{%- endif %}
 
 ## Managed MCP servers (mcp-servers.conf)
 
@@ -102,11 +323,14 @@ and rebuild: `~/.claude` was never modified.
 manages — one `NAME REPO [REF] [PORT]` line per server (`-` = unset). The
 file is **project-owned** (`_skip_if_exists`): add or pin servers there,
 and the template-owned engine (`lib-mcp.sh`, updated by `copier update`)
-takes care of cloning into `/opt/<NAME>`, building (uv/npm), symlinking
-`.env`, launching `scripts/mcp-server.sh start` and waiting for the port.
+takes care of cloning into `/opt/<NAME>`, building (uv/npm), {% if secrets_source == 'keyvault' %}passing
+the variables of `.env.refs` (resolved from Key Vault; no `.env` symlink){% else %}symlinking
+`.env`{% endif %}, launching `scripts/mcp-server.sh start` and waiting for the port.
 
-Self-healing: if the first build could not clone (typically an empty
-`GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`), fill the token and simply
+Self-healing: if the first build could not clone (typically {% if secrets_source == 'keyvault' %}no `az login`
+yet, or a `GITHUB_PERSONAL_ACCESS_TOKEN` reference of `.env.refs` that does not
+resolve — `secrets check`), fix it and simply{% else %}an empty
+`GITHUB_PERSONAL_ACCESS_TOKEN` in `.env`), fill the token and simply{% endif %}
 **restart** the container — post-start repairs the install, no rebuild
 needed. Broken half-clones are detected (not a valid git work tree) and
 re-cloned. Install/build details are logged to `/tmp/<NAME>.log`.
@@ -250,7 +474,7 @@ product side learns about the coordinator from the « Coordination » section
 of its `CLAUDE.md` (copier answer `fleet_coordinator`, set by
 `just product-new`). Hooks
 fetch the homes with the workspace token (`GITHUB_PERSONAL_ACCESS_TOKEN`,
-`.env`) for that invocation only. The rest is the single-product machinery,
+{% if secrets_source == 'keyvault' %}`.env.refs`{% else %}`.env`{% endif %}) for that invocation only. The rest is the single-product machinery,
 product by product: pinned host keys, locked and self-repairing worktrees,
 the profile hub (one profile per name asked by a product or by `global/`,
 appended when missing), the write guard.
@@ -389,7 +613,8 @@ cp .mcp.json.example .mcp.json
 ```
 
 Les credentials SAP (SAP_URL, SAP_USER, SAP_PASSWORD, etc.) sont lus automatiquement
-depuis `.env` par pydantic-settings. Le `.mcp.json` ne contient que la config
+{% if secrets_source == 'keyvault' %}dans l'environnement du serveur par pydantic-settings : post-start les y met,
+résolus depuis Key Vault (`.env.refs`).{% else %}depuis `.env` par pydantic-settings.{% endif %} Le `.mcp.json` ne contient que la config
 structurelle (commandes, chemins). Pas de secrets dedans.
 
 ## Post-`copier update` checklist
@@ -418,10 +643,24 @@ do for you:
    rebuilding: `bash .devcontainer/post-start.sh` (self-heals /opt
    installs, launches the servers, health-checks the ports). Do not run
    it on the host: it appends to `~/.bashrc` and provisions `/opt`.
+{%- if claude_profile %}
+6. **First time `claude_profile` is set**: close the VS Code window, then
+   rebuild. The first start migrates the repo's history into the profile
+   (see *Claude profiles*). If `claude --resume` is empty, read
+   `~/.claude-profiles/<profile>/.migrate-<folder>.log` on the host: nothing
+   is lost, it is still in the host's `~/.claude`.
+{%- else %}
 6. **First time `claude_profile` is set**: stop the container and migrate
    the history (see *Claude profiles*) **before** rebuilding. Otherwise the
    rebuilt container starts with an empty history. Nothing is lost: it is
    still in the host's `~/.claude`, and migrating later works too.
+{%- endif %}
+7. **After an update that touches `post-start.sh`, `post-create.sh` or
+   `~/.bashrc`**: quit VS Code (⌘Q) and reopen it, then relaunch `claude` in
+   a **new** terminal. A *Reload Window* does not restart the container, so
+   post-start does not run again, and tmux keeps the old `claude` sessions
+   with their old environment. A `devcontainer.json` change needs *Rebuild
+   Container*.
 
 ### Explicit MCP permissions
 

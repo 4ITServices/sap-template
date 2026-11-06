@@ -150,7 +150,12 @@ ensure_mcp_server() {
     case "$REPO" in
       https://github.com/*)
         echo "  NOTE: GITHUB_PERSONAL_ACCESS_TOKEN is empty — cloning a private repo will fail."
+{%- if secrets_source == 'keyvault' %}
+        echo "        Declare it in ${WORKSPACE_DIR:-the workspace}/.env.refs (kv://…) and check: secrets check"
+        echo "        (no az session? az login), then RESTART the container (no rebuild needed)."
+{%- else %}
         echo "        Fill it in ${WORKSPACE_DIR:-the workspace}/.env, then RESTART the container (no rebuild needed)."
+{%- endif %}
         ;;
     esac
   fi
@@ -171,8 +176,14 @@ ensure_mcp_server() {
     # Leave no half-clone behind so self-healing stays armed for next start.
     _mcp_rmtree "$DEST" || true
     echo "  ERROR: clone failed for $NAME (details: $LOG)"
+{%- if secrets_source == 'keyvault' %}
+    echo "         Most common cause: GITHUB_PERSONAL_ACCESS_TOKEN of .env.refs unresolved or expired"
+    echo "         (secrets check; renew it with secrets set <its kv:// reference>)."
+    echo "         Then restart the container — no rebuild needed."
+{%- else %}
     echo "         Most common cause: missing/expired GITHUB_PERSONAL_ACCESS_TOKEN in .env."
     echo "         Fix .env, then restart the container — no rebuild needed."
+{%- endif %}
   fi
   return 0
 }

@@ -11,6 +11,147 @@ and commit messages; this changelog starts at v0.8.12.
 
 ### Added
 
+- **New `secrets_source` question (`env` | `keyvault`, default `env`): read
+  the project secrets from Azure Key Vault instead of a cleartext `.env`.**
+  With `env` nothing changes — the whole project renders byte-identical to the
+  previous release, docs included; only `.copier-answers.yml` gains the answers
+  (checked by `ENV_BASE_REF=<ref> scripts/test-template-render.sh`).
+  `.devcontainer/README.md` and `.devcontainer/lib-mcp.sh` become `.jinja` so
+  that their texts follow the mode. With `keyvault`:
+  - `.env.refs` (versioned, `_skip_if_exists`) holds **references only** —
+    `kv://<vault>/<secret>`, `kv://perso/<secret>` (the vault of whoever ran
+    `az login`, resolved through `personnes.conf`), `gh://token` — plus
+    non-secret config in clear. `.env.example` becomes the how-to.
+  - The `secrets` launcher of `4ITServices/4it-azure` (`outils/secrets`) ships
+    as a **frozen copy** in `.devcontainer/secrets/` (commit recorded in
+    `SOURCE`, refreshed by `scripts/secrets-sync.sh [REF]`).
+  - New template-owned `.devcontainer/lib-secrets.sh`: post-create and
+    post-start resolve `.env.refs` **in memory** (no `source .env` anywhere);
+    MCP servers and `post-start-project.sh` (NetBird…) inherit the variables;
+    the `/opt/<server>/.env` symlink is no longer laid down (a stale one is
+    removed); the ECC instance starts without the S/4 variables. Without an
+    `az` session nothing fails: the MCP servers are skipped with the steps to
+    follow.
+  - GitHub without a shared PAT: `gh` (shell function) and `git` over https
+    (`git-credential-secrets` helper for github.com) read the token **of the
+    project**: `GH_TOKEN`, else `GITHUB_PERSONAL_ACCESS_TOKEN`, of the
+    `.env.refs` of the current repository (then of the workspace) when it is a
+    reference, else `kv://perso/github-pat`; `SECRETS_GITHUB_REF` overrides.
+    `git-credential-secrets ref` shows the choice (never the value). `az
+    login` is the only login.
+  - Hardening: `secrets_install` removes group/other write on
+    `lib-secrets.sh` and `.devcontainer/secrets/*` (copier renders them with
+    the container umask 0000); post-start puts every leftover `.env*` (not
+    `.env.refs` nor `*.example`) in 600; `.gitignore` ignores `.env.*` except
+    `.env.refs` and the `*.example` templates, so a set-aside `.env.bak` is
+    never committed by a `git add -A`.
+  - post-start keeps its output in `~/.local/state/devcontainer/post-start.log`
+    (previous run in `.1`, mode 600, no value in it), readable from a terminal
+    or Claude Code. It restarts the MCP servers already answering when
+    `.env.refs` changed since its previous run (fingerprint of the file only),
+    or on demand with `bash .devcontainer/post-start.sh --relance-mcp` (a value
+    changed in the vault under the same reference).
+  - Terminal: `claude` runs under `secrets run` (falls back, with a warning,
+    when the references do not resolve); `profil <alias>` gives a terminal its
+    own `az` session (`AZURE_CONFIG_DIR`) — for a container shared by two
+    people — and signs its commits with the GitHub account of the token.
+  - `devcontainer.json`: `azure-cli` feature, `az` sessions in the Docker
+    volume `devcontainer-azure-profils` (survives rebuilds),
+    `AZURE_CONFIG_DIR` for the default session.
+  - Docs: `.devcontainer/README.md` « Secrets Key Vault », a secrets section in
+    `CLAUDE.md`; no text of the lifecycle or of `lib-mcp.sh` points at a
+    `.env` any more. The template repository's own `.devcontainer` dogfoods it
+    (links to the template files, `.env.refs` versioned).
+  - Piloted on sap-excel (rebuild without cache, then every check without any
+    `.env`); the defects it found are fixed above.
+
+- **`claude_profile`: model and effort level per container.** `/model` and
+  the effort level are saved in the user `settings.json`, i.e. the profile's;
+  but a `settings.json` symlinked to a host path (`~/dotfiles/…`) is dangling
+  in the container — settings silently ignored, and `/model` fails with
+  « couldn't save it as your default: ~/.claude/settings.json can't be written
+  (ENOENT) ». `initializeCommand` now also runs the new template-owned
+  `.devcontainer/claude-profile-host.sh` **on the host** before every start:
+  a symlinked `settings.json` / `settings.local.json` / `CLAUDE.md` /
+  `keybindings.json` of the profile becomes a copy of its target, a missing
+  `settings.json` is seeded once from `~/.claude/settings.json`, a real file
+  is never touched, the host's files are only read.
+  `scripts/claude-profile-migrate.sh` copies a symlinked config entry as its
+  target (`cp -L`) and replaces a dangling link already in the profile.
+  Rendered only with a profile: without one nothing changes.
+
+- **`secrets_source=keyvault`: `gh` gets the project token in every process.**
+  Seen on sap-excel: Claude Code's Bash tool, scripts and MCP servers ran the
+  bare `gh` without a token. The `gh` shell function only exists in
+  interactive terminals (Debian's `~/.bashrc` returns early otherwise), and
+  `gh` does not read `GITHUB_PERSONAL_ACCESS_TOKEN`. New template-owned
+  `.devcontainer/secrets/gh`, linked as `~/.local/bin/gh` (ahead of `/usr/bin`)
+  by `secrets_install`. It keeps `GH_TOKEN`/`GITHUB_TOKEN`, otherwise passes
+  `GITHUB_PERSONAL_ACCESS_TOKEN` from the environment, otherwise reads the
+  project reference (`git-credential-secrets jeton`) in memory, otherwise runs
+  `gh` without a token. The token goes through gh's environment only.
+
+- **New `node_version` question (default `22`), for every project.** The
+  `devcontainers/node` feature had no version: a rebuild without cache
+  installed the latest (Node 26) while CI ran 22, and from Node 25 Node's own
+  `localStorage` hides jsdom's in Vitest 2 (33 failing tests in sap-excel).
+  The answer pins the feature and renders `.nvmrc`; a CI job reads it with
+  `actions/setup-node` + `node-version-file: .nvmrc` (the template's own
+  `ci.yml` has no Node step). Only intended changes in the default render:
+  `.nvmrc`, the node feature line, and README additions — the render test now
+  checks exactly that against `main`.
+- **README, post-update checklist, step 7 (every project):** after an update
+  that touches `post-start.sh`, `post-create.sh` or `~/.bashrc`, quit VS Code
+  and reopen, then relaunch `claude` in a new terminal: *Reload Window* does
+  not restart the container, and tmux keeps the old `claude`.
+- **`secrets_source=keyvault`:** post-start counts the repo's world-writable
+  files (outside `.git`, symlinks excluded), shows five and the fix
+  (`chmod -R go-w`); what VS Code creates itself keeps umask 0000. The `gh`
+  wrapper follows git's order exactly: `GH_TOKEN`, then the reference of
+  `git-credential-secrets ref` (`SECRETS_GITHUB_REF` first). New
+  `git-credential-secrets source` names where the reference came from; the
+  wrapper reuses `GITHUB_PERSONAL_ACCESS_TOKEN` from the environment only
+  when that is it. New README list « Passer un projet existant à keyvault ».
+
+- **`secrets_source=keyvault`: umask 022.** Under OrbStack every process
+  started by `docker exec` (the VS Code server, its terminals, `claude`, the
+  lifecycle scripts) has umask 0000, while the container's PID 1 has 0022:
+  files were created 0666/0777 (2,606 in sap-excel; Ansible then ignores a
+  world-writable `ansible.cfg`). `umask 022` now opens post-create, post-start
+  and the `~/.bashrc` block. What VS Code itself creates (editor, Claude Code
+  panel) keeps 0000: no `devcontainer.json` setting reaches a `docker exec`.
+  The `gh` shell function is gone: the `~/.local/bin/gh` wrapper serves
+  terminals too and re-reads the reference on each call.
+- **`claude_profile`:** `claude-profile-host.sh` sets the profile dir to 700 on
+  the host (still readable in the container through virtiofs). The automatic
+  migration (`--auto`) no longer ends its log with "Next: copier update…", and
+  warns when the host has installed plugins that the profile's own `plugins/`
+  (created by Claude Code at its first start) keeps out.
+
+- **`claude_profile`: the history migration is automatic.** Seen on sap-excel:
+  the manual host step (`claude-profile-migrate.sh --apply` between closing
+  the window and rebuilding) was skipped, and `claude --resume` came up empty
+  after the rebuild. `claude-profile-host.sh` now gets the workspace folder
+  (`${localWorkspaceFolderBasename}`) and, on the first start, runs the
+  migration script, now shipped as `.devcontainer/claude-profile-migrate.sh`
+  (same file as `scripts/`), for `/workspaces/<folder>`. It leaves a marker
+  `~/.claude-profiles/<profile>/.migrated-<folder>` and a log
+  `.migrate-<folder>.log`. A session that wrote less than 2 minutes earlier
+  is waited for (2½ min at most); on failure the container starts anyway and
+  the next start tries again. It never overwrites the profile and only reads
+  `~/.claude`. A repo already migrated by hand is merged once (files it lacks
+  only). Upgrading: close the window, rebuild, `/login`.
+
+- **New `enable_dotnet` question (default `false`) with `dotnet_version`
+  (default `10.0`)** for projects with C#: the `devcontainers/dotnet` feature
+  and a Docker volume `devcontainer-nuget-packages` on `~/.nuget/packages`
+  (made over to `vscode` by `onCreateCommand`). The workspace's
+  `obj/project.assets.json` survive a rebuild; the packages they point at now
+  do too, so the C# extension no longer reports missing packages after a
+  rebuild and no project hook needs a `dotnet restore`. VS Code is not made to
+  wait for post-create (`waitFor`): with the volume there is nothing left to
+  wait for, and the first open would be minutes slower on every rebuild.
+
 - **New `dbt-project` project type (`project_type: dbt-project`): take over an
   existing dbt BigQuery project and migrate it from dbt Core 1.x to dbt v2,
   both versions side by side in one container.** The repository's `main`

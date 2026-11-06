@@ -1,0 +1,80 @@
+#!/bin/sh
+# =============================================================================
+# claude-profile-host.sh PROFIL [DÉPÔT] — tourne SUR L'HÔTE (initializeCommand), avant
+# chaque démarrage du container (TEMPLATE-OWNED, rendu avec claude_profile).
+#
+# Le container monte ~/.claude-profiles/PROFIL (hôte) sur ~/.claude : son
+# settings.json est celui de CE container. /model et l'effort y écrivent.
+# Un lien symbolique vers un chemin de l'hôte (ex. ~/dotfiles/…) serait cassé
+# dans le container : réglages ignorés, et « can't be written (ENOENT) ».
+#
+#   - dossier du profil absent        → créé (un montage sans source échoue),
+#                                       puis mis en 700 (à nous seuls sur l'hôte) ;
+#   - fichier de config = lien        → remplacé par une copie de sa cible ;
+#     (settings.json, settings.local.json, CLAUDE.md, keybindings.json)
+#   - settings.json absent / cassé    → copié une fois depuis ~/.claude/settings.json
+#                                       (lien suivi), sinon {} ;
+#   - vrai fichier                    → jamais touché : il est au container.
+#   - historique de /workspaces/DÉPÔT → migré UNE fois depuis ~/.claude par
+#     claude-profile-migrate.sh --apply (sessions, mémoire, history.jsonl,
+#     /rewind), sans rien écraser ; marqueur PROFIL/.migrated-DÉPÔT, journal
+#     PROFIL/.migrate-DÉPÔT.log. Échec (session encore active…) → pas de
+#     marqueur, nouvel essai au démarrage suivant. Pour ne jamais migrer :
+#     touch ~/.claude-profiles/PROFIL/.migrated-DÉPÔT
+# Ne lit que ~/.claude ; n'écrit que dans le dossier du profil. Rend toujours 0 :
+# ne bloque jamais le démarrage. sh POSIX (bash 3.2 de macOS, Linux).
+# =============================================================================
+p="${1:-}"
+case "$p" in "" | */* | *..*) echo "claude-profile-host: profil invalide « $p »" >&2; exit 0 ;; esac
+dir="$HOME/.claude-profiles/$p"
+mkdir -p "$dir" || exit 0
+# Le profil (login, historique) n'est qu'à nous sur l'hôte. Le container le lit
+# toujours (virtiofs d'OrbStack : propriétaire = utilisateur du container).
+chmod 700 "$dir" 2>/dev/null
+
+for f in settings.json settings.local.json CLAUDE.md keybindings.json; do
+  c="$dir/$f"
+  [ -L "$c" ] || continue
+  if [ -f "$c" ]; then
+    # cible lisible ici (hôte) : copie, puis le renommage remplace le lien
+    cp "$c" "$c.tmp.$$" && mv -f "$c.tmp.$$" "$c" && echo "claude-profile-host: $p/$f : lien remplacé par une copie de sa cible"
+  else
+    rm -f "$c" && echo "claude-profile-host: $p/$f : lien cassé retiré"
+  fi
+  rm -f "$c.tmp.$$"
+done
+
+# --- Historique : migration automatique, une fois par dépôt -------------------
+ws="${2:-}"
+case "$ws" in "" | */* | .*) ws='' ;; esac
+mig="$(cd "$(dirname "$0")" && pwd)/claude-profile-migrate.sh"
+if [ -n "$ws" ] && [ -f "$mig" ] && [ -d "$HOME/.claude/projects" ] && [ ! -e "$dir/.migrated-$ws" ]; then
+  log="$dir/.migrate-$ws.log"
+  slug=$(printf '%s' "/workspaces/$ws" | sed 's/[^a-zA-Z0-9]/-/g')
+  # Une session de ce dépôt vient d'écrire, dans ~/.claude ou dans le profil
+  # (container arrêté à l'instant) : attendre qu'elle se taise, la migration
+  # refuse les fichiers vivants.
+  n=0
+  while [ "$n" -lt 10 ] && [ -n "$(find "$HOME/.claude/projects/$slug" "$HOME/.claude/projects/$slug"-* \
+      "$dir/history.jsonl" "$dir/projects/$slug" -type f -mmin -2 2>/dev/null | head -n 1)" ]; do
+    [ "$n" = 0 ] && echo "claude-profile-host: une session de $ws vient d'écrire (~/.claude ou le profil), attente (2 min 30 au plus)…"
+    sleep "${CLAUDE_PROFILE_WAIT:-15}"; n=$((n + 1))
+  done
+  if sh "$mig" --profile "$p" --workspace "/workspaces/$ws" --apply --auto >"$log" 2>&1; then
+    : >"$dir/.migrated-$ws" && echo "claude-profile-host: historique de /workspaces/$ws migré dans le profil $p (journal $log)"
+  else
+    echo "claude-profile-host: migration de /workspaces/$ws échouée, nouvel essai au prochain démarrage (journal $log)" >&2
+  fi
+fi
+
+c="$dir/settings.json"
+if [ ! -e "$c" ]; then
+  if [ -f "$HOME/.claude/settings.json" ]; then
+    cp "$HOME/.claude/settings.json" "$c.tmp.$$" && mv -f "$c.tmp.$$" "$c" \
+      && echo "claude-profile-host: $p/settings.json créé depuis ~/.claude/settings.json"
+  else
+    printf '{}\n' >"$c" && echo "claude-profile-host: $p/settings.json créé vide"
+  fi
+  rm -f "$c.tmp.$$"
+fi
+exit 0

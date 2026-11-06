@@ -19,6 +19,30 @@ BASHRC="$HOME/.bashrc"
 # subprocess we launch (notably post-start-project.sh and the MCP servers it
 # spawns). Re-export the same PATH that post-create.sh sets up.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.claude/bin:$PATH"
+{%- if secrets_source == 'keyvault' %}
+
+# umask : sous OrbStack, tout processus lancé par `docker exec` (serveur VS Code,
+# ses terminaux, claude, ce script) a l'umask 0000 — le PID 1 du container a
+# 0022 — et crée ses fichiers en 0666/0777. 022 ici et dans les terminaux.
+umask 022
+
+# Journal : aussi dans ~/.local/state/devcontainer/post-start.log (le précédent
+# en .1), relisible depuis un terminal ou Claude Code — la sortie « Dev
+# Containers » de VS Code ne l'est pas. Aucune valeur secrète : rien ici n'en
+# affiche (noms, références et longueurs seulement).
+POST_START_LOG="$HOME/.local/state/devcontainer/post-start.log"
+mkdir -p "$(dirname "$POST_START_LOG")"
+[ -f "$POST_START_LOG" ] && mv -f "$POST_START_LOG" "$POST_START_LOG.1"
+( umask 077; : >"$POST_START_LOG" )
+exec > >(tee -a "$POST_START_LOG") 2>&1
+echo "post-start $(date -Is)"
+
+# --relance-mcp (ou SECRETS_RELANCE_MCP=1) : arrête les serveurs MCP qui
+# répondent déjà, pour les relancer avec les valeurs du moment (secret changé
+# dans le coffre). Un .env.refs modifié depuis le dernier passage suffit.
+SECRETS_RELANCE_MCP="${SECRETS_RELANCE_MCP:-0}"
+[ "${1:-}" = "--relance-mcp" ] && SECRETS_RELANCE_MCP=1
+{%- endif %}
 
 echo "============================================"
 echo "  Post-start checks..."
@@ -37,10 +61,31 @@ fi
 
 # --- Sécurisation des fichiers sensibles ---
 echo "[2/4] Securing sensitive files..."
+{%- if secrets_source == 'keyvault' %}
+# .env.ecc et tout .env restant ou mis de côté (.env, .env.bak…) : 600.
+# .env.refs et les modèles *.example ne contiennent aucune valeur secrète.
+for f in "$WORKSPACE_DIR"/.env "$WORKSPACE_DIR"/.env.*; do
+  [ -f "$f" ] || continue
+  case "${f##*/}" in .env.refs | *.example) continue ;; esac
+  chmod 600 "$f" && echo "  ${f##*/}"
+done
+chmod 600 "$WORKSPACE_DIR/.mcp.json" 2>/dev/null && echo "  .mcp.json" || true
+{%- else %}
 chmod 600 "$WORKSPACE_DIR/.env"      2>/dev/null && echo "  .env" || true
 chmod 600 "$WORKSPACE_DIR/.env.ecc"  2>/dev/null && echo "  .env.ecc" || true
 chmod 600 "$WORKSPACE_DIR/.mcp.json" 2>/dev/null && echo "  .mcp.json" || true
-
+{%- endif %}
+{% if secrets_source == 'keyvault' %}
+# --- Secrets : .env.refs résolu depuis Key Vault, en mémoire ---
+# Le .env n'est plus lu (un .env restant est ignoré, jamais supprimé). Les
+# variables chargées ici passent aux serveurs MCP et à post-start-project.sh
+# (NetBird…), qui en héritent sans relire de fichier.
+echo "[3/4] Secrets (Key Vault)..."
+source "$WORKSPACE_DIR/.devcontainer/lib-secrets.sh"
+secrets_install "$WORKSPACE_DIR"
+SECRETS_OK=0
+secrets_load_env "$WORKSPACE_DIR/.env.refs" && SECRETS_OK=1
+{%- else %}
 # --- Chargement du .env ---
 echo "[3/4] Loading .env..."
 if [ -f "$WORKSPACE_DIR/.env" ]; then
@@ -49,6 +94,7 @@ if [ -f "$WORKSPACE_DIR/.env" ]; then
 else
   echo "  .env not found — copy from .env.example if needed"
 fi
+{%- endif %}
 
 # =============================================================================
 # MCP servers (template-managed — lib-mcp.sh + mcp-servers.conf)
@@ -59,14 +105,30 @@ fi
 echo ""
 echo "[4/4] MCP servers (mcp-servers.conf)..."
 source "$WORKSPACE_DIR/.devcontainer/lib-mcp.sh"
+{%- if secrets_source == 'keyvault' %}
+secrets_override_mcp_link_env
+if [ "$SECRETS_OK" = 1 ]; then
+  secrets_mcp_relance "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" "$WORKSPACE_DIR/.env.refs" "$SECRETS_RELANCE_MCP"
+  mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
+else
+  echo "[mcp] skipped: .env.refs not resolved (see [3/4]) — az login, then"
+  echo "      bash .devcontainer/post-start.sh   (or restart the container)"
+fi
+{%- else %}
 mcp_process_manifest "$WORKSPACE_DIR/.devcontainer/mcp-servers.conf" start
+{%- endif %}
 
 # Optional second sap-adt-mcp instance targeting SAP ECC EHP8 on port 8001.
 # Runtime-gated, not Jinja-gated: starts only when both .env.ecc and the ECC
 # launcher exist, so ECC can be flipped on/off without re-running copier.
 SAP_ADT_ECC_LAUNCHER="/opt/sap-adt-mcp/scripts/mcp-server-ecc.sh"
 if [ -f "/opt/sap-adt-mcp/.env.ecc" ] && [ -x "$SAP_ADT_ECC_LAUNCHER" ]; then
+{%- if secrets_source == 'keyvault' %}
+  # sans les variables S/4HANA de .env.refs : elles l'emporteraient sur .env.ecc
+  secrets_sans_refs "$WORKSPACE_DIR/.env.refs" "$SAP_ADT_ECC_LAUNCHER" start
+{%- else %}
   "$SAP_ADT_ECC_LAUNCHER" start
+{%- endif %}
   mcp_wait_port "sap-adt-ecc" 8001 "/opt/sap-adt-mcp/logs/server-ecc.log"
 fi
 {%- if dbt_workspace %}
@@ -97,6 +159,22 @@ if [ -f "$PROJECT_POST_START" ]; then
 else
   echo "  (no post-start-project.sh — see post-start-project.example.sh)"
 fi
+{%- if secrets_source == 'keyvault' %}
+
+# Fichiers modifiables par tous : ce que VS Code crée lui-même (éditeur,
+# panneau Claude Code) garde l'umask 0000 du `docker exec` d'OrbStack, que
+# l'umask 022 de ce script et des terminaux ne couvre pas. Hors .git et liens.
+echo ""
+echo "[umask] fichiers modifiables par tous dans le dépôt..."
+n_ecrit=$(find "$WORKSPACE_DIR" -path "$WORKSPACE_DIR/.git" -prune -o ! -type l -perm -0002 -print 2>/dev/null | wc -l | tr -d ' ')
+if [ "${n_ecrit:-0}" -gt 0 ]; then
+  echo "  ATTENTION : $n_ecrit fichier(s) ou dossier(s) modifiables par tous, par exemple :"
+  find "$WORKSPACE_DIR" -path "$WORKSPACE_DIR/.git" -prune -o ! -type l -perm -0002 -print 2>/dev/null | head -n 5 | sed "s|^$WORKSPACE_DIR/|    |"
+  echo "  Correction : chmod -R go-w \"$WORKSPACE_DIR\""
+else
+  echo "  aucun"
+fi
+{%- endif %}
 
 echo ""
 echo "============================================"
