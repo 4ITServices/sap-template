@@ -46,7 +46,9 @@
   ],
 
   "features": {
-    "ghcr.io/devcontainers/features/node:1": {},
+    // Version fixée (copier node_version, comme .nvmrc que la CI lit) : sans
+    // elle, un rebuild sans cache installe la dernière Node.
+    "ghcr.io/devcontainers/features/node:1": { "version": "{{ node_version }}" },
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers/features/git-lfs:1": {}{% if enable_iac or secrets_source == 'keyvault' %},
     "ghcr.io/devcontainers/features/azure-cli:1": {}{% endif %}{% if enable_iac %},

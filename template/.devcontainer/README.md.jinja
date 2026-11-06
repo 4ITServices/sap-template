@@ -165,6 +165,35 @@ bash .devcontainer/post-start.sh     # démarre serveurs MCP et hooks avec les s
 `az login` suffit ensuite à tout : `gh` (enveloppe `~/.local/bin/gh`), `git` en https (assistant d'identifiants), `claude` (lancé sous
 `secrets run`), les serveurs MCP et les hooks projet (post-start).
 
+### Passer un projet existant à keyvault (liste, une fois par projet)
+
+Validée sur sap-excel (sap-excel#37). Dans l'ordre :
+
+1. `copier update --vcs-ref <version> --data secrets_source=keyvault --data
+   claude_profile=<projet>` (plus `enable_dotnet=true` s'il y a du C# : retirer
+   alors sa propre feature dotnet ; `node_version` = la version de la CI).
+   Relire le diff, régler les conflits.
+2. **`.env.refs` écrit par la personne** : noms et références `kv://…`, aucune
+   valeur. Chaque secret est déposé par elle, `secrets set kv://perso/<nom>`
+   (saisie masquée), puis `secrets check`. L'ancien `.env` est mis de côté, pas
+   versionné.
+3. **Un `claude_profile` propre au projet** : login, historique, mémoire,
+   `/model` et effort de ce container seulement.
+4. **Les lecteurs directs de `.env` dans le code du projet** (scripts, tests,
+   recettes `just`, programmes) : `grep -rn '\.env\b' --exclude-dir=.git .`.
+   Les faire lire l'environnement d'abord, `.env` seulement en repli.
+5. **`origin` en https** : `git remote set-url origin
+   https://github.com/<org>/<dépôt>.git`. Le jeton du projet ne sert qu'en
+   https ; une clé SSH n'a souvent pas le droit d'écrire.
+6. **Quitter VS Code (⌘Q), rouvrir, *Rebuild Container*, `/login`.** Puis
+   vérifier `ls -A ~/.claude | grep migrat` (`.migrated-<dossier>`) et
+   `claude --resume` (les sessions d'avant).
+7. **`chmod -R go-w .` une seule fois** : les fichiers créés avant l'umask 022
+   sont modifiables par tous ; post-start les compte et le signale.
+8. Vérifier : `secrets check`, `git-credential-secrets ref`, `gh api user`,
+   `git push --dry-run`, `~/.local/state/devcontainer/post-start.log`
+   (« N variable(s) chargée(s) », aucune valeur).
+
 ### Jeton GitHub (git, gh)
 
 `git` en https et `gh` prennent la **première** de ces références :
@@ -182,10 +211,12 @@ la référence retenue (jamais la valeur).
 `gh` ne lit que `GH_TOKEN` / `GITHUB_TOKEN`, et une fonction de `~/.bashrc`
 n'existerait que dans un terminal interactif (le `~/.bashrc` de Debian s'arrête
 ailleurs) : terminaux, commandes de Claude Code, scripts, recettes `just` et
-serveurs MCP passent tous par l'enveloppe `~/.local/bin/gh`. Elle garde un `GH_TOKEN` déjà
-défini, sinon reprend `GITHUB_PERSONAL_ACCESS_TOKEN` de l'environnement (sous
-`claude` ou post-start, lancés par `secrets run`), sinon lit la référence
-ci-dessus en mémoire ; à défaut, `gh` tourne sans jeton. Elle relit la référence à chaque appel : un changement de `.env.refs` vaut
+serveurs MCP passent tous par l'enveloppe `~/.local/bin/gh`. Elle suit
+l'ordre de `git` : un `GH_TOKEN` déjà défini, sinon la référence ci-dessus,
+lue en mémoire (`git-credential-secrets source` dit d'où elle vient ; si
+c'est `GITHUB_PERSONAL_ACCESS_TOKEN` et que la variable est déjà là, sous
+`claude` ou post-start, elle est reprise sans relire le coffre) ; à défaut,
+`gh` tourne sans jeton. Elle relit la référence à chaque appel : un changement de `.env.refs` vaut
 tout de suite.
 
 ### Ce que fait le cycle de vie
@@ -197,7 +228,9 @@ tout de suite.
   créés en 0666/0777 (Ansible ignore alors un `ansible.cfg` modifiable par
   tous). Ce que VS Code crée lui-même (éditeur, panneau Claude Code) garde
   0000 : aucun réglage de `devcontainer.json` ne fixe l'umask d'un `docker
-  exec`. Les fichiers déjà créés : `chmod -R go-w` une fois.
+  exec`. Les fichiers déjà créés : `chmod -R go-w` une fois. Post-start
+  compte les fichiers modifiables par tous (hors `.git` et liens) et le
+  signale.
 - **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,
   assistant git, bloc `~/.bashrc`), puis `secrets_load_env .env.refs` exporte les
   variables dans le script. Les serveurs MCP (`mcp-server.sh start`) et
@@ -622,6 +655,12 @@ do for you:
    rebuilt container starts with an empty history. Nothing is lost: it is
    still in the host's `~/.claude`, and migrating later works too.
 {%- endif %}
+7. **After an update that touches `post-start.sh`, `post-create.sh` or
+   `~/.bashrc`**: quit VS Code (⌘Q) and reopen it, then relaunch `claude` in
+   a **new** terminal. A *Reload Window* does not restart the container, so
+   post-start does not run again, and tmux keeps the old `claude` sessions
+   with their old environment. A `devcontainer.json` change needs *Rebuild
+   Container*.
 
 ### Explicit MCP permissions
 

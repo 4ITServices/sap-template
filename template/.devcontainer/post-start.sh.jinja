@@ -159,6 +159,22 @@ if [ -f "$PROJECT_POST_START" ]; then
 else
   echo "  (no post-start-project.sh — see post-start-project.example.sh)"
 fi
+{%- if secrets_source == 'keyvault' %}
+
+# Fichiers modifiables par tous : ce que VS Code crée lui-même (éditeur,
+# panneau Claude Code) garde l'umask 0000 du `docker exec` d'OrbStack, que
+# l'umask 022 de ce script et des terminaux ne couvre pas. Hors .git et liens.
+echo ""
+echo "[umask] fichiers modifiables par tous dans le dépôt..."
+n_ecrit=$(find "$WORKSPACE_DIR" -path "$WORKSPACE_DIR/.git" -prune -o ! -type l -perm -0002 -print 2>/dev/null | wc -l | tr -d ' ')
+if [ "${n_ecrit:-0}" -gt 0 ]; then
+  echo "  ATTENTION : $n_ecrit fichier(s) ou dossier(s) modifiables par tous, par exemple :"
+  find "$WORKSPACE_DIR" -path "$WORKSPACE_DIR/.git" -prune -o ! -type l -perm -0002 -print 2>/dev/null | head -n 5 | sed "s|^$WORKSPACE_DIR/|    |"
+  echo "  Correction : chmod -R go-w \"$WORKSPACE_DIR\""
+else
+  echo "  aucun"
+fi
+{%- endif %}
 
 echo ""
 echo "============================================"

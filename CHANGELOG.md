@@ -91,6 +91,28 @@ and commit messages; this changelog starts at v0.8.12.
   project reference (`git-credential-secrets jeton`) in memory, otherwise runs
   `gh` without a token. The token goes through gh's environment only.
 
+- **New `node_version` question (default `22`), for every project.** The
+  `devcontainers/node` feature had no version: a rebuild without cache
+  installed the latest (Node 26) while CI ran 22, and from Node 25 Node's own
+  `localStorage` hides jsdom's in Vitest 2 (33 failing tests in sap-excel).
+  The answer pins the feature and renders `.nvmrc`; a CI job reads it with
+  `actions/setup-node` + `node-version-file: .nvmrc` (the template's own
+  `ci.yml` has no Node step). Only intended changes in the default render:
+  `.nvmrc`, the node feature line, and README additions — the render test now
+  checks exactly that against `main`.
+- **README, post-update checklist, step 7 (every project):** after an update
+  that touches `post-start.sh`, `post-create.sh` or `~/.bashrc`, quit VS Code
+  and reopen, then relaunch `claude` in a new terminal: *Reload Window* does
+  not restart the container, and tmux keeps the old `claude`.
+- **`secrets_source=keyvault`:** post-start counts the repo's world-writable
+  files (outside `.git`, symlinks excluded), shows five and the fix
+  (`chmod -R go-w`); what VS Code creates itself keeps umask 0000. The `gh`
+  wrapper follows git's order exactly: `GH_TOKEN`, then the reference of
+  `git-credential-secrets ref` (`SECRETS_GITHUB_REF` first). New
+  `git-credential-secrets source` names where the reference came from; the
+  wrapper reuses `GITHUB_PERSONAL_ACCESS_TOKEN` from the environment only
+  when that is it. New README list « Passer un projet existant à keyvault ».
+
 - **`secrets_source=keyvault`: umask 022.** Under OrbStack every process
   started by `docker exec` (the VS Code server, its terminals, `claude`, the
   lifecycle scripts) has umask 0000, while the container's PID 1 has 0022:

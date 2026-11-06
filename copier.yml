@@ -88,6 +88,17 @@ python_version:
   help: "Version Python"
   default: "3.12"
 
+node_version:
+  type: str
+  help: >-
+    Version majeure de Node (feature du devcontainer et .nvmrc ; en CI :
+    actions/setup-node avec node-version-file: .nvmrc). Fixée : un rebuild
+    sans cache installait la dernière (Node 26), et le localStorage de
+    Node ≥ 25 masque celui de jsdom (Vitest 2).
+  default: "22"
+  validator: >-
+    {% if not (node_version | regex_search('^[0-9]{2}$')) %}Une version majeure, ex. 22{% endif %}
+
 author_name:
   type: str
   help: "Nom de l'auteur / organisation"

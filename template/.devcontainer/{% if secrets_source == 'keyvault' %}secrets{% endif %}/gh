@@ -8,12 +8,15 @@
 # commandes de Claude Code, les scripts et les serveurs MCP lançaient donc gh
 # sans jeton. Cette enveloppe donne à gh le jeton GitHub du projet, partout :
 #
-#   1. GH_TOKEN ou GITHUB_TOKEN déjà défini → gh tel quel ;
-#   2. GITHUB_PERSONAL_ACCESS_TOKEN dans l'environnement (claude et post-start
-#      tournent sous `secrets run`) → passé à gh comme GH_TOKEN ;
-#   3. sinon `git-credential-secrets jeton` (référence du projet : voir
-#      `git-credential-secrets ref`), lu en mémoire ;
-#   4. échec → gh sans jeton (son propre `gh auth login`, s'il y en a un).
+# Même ordre que git (git-credential-secrets get) :
+#   1. GH_TOKEN déjà défini → gh tel quel ;
+#   2. sinon la référence de `git-credential-secrets ref` (SECRETS_GITHUB_REF,
+#      puis GH_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN de .env.refs, puis
+#      kv://perso/github-pat), lue en mémoire. Raccourci sans lecture du
+#      coffre : si elle vient de GITHUB_PERSONAL_ACCESS_TOKEN et que cette
+#      variable est déjà dans l'environnement (claude et post-start tournent
+#      sous `secrets run`), c'est la même valeur ;
+#   3. échec → gh sans jeton (GITHUB_TOKEN ou son propre `gh auth login`).
 # Le jeton passe par l'environnement de gh, jamais sur une ligne de commande.
 # =============================================================================
 reel=''
@@ -30,12 +33,12 @@ done
 IFS=$IFS_AVANT
 [ -n "$reel" ] || { echo "gh : binaire gh introuvable dans le PATH" >&2; exit 127; }
 
-if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
-  if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+if [ -z "${GH_TOKEN:-}" ]; then
+  aide="$(dirname "$moi")/git-credential-secrets"
+  command -v git-credential-secrets >/dev/null 2>&1 && aide=git-credential-secrets
+  if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && [ "$("$aide" source 2>/dev/null)" = GITHUB_PERSONAL_ACCESS_TOKEN ]; then
     GH_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN; export GH_TOKEN
   else
-    aide="$(dirname "$moi")/git-credential-secrets"
-    command -v git-credential-secrets >/dev/null 2>&1 && aide=git-credential-secrets
     t=$("$aide" jeton 2>/dev/null) || t=''
     [ -n "$t" ] && { GH_TOKEN=$t; export GH_TOKEN; }
     unset t

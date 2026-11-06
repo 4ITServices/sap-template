@@ -218,6 +218,11 @@ if render false "$WORK/prof" --data claude_profile=render-profile; then
 else
   bad "PROFIL: copier a échoué"
 fi
+if render false "$WORK/node24" --data node_version=24 >/dev/null 2>&1; then
+  [ "$(cat "$WORK/node24/.nvmrc")" = 24 ] && grep -qF '"ghcr.io/devcontainers/features/node:1": { "version": "24" },' "$WORK/node24/$DC" && jsonc_ok "$WORK/node24/$DC" \
+    && pass "NODE: node_version=24 → .nvmrc et feature node à 24" || bad "NODE: node_version=24 mal rendu"
+else bad "NODE: rendu node_version=24 échoué"; fi
+if render false "$WORK/nodebad" --data node_version=latest >/dev/null 2>&1; then bad "NODE: « latest » accepté"; else pass "NODE: « latest » refusé (version majeure exigée)"; fi
 if render false "$WORK/badprof" --data 'claude_profile=../x' >/dev/null 2>&1; then
   bad "PROFIL: '../x' accepté (traversée de chemin)"
 else
@@ -404,8 +409,20 @@ if [ -n "${ENV_BASE_REF:-}" ]; then
   copier copy --vcs-ref "$ENV_BASE_REF" --defaults --quiet --data project_name=render-test \
     --data project_description="Render smoke test" --data enable_tmux_claude_code_config=false \
     "$REPO_ROOT" "$WORK/envbase" >/dev/null 2>&1
-  d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' || true)"
-  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF (hors .copier-answers.yml)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
+  # Différences VOULUES pour tous les projets (v0.12.0), et rien d'autre :
+  #  - .nvmrc (nouveau) et la version de la feature node (node_version) ;
+  #  - .devcontainer/README.md : des lignes AJOUTÉES seulement (étape 7).
+  d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' \
+        | grep -vxF "Only in $WORK/off: .nvmrc" \
+        | grep -vxF "Files $WORK/envbase/$DC and $WORK/off/$DC differ" \
+        | grep -vxF "Files $WORK/envbase/.devcontainer/README.md and $WORK/off/.devcontainer/README.md differ" || true)"
+  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF hors différences voulues (.nvmrc, node, README)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
+  moins="$(diff "$WORK/envbase/$DC" "$WORK/off/$DC" | sed -n 's/^< *//p')"
+  plus="$(diff "$WORK/envbase/$DC" "$WORK/off/$DC" | sed -n 's/^> *//p' | grep -v '^//' || true)"
+  [ "$moins" = '"ghcr.io/devcontainers/features/node:1": {},' ] && [ "$plus" = '"ghcr.io/devcontainers/features/node:1": { "version": "22" },' ] \
+    && pass "ENV: devcontainer.json ne change que par la version de node (22) et son commentaire" || { bad "ENV: devcontainer.json change autrement :"; diff "$WORK/envbase/$DC" "$WORK/off/$DC"; }
+  diff "$WORK/envbase/.devcontainer/README.md" "$WORK/off/.devcontainer/README.md" | grep -q '^<' && bad "ENV: README : des lignes retirées ou modifiées" || pass "ENV: README : des ajouts seulement"
+  [ "$(cat "$WORK/off/.nvmrc")" = 22 ] && pass "ENV: .nvmrc = 22 (node_version par défaut)" || bad "ENV: .nvmrc = $(cat "$WORK/off/.nvmrc")"
 else
   echo "  (identité stricte avec une réf. antérieure : ENV_BASE_REF=<réf> pour l'activer)"
 fi
@@ -515,7 +532,14 @@ STUB
   sh -n "$W" && grep -qF 'ln -sfn "$SECRETS_DIR/gh" "$HOME/.local/bin/gh"' "$WORK/kv/.devcontainer/lib-secrets.sh" \
     && pass "KV/gh: enveloppe rendue, liée en ~/.local/bin/gh par secrets_install" || bad "KV/gh: enveloppe absente ou non liée"
   [ "$(cd "$WORK/gh1" && gw GH_TOKEN=abc gh api user)" = "jeton=abc|args=api user|n=2" ] && pass "KV/gh: GH_TOKEN déjà là → inchangé" || bad "KV/gh: GH_TOKEN modifié"
-  [ "$(cd "$WORK/gh1" && gw GITHUB_PERSONAL_ACCESS_TOKEN=pat gh api user)" = "jeton=pat|args=api user|n=2" ] && pass "KV/gh: GITHUB_PERSONAL_ACCESS_TOKEN (sous secrets run) → GH_TOKEN" || bad "KV/gh: GITHUB_PERSONAL_ACCESS_TOKEN ignoré"
+  [ "$(cd "$WORK/gh2" && gw GITHUB_PERSONAL_ACCESS_TOKEN=pat gh api user)" = "jeton=pat|args=api user|n=2" ] && pass "KV/gh: réf. venue de GITHUB_PERSONAL_ACCESS_TOKEN, variable déjà là → reprise sans lire le coffre" || bad "KV/gh: GITHUB_PERSONAL_ACCESS_TOKEN ignoré"
+  [ "$(cd "$WORK/gh1" && gw GITHUB_PERSONAL_ACCESS_TOKEN=pat gh api user)" = "jeton=faux-kv://perso/github-pat-sap-excel|args=api user|n=2" ] && pass "KV/gh: réf. venue de GH_TOKEN (.env.refs) → elle, pas GITHUB_PERSONAL_ACCESS_TOKEN (comme git)" || bad "KV/gh: ordre différent de git (GH_TOKEN de .env.refs)"
+  [ "$(cd "$WORK/gh2" && gw GITHUB_PERSONAL_ACCESS_TOKEN=pat SECRETS_GITHUB_REF=kv://perso/essai gh api user)" = "jeton=faux-kv://perso/essai|args=api user|n=2" ] && pass "KV/gh: SECRETS_GITHUB_REF l'emporte sur la variable (comme git)" || bad "KV/gh: SECRETS_GITHUB_REF ignoré"
+  [ "$(cd "$WORK/gh1" && gw GITHUB_TOKEN=gt gh api user)" = "jeton=faux-kv://perso/github-pat-sap-excel|args=api user|n=2" ] && pass "KV/gh: GITHUB_TOKEN seul → réf. du projet en GH_TOKEN (comme git)" || bad "KV/gh: GITHUB_TOKEN"
+  for d in gh1 gh2 gh4; do
+    [ "$(cd "$WORK/$d" && env -u SECRETS_GITHUB_REF -u SECRETS_WORKSPACE "$H" source)" = "$(case $d in gh1) echo GH_TOKEN;; gh2) echo GITHUB_PERSONAL_ACCESS_TOKEN;; gh4) echo defaut;; esac)" ] \
+      && pass "KV/gh: git-credential-secrets source ($d)" || bad "KV/gh: source ($d) → $(cd "$WORK/$d" && "$H" source)"
+  done
   [ "$(cd "$WORK/gh1" && gw gh pr list)" = "jeton=faux-kv://perso/github-pat-sap-excel|args=pr list|n=2" ] && pass "KV/gh: sans variable → jeton de la réf. du projet (shell de Claude Code)" || bad "KV/gh: jeton du projet non lu : $(cd "$WORK/gh1" && gw gh pr list)"
   out="$(cd "$WORK/gh1" && env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN PATH="$WORK/lbin:$WORK/vraigh:/usr/bin:/bin" gh api 'a b' "")"
   [ "$out" = "jeton=|args=api a b |n=3" ] && pass "KV/gh: lecture impossible → gh sans jeton, arguments intacts" || bad "KV/gh: repli : $out"
@@ -571,6 +595,10 @@ STUB
   grep -q 'Post-start complete' "$LOGF" && pass "KV/7: le journal va jusqu'au bout" || bad "KV/7: journal tronqué"
   [ "$(stat -c %a "$LOGF")" = 600 ] && pass "KV/7: journal en 600" || bad "KV/7: journal en $(stat -c %a "$LOGF")"
   [ "$(stat -c %a "$WORK/ps/.env.avant-keyvault")" = 600 ] && pass "KV/4: .env mis de côté passé en 600" || bad "KV/4: .env.avant-keyvault en $(stat -c %a "$WORK/ps/.env.avant-keyvault")"
+  grep -qE 'ATTENTION : [1-9][0-9]* fichier\(s\) ou dossier\(s\) modifiables par tous' "$LOGF" && grep -q 'chmod -R go-w' "$LOGF" \
+    && pass "KV/umask: post-start compte les fichiers modifiables par tous (rendu copier en 0000) et donne la correction" || bad "KV/umask: pas d'avertissement"
+  ln -sfn /tmp "$WORK/ps/lien-essai"; chmod -R go-w "$WORK/ps"; ps_run
+  grep -A1 '^\[umask\]' "$LOGF" | grep -q 'aucun' && pass "KV/umask: après chmod -R go-w → « aucun » (liens ignorés, rien recréé en 0666 par post-start)" || { bad "KV/umask: encore des fichiers :"; grep -A7 '^\[umask\]' "$LOGF"; }
 else
   bad "KV: copier a échoué"
 fi
