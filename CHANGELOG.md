@@ -62,6 +62,11 @@ and commit messages; this changelog starts at v0.8.12.
     avant le rebuild ; versions de moteurs fixées ; conflits dbt-fleet ;
     abonnement az du profil neuf ; preuve sans `.env`).
 
+## [0.12.0] — 2026-11-06
+
+Étiquette sur la fusion de la PR #13 (`00cc590`). Les entrées « (v0.13.0) » et
+« (keyvault) Retour du pilote » ci-dessus sont arrivées après.
+
 ### Added
 
 - **New `secrets_source` question (`env` | `keyvault`, default `env`): read
