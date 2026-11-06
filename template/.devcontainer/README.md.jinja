@@ -617,6 +617,64 @@ Les credentials SAP (SAP_URL, SAP_USER, SAP_PASSWORD, etc.) sont lus automatique
 résolus depuis Key Vault (`.env.refs`).{% else %}depuis `.env` par pydantic-settings.{% endif %} Le `.mcp.json` ne contient que la config
 structurelle (commandes, chemins). Pas de secrets dedans.
 
+## Tunnels SSH et instances MCP supplémentaires
+
+Pour un système joignable **seulement depuis une machine relais** (ex. les SAP
+de MH, derrière le VPN d'une VM Windows) : la VM ne sert que de relais, **rien
+n'y est installé et aucune identité SAP n'y est déposée**. Les serveurs MCP
+tournent dans ce container ; `ssh -L` fait résoudre et joindre le système
+**par le relais**.
+
+```
+Claude ─MCP─▶ sap-adt-mcp (container) ─HTTPS─▶ 127.0.0.1:44320 ══ssh══▶ relais ─VPN─▶ SAP:44320
+```
+
+Trois fichiers **du projet** (jamais écrasés par `copier update`) :
+
+| Fichier | Une ligne par… |
+|---|---|
+| `tunnels.conf` | redirection : `NOM  UTILISATEUR@HÔTE[:PORT_SSH]  PORT_LOCAL  CIBLE:PORT  [VARIABLE_CLÉ]` |
+| `tunnels.known_hosts` | clé d'hôte épinglée d'un relais (`bash .devcontainer/tunnel.sh epingler`, puis comparer les empreintes sur le relais) |
+| `mcp-instances.conf` | instance d'un serveur de `mcp-servers.conf` vers un autre système : `NOM  SERVEUR  PORT  PRÉFIXE` |
+
+- **Tunnels** (`lib-tunnels.sh`) : post-start les démarre **avant** les
+  serveurs MCP. Une session `ssh -N` par relais, dans sa propre session Unix,
+  relancée si elle tombe (5 s puis jusqu'à 60 s) ; état et journal dans
+  `~/.local/state/devcontainer/tunnels/`. Clés d'hôte strictes
+  (`StrictHostKeyChecking=yes`).
+- **Clé SSH** : la variable `VARIABLE_CLÉ` porte{% if secrets_source == 'keyvault' %}
+  la clé privée, référencée dans `.env.refs` (`kv://…`, déposée par la
+  personne : `base64 -w0 ma_cle | secrets set kv://perso/<nom>`){% else %} le
+  chemin de la clé privée (dans `.env`) ou son contenu{% endif %}. Elle passe dans
+  un `ssh-agent` propre au relais par l'entrée standard : jamais sur disque,
+  jamais en argument ; le superviseur ne l'a pas dans son environnement.
+  L'agent la garde : un `tunnel.sh start` ultérieur n'en a plus besoin.
+- **`/etc/hosts`** : une `CIBLE` nommée dont le port local vaut le port cible
+  y est mise en `127.0.0.1`. L'URL garde le vrai nom (certificat TLS, en-tête
+  Host) et passe par le tunnel. Une cible `127.0.0.1:PORT` vise un service qui
+  tourne **sur le relais** (ex. sap-gui-mcp, qui a besoin de Windows).
+- **Instances** (`mcp-instance.sh`) : `sap-adt-bca  sap-adt-mcp  8020  BCA`
+  lance `/opt/sap-adt-mcp` une seconde fois, sur `127.0.0.1:8020`, avec
+  `BCA_SAP_URL`, `BCA_SAP_USER`… repris en `SAP_URL`, `SAP_USER`… et **rien
+  d'autre** du projet (ni les variables S/4, ni un Bearer hérité ; les clés du
+  `.env` du serveur qu'elle ne pose pas sont remises à vide). PID et journal
+  propres : `/opt/sap-adt-mcp/.mcp-server-sap-adt-bca.pid`,
+  `logs/server-sap-adt-bca.log`. Ajouter l'entrée à `.mcp.json` :
+  `"sap-adt-bca": { "type": "http", "url": "http://127.0.0.1:8020/mcp" }`.
+
+```bash
+bash .devcontainer/tunnel.sh status        # superviseur, chaque redirection
+bash .devcontainer/tunnel.sh restart       # après un changement de tunnels.conf
+{%- if secrets_source == 'keyvault' %}
+secrets run -- bash .devcontainer/mcp-instance.sh restart sap-adt-bca
+{%- else %}
+bash .devcontainer/mcp-instance.sh restart sap-adt-bca
+{%- endif %}
+```
+
+Le relais lui-même (allumage, VPN, règles réseau, comptes, services qui y
+tournent) n'appartient pas au projet : il relève du dépôt qui décrit la VM.
+
 ## Post-`copier update` checklist
 
 `copier update` rewrites the template-owned files; a few things it cannot

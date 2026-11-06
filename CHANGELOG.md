@@ -9,6 +9,27 @@ and commit messages; this changelog starts at v0.8.12.
 
 ## [Unreleased]
 
+- **(v0.13.0) Tunnels SSH et instances MCP supplémentaires, pour tous les
+  projets.** Pour un système joignable seulement depuis un relais (les SAP de
+  MH derrière le VPN de `vm-mh-win11`) : la VM ne sert que de relais, rien
+  n'y est installé, aucune identité SAP n'y est déposée ; les serveurs MCP
+  tournent dans le container. Nouveaux fichiers du modèle
+  `.devcontainer/lib-tunnels.sh`, `tunnel.sh`, `mcp-instance.sh` ; nouveaux
+  fichiers du projet (`_skip_if_exists`, livrés en commentaires, donc
+  inactifs) `tunnels.conf`, `tunnels.known_hosts`, `mcp-instances.conf`.
+  Tunnels : une session `ssh -N` supervisée par relais (`setsid -f`, relance
+  5 s → 60 s), démarrée par post-start avant les serveurs MCP ; clé d'hôte
+  stricte ; clé SSH tirée d'une variable (référence Key Vault en PEM ou base64,
+  ou chemin) vers un `ssh-agent` propre au relais, jamais sur disque ; cible
+  nommée mise en 127.0.0.1 dans `/etc/hosts` (le certificat TLS reste valide).
+  Instances : un serveur de `/opt` relancé sur un autre port avec les seules
+  variables `PRÉFIXE_*` reprises sans préfixe (même mécanisme que
+  `mcp-server-ecc.sh`) ; `--relance-mcp` et un `.env.refs` modifié les
+  arrêtent aussi. Origine : `infra/vm-mh/` de mh-dbt-global-vault (déploiement
+  sur la VM, identité BCA partagée) et `scripts/tunnel-daemon.sh` de
+  sap-fiori-mh (le modèle repris ici). Rendu par défaut : seulement ces
+  fichiers en plus et des ajouts à post-start et au README.
+
 ### Added
 
 - **New `secrets_source` question (`env` | `keyvault`, default `env`): read

@@ -415,13 +415,16 @@ if [ -n "${ENV_BASE_REF:-}" ]; then
   d="$(diff -rq "$WORK/envbase" "$WORK/off" | grep -v 'copier-answers' \
         | grep -vxF "Only in $WORK/off: .nvmrc" \
         | grep -vxF "Files $WORK/envbase/$DC and $WORK/off/$DC differ" \
-        | grep -vxF "Files $WORK/envbase/.devcontainer/README.md and $WORK/off/.devcontainer/README.md differ" || true)"
-  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF hors différences voulues (.nvmrc, node, README)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
+        | grep -vxF "Files $WORK/envbase/.devcontainer/README.md and $WORK/off/.devcontainer/README.md differ" \
+        | grep -vxF "Files $WORK/envbase/.devcontainer/post-start.sh and $WORK/off/.devcontainer/post-start.sh differ" \
+        | grep -vE "^Only in $WORK/off/.devcontainer: (lib-tunnels\.sh|tunnel\.sh|mcp-instance\.sh|tunnels\.conf|tunnels\.known_hosts|mcp-instances\.conf)$" || true)"
+  [ -z "$d" ] && pass "ENV: rendu identique à $ENV_BASE_REF hors différences voulues (.nvmrc, node, README, tunnels, instances)" || { bad "ENV: le rendu diffère de $ENV_BASE_REF :"; echo "$d"; }
   moins="$(diff "$WORK/envbase/$DC" "$WORK/off/$DC" | sed -n 's/^< *//p')"
   plus="$(diff "$WORK/envbase/$DC" "$WORK/off/$DC" | sed -n 's/^> *//p' | grep -v '^//' || true)"
   [ "$moins" = '"ghcr.io/devcontainers/features/node:1": {},' ] && [ "$plus" = '"ghcr.io/devcontainers/features/node:1": { "version": "22" },' ] \
     && pass "ENV: devcontainer.json ne change que par la version de node (22) et son commentaire" || { bad "ENV: devcontainer.json change autrement :"; diff "$WORK/envbase/$DC" "$WORK/off/$DC"; }
   diff "$WORK/envbase/.devcontainer/README.md" "$WORK/off/.devcontainer/README.md" | grep -q '^<' && bad "ENV: README : des lignes retirées ou modifiées" || pass "ENV: README : des ajouts seulement"
+  diff "$WORK/envbase/.devcontainer/post-start.sh" "$WORK/off/.devcontainer/post-start.sh" | grep -q '^<' && bad "ENV: post-start.sh : des lignes retirées ou modifiées" || pass "ENV: post-start.sh : des ajouts seulement (tunnels, instances)"
   [ "$(cat "$WORK/off/.nvmrc")" = 22 ] && pass "ENV: .nvmrc = 22 (node_version par défaut)" || bad "ENV: .nvmrc = $(cat "$WORK/off/.nvmrc")"
 else
   echo "  (identité stricte avec une réf. antérieure : ENV_BASE_REF=<réf> pour l'activer)"
@@ -632,6 +635,105 @@ if render false "$WORK/netkv" --data enable_dotnet=true --data secrets_source=ke
 else
   bad "NET+KV+IAC: copier a échoué"
 fi
+
+echo "== Tunnels SSH (tunnels.conf) et instances MCP (mcp-instances.conf) =="
+for D in "$WORK/off" "$WORK/kv"; do
+  L=$(basename "$D")
+  ok=1
+  for f in lib-tunnels.sh tunnel.sh mcp-instance.sh tunnels.conf tunnels.known_hosts mcp-instances.conf; do [ -f "$D/.devcontainer/$f" ] || ok=0; done
+  [ "$ok" = 1 ] && bash -n "$D/.devcontainer/lib-tunnels.sh" && bash -n "$D/.devcontainer/tunnel.sh" && bash -n "$D/.devcontainer/mcp-instance.sh" \
+    && pass "TUN/$L: lib-tunnels.sh, tunnel.sh, mcp-instance.sh et les 3 fichiers du projet rendus, bash -n OK" || bad "TUN/$L: fichiers absents ou invalides"
+  [ -z "$(grep -vE '^[[:space:]]*(#|$)' "$D/.devcontainer/tunnels.conf" "$D/.devcontainer/mcp-instances.conf")" ] \
+    && pass "TUN/$L: tunnels.conf et mcp-instances.conf livrés tout en commentaires (rien d'actif)" || bad "TUN/$L: ligne active dans un fichier livré"
+  grep -q 'tunnels_start' "$D/.devcontainer/post-start.sh" && grep -q 'mcp-instance.sh" start' "$D/.devcontainer/post-start.sh" \
+    && [ "$(grep -n 'tunnels_start' "$D/.devcontainer/post-start.sh" | cut -d: -f1 | head -1)" -lt "$(grep -n 'mcp_process_manifest .*start' "$D/.devcontainer/post-start.sh" | cut -d: -f1 | tail -1)" ] \
+    && pass "TUN/$L: post-start lance les tunnels AVANT les serveurs MCP, puis les instances" || bad "TUN/$L: ordre post-start"
+done
+for f in tunnels.conf tunnels.known_hosts mcp-instances.conf; do
+  grep -qxF "  - .devcontainer/$f" "$REPO_ROOT/copier.yml" && pass "TUN: $f au projet (_skip_if_exists)" || bad "TUN: $f écrasé par copier update"
+done
+# --- tunnel de bout en bout : faux ssh (agent + clé d'hôte exigés, -L ouverts par socat) ---
+if command -v socat >/dev/null && command -v ssh-agent >/dev/null && command -v python3 >/dev/null; then
+  T="$WORK/tun"; mkdir -p "$T/bin" "$T/dc" "$T/home"
+  cp "$WORK/kv/.devcontainer/"{lib-tunnels.sh,tunnel.sh} "$T/dc/"
+  cat >"$T/bin/ssh" <<'STUB'
+#!/bin/bash
+kh=""; fw=(); cible=""
+while [ $# -gt 0 ]; do case "$1" in
+  -o) case "$2" in UserKnownHostsFile=*) kh="${2#*=}";; esac; shift 2;;
+  -p) shift 2;; -N) shift;; -L) fw+=("$2"); shift 2;; *) cible="$1"; shift;; esac; done
+ssh-add -l >/dev/null 2>&1 || { echo "stub: pas de clé dans l'agent" >&2; exit 255; }
+ssh-keygen -F "${cible#*@}" -f "$kh" >/dev/null 2>&1 || { echo "stub: hôte non épinglé" >&2; exit 255; }
+pids=()
+for f in "${fw[@]}"; do IFS=: read -r _ pl h p <<<"$f"; socat TCP-LISTEN:$pl,bind=127.0.0.1,fork,reuseaddr TCP:127.0.0.1:$p & pids+=($!); done
+trap 'kill ${pids[*]} 2>/dev/null; exit 0' TERM INT
+echo "stub: connecté à $cible"; wait
+STUB
+  chmod +x "$T/bin/ssh"
+  ssh-keygen -q -t ed25519 -N '' -f "$T/cle" >/dev/null; ssh-keygen -q -t ed25519 -N '' -f "$T/hote" >/dev/null
+  PH=$((20000 + RANDOM % 20000)); PL=$((PH + 1)); PS=$((PH + 2))
+  python3 -m http.server "$PH" --bind 127.0.0.1 >/dev/null 2>&1 & HTTPD=$!
+  printf 'web  moi@relais.exemple  %s  127.0.0.1:%s  MA_CLE\nsap  moi@relais.exemple  %s  sap.exemple:%s  MA_CLE\n' "$PL" "$PH" "$PS" "$PS" >"$T/dc/tunnels.conf"
+  : >"$T/hosts"; SD="$(mktemp -d /tmp/tt.XXXXXX)"; chmod 700 "$SD"
+  tun() { env HOME="$T/home" PATH="$T/bin:$PATH" TUNNELS_HOSTS_FILE="$T/hosts" TUNNELS_WAIT=8 TUNNELS_SOCK_DIR="$SD" "$@"; }
+  out="$(tun MA_CLE="$(base64 -w0 "$T/cle")" bash "$T/dc/tunnel.sh" start 2>&1)"
+  echo "$out" | grep -q "non épinglée" && pass "TUN: clé d'hôte non épinglée → refus (rien lancé)" || bad "TUN: hôte non épinglé accepté : $out"
+  printf 'relais.exemple %s\n' "$(cut -d' ' -f1,2 "$T/hote.pub")" >"$T/dc/tunnels.known_hosts"
+  out="$(tun bash "$T/dc/tunnel.sh" start 2>&1)"
+  echo "$out" | grep -q "aucune clé" && pass "TUN: sans variable de clé ni agent → message, sortie 0" || bad "TUN: sans clé : $out"
+  out="$(tun MA_CLE="$(base64 -w0 "$T/cle")" bash "$T/dc/tunnel.sh" start 2>&1)"; sleep 1
+  [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$PL/")" = 200 ] && pass "TUN: clé base64 (Key Vault) → agent → tunnel, HTTP 200 au travers" || bad "TUN: tunnel muet : $out"
+  grep -qx "127.0.0.1 sap.exemple  # tunnels.conf" "$T/hosts" && ! grep -q "127.0.0.1:$PH\|^127.0.0.1 127" "$T/hosts" \
+    && pass "TUN: /etc/hosts : cible nommée (même port) → 127.0.0.1 ; cible IP ignorée" || bad "TUN: /etc/hosts : $(cat "$T/hosts")"
+  P="$(cat "$T/home/.local/state/devcontainer/tunnels/"*.pid 2>/dev/null)"
+  [ -n "$P" ] && [ "$(ps -o sid= -p "$P" | tr -d ' ')" = "$P" ] && ! tr '\0' '\n' <"/proc/$P/environ" | grep -q '^MA_CLE=' \
+    && pass "TUN: superviseur dans sa propre session, sans la clé dans son environnement" || bad "TUN: superviseur (PID ${P:-?})"
+  [ -z "$(grep -rl "$(sed -n 2p "$T/cle")" "$T/home" "$SD" 2>/dev/null)" ] && [ "$(stat -c %a "$SD")" = 700 ] \
+    && pass "TUN: la clé n'est écrite nulle part ; dossier de l'agent en 700" || bad "TUN: clé retrouvée sur disque"
+  pkill -f "^/bin/bash $T/bin/ssh" ; sleep 7
+  [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$PL/")" = 200 ] && pass "TUN: ssh tué → relancé par le superviseur" || bad "TUN: pas de relance"
+  out="$(tun bash "$T/dc/tunnel.sh" status 2>&1)"
+  echo "$out" | grep -q "superviseur ACTIF" && echo "$out" | grep -q "sap  127.0.0.1:$PS → sap.exemple:$PS : EN ÉCOUTE" \
+    && pass "TUN: status (superviseur, chaque redirection)" || bad "TUN: status : $out"
+  tun bash "$T/dc/tunnel.sh" stop >/dev/null; sleep 1
+  ! (exec 3<>"/dev/tcp/127.0.0.1/$PL") 2>/dev/null && [ -z "$(ps -eo args | grep -E "^socat TCP-LISTEN:($PL|$PS)," )" ] \
+    && pass "TUN: stop → ports fermés, aucun ssh/socat restant" || bad "TUN: stop incomplet"
+  out="$(tun bash "$T/dc/tunnel.sh" start 2>&1)"
+  echo "$out" | grep -q "actif" && pass "TUN: relance sans la variable : l'agent garde la clé (terminal Key Vault)" || bad "TUN: relance sans variable : $out"
+  tun bash "$T/dc/tunnel.sh" stop >/dev/null
+  pkill -f "ssh-agent -a $SD" 2>/dev/null; kill "$HTTPD" 2>/dev/null; rm -rf "$SD"
+else
+  echo "  (socat/ssh-agent/python3 absents : essai de bout en bout du tunnel sauté)"
+fi
+# --- instances : variables PRÉFIXE_* seulement ---
+I="$WORK/inst"; mkdir -p "$I/ws/.devcontainer" "$I/opt/srv/scripts"
+cp "$WORK/kv/.devcontainer/mcp-instance.sh" "$I/ws/.devcontainer/"
+cat >"$I/opt/srv/scripts/mcp-server.sh" <<'STUB'
+#!/bin/bash
+echo "verbe=$1 port=$MCP_PORT host=$MCP_HOST pid=${MCP_PID_FILE##*/} log=${MCP_LOG_FILE##*/}"
+for v in SAP_URL SAP_USER SAP_PASSWORD SAP_HANA_HOST MCP_AUTH_TOKEN BCA_SAP_URL AUTRE_SECRET; do
+  if [ -n "${!v+x}" ]; then x="${!v}"; echo "$v=${#x}"; else echo "$v=absent"; fi
+done
+STUB
+chmod +x "$I/opt/srv/scripts/mcp-server.sh"
+printf 'SAP_URL=x\nSAP_HANA_HOST=h\n' >"$I/opt/srv/.env"
+printf 'SAP_URL=kv://perso/a\nAUTRE_SECRET=kv://perso/c\nBCA_SAP_URL=kv://perso/d\nBCA_SAP_USER=kv://perso/e\n' >"$I/ws/.env.refs"
+printf '# c\nsap-adt-bca  srv  8020  BCA\nmauvais srv 80x BCA\nsap-adt-qls srv 8021 QLS\n' >"$I/ws/.devcontainer/mcp-instances.conf"
+out="$(env SAP_URL=s4 SAP_PASSWORD=s4pw AUTRE_SECRET=zz MCP_AUTH_TOKEN=tok BCA_SAP_URL=https://bca BCA_SAP_USER=jb MCP_OPT_DIR="$I/opt" \
+  bash "$I/ws/.devcontainer/mcp-instance.sh" start 2>&1)"
+echo "$out" | grep -q '^verbe=start port=8020 host=127.0.0.1 pid=.mcp-server-sap-adt-bca.pid log=server-sap-adt-bca.log$' \
+  && pass "INST: sap-adt-bca → lanceur du serveur, 127.0.0.1:8020, PID et journal propres" || bad "INST: lancement : $out"
+echo "$out" | grep -q '^SAP_URL=11$' && echo "$out" | grep -q '^SAP_USER=2$' \
+  && pass "INST: BCA_SAP_URL/BCA_SAP_USER repris en SAP_URL/SAP_USER (longueurs 11, 2)" || bad "INST: reprise du préfixe"
+echo "$out" | grep -q '^SAP_PASSWORD=absent$' && echo "$out" | grep -q '^AUTRE_SECRET=absent$' && echo "$out" | grep -q '^BCA_SAP_URL=absent$' \
+  && pass "INST: aucune autre variable du projet (ni S/4, ni secret étranger, ni BCA_*)" || bad "INST: fuite de variables du projet"
+echo "$out" | grep -q '^SAP_HANA_HOST=0$' && echo "$out" | grep -q '^MCP_AUTH_TOKEN=0$' \
+  && pass "INST: clés du .env du serveur et réglages d'écoute non posés → vides (pas de repli)" || bad "INST: repli .env / Bearer hérité"
+echo "$out" | grep -q 'mauvais : port « 80x » invalide' && echo "$out" | grep -q 'sap-adt-qls : aucune variable QLS_' \
+  && pass "INST: port invalide et préfixe sans variables → messages, rien lancé" || bad "INST: cas d'erreur"
+[ "$(env MCP_OPT_DIR="$I/opt" bash "$I/ws/.devcontainer/mcp-instance.sh" stop sap-adt-bca | grep -c '^verbe=stop port=8020')" = 1 ] \
+  && pass "INST: stop NOM → cette instance seule" || bad "INST: stop ciblé"
+grep -q 'mcp-instance.sh" stop' "$WORK/kv/.devcontainer/lib-secrets.sh" && pass "INST: --relance-mcp / .env.refs modifié arrêtent aussi les instances" || bad "INST: relance sans les instances"
 
 echo "== Vérif marqueurs Jinja non résolus (les deux rendus) =="
 if grep -rlE '\{\{|\{%' "$WORK/off" "$WORK/on" --include='*.md' --include='*.conf' --include='*.toml' 2>/dev/null | grep -q .; then
