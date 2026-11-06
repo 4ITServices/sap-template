@@ -21,13 +21,19 @@ echo "============================================"
 # =============================================================================
 # 1-4. Base tooling: just, git-lfs, Claude auth, uv + copier
 # =============================================================================
-echo "[1/9] just (command runner)..."
-if command -v just &>/dev/null; then
-  echo "  just $(just --version)"
+# Versions fixées par le modèle (copier.yml : uv_version, just_version,
+# copier_version) : un outil présent dans une autre version est remplacé.
+UV_VERSION="{{ uv_version }}"
+JUST_VERSION="{{ just_version }}"
+COPIER_VERSION="{{ copier_version }}"
+
+echo "[1/9] just $JUST_VERSION (command runner)..."
+if [ "$(just --version 2>/dev/null)" = "just $JUST_VERSION" ]; then
+  echo "  just $JUST_VERSION"
 else
   curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | \
-    sudo bash -s -- --to /usr/local/bin 2>/dev/null && \
-    echo "  just installed" || echo "  WARNING: just install failed"
+    sudo bash -s -- --tag "$JUST_VERSION" --force --to /usr/local/bin 2>/dev/null && \
+    echo "  just $JUST_VERSION installed" || echo "  WARNING: just install failed"
 fi
 
 echo "[2/9] Git LFS..."
@@ -50,19 +56,24 @@ else
   echo "  ~/.claude.json already present"
 fi
 
-echo "[4/9] uv + copier..."
-if command -v uv &>/dev/null; then
-  echo "  uv $(uv --version)"
-else
-  curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null && echo "  uv installed" || echo "  WARNING: uv install failed"
-fi
+echo "[4/9] uv $UV_VERSION + copier $COPIER_VERSION..."
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-
-if command -v copier &>/dev/null; then
-  echo "  copier $(copier --version)"
+grep -qxF 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' ~/.bashrc 2>/dev/null || \
+  echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+if uv --version 2>/dev/null | grep -q "^uv $UV_VERSION\b"; then
+  echo "  uv $UV_VERSION"
 else
-  pip install copier --quiet 2>/dev/null && echo "  copier installed" || echo "  WARNING: copier install failed"
+  # ~/.local/bin, devant le PATH : l'emporte sur un uv d'une autre version
+  curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1 \
+    && echo "  uv $UV_VERSION installed" || echo "  WARNING: uv install failed"
+fi
+
+if [ "$(copier --version 2>/dev/null)" = "copier $COPIER_VERSION" ]; then
+  echo "  copier $COPIER_VERSION"
+else
+  { uv tool install --force --quiet "copier==$COPIER_VERSION" 2>/dev/null \
+      || pip install --quiet "copier==$COPIER_VERSION" 2>/dev/null; } \
+    && echo "  copier $COPIER_VERSION installed" || echo "  WARNING: copier install failed"
 fi
 
 # =============================================================================

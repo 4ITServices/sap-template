@@ -84,6 +84,17 @@ and commit messages; this changelog starts at v0.8.12.
     moindre privilège du `GH_TOKEN` de `claude`, et un script qui sème un coffre
     partagé ne lit jamais l'environnement de la session.
 
+- **uv, just et copier fixés par le modèle, pour tous les projets.** Nouvelles
+  constantes de `copier.yml` (`uv_version` 0.13.5, `just_version` 1.59.0,
+  `copier_version` 9.19.1 ; `when: false`, donc jamais écrites dans
+  `.copier-answers.yml`), reprises par post-create, la CI (`setup-uv`) et le
+  Dockerfile (`ghcr.io/astral-sh/uv:<version>`). Avant : `latest` partout et
+  « garder ce qui est installé » dans post-create, d'où trois uv différents
+  sur sap_testing (poste 0.13.3, CI et image 0.12.5). Post-create remplace
+  désormais un outil installé dans une autre version (copier par `uv tool
+  install`, pip en repli). Monter = une PR du modèle, avec une version publiée
+  depuis au moins deux semaines.
+
 ## [0.12.0] — 2026-11-06
 
 Étiquette sur la fusion de la PR #13 (`00cc590`). Les entrées « (v0.13.0) » et
