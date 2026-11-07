@@ -201,6 +201,14 @@ l'ordre :
    **`outils.refs`** (pas `.env.*`, que `.gitignore` ignore), lu seulement par
    `secrets run -f outils.refs -- <outil>`.
 
+   `secrets run -f` résout **tout le fichier, ou rien** : dans un fichier qui
+   mêle une clé partagée et des secrets perso, un secret perso absent fait
+   perdre la clé. Pour ne prendre que certains noms :
+   `secrets_seulement outils.refs NOM1 NOM2 -- <outil>` (fonction de
+   `lib-secrets.sh`, chargée dans les terminaux ; un script la prend par
+   `source .devcontainer/lib-secrets.sh`). Elle rend 2 si un nom n'est pas
+   déclaré, sinon le code de l'outil.
+
    **Moindre privilège pour `claude`** : il tourne sous `.env.refs`, donc sous
    son `GH_TOKEN`. Y mettre le jeton le plus étroit qui suffise (ex. un PAT des
    sessions), et prendre un jeton admin à la demande :
@@ -218,7 +226,10 @@ l'ordre :
    puis **`secrets check` : 0 échec avant le rebuild**. L'ancien `.env` est mis
    de côté, pas versionné.
 5. **Fixer les versions des moteurs** dont des tests ou des preuves dépendent
-   (pas de `latest`) ; `node_version` = la version de la CI.
+   (pas de `latest`) ; `node_version` = la version de la CI. Un projet rendu
+   avant la v0.11 n'a pas `node_version` dans `.copier-answers.yml` : sans
+   `--data node_version=<celle de la CI ou de .nvmrc>`, le défaut (22) passe
+   en silence.
 
 **La mise à jour**
 
@@ -227,7 +238,17 @@ l'ordre :
    alors sa propre feature dotnet). Relire le diff. Sur un conflit dans un
    fichier que le projet a fait évoluer depuis (dbt-fleet : `dbt-doctor.sh`,
    `dbt-run.sh`, `lib-dbt.sh`, `justfile`, `CLAUDE.md`), garder le côté projet
-   s'il est plus récent.
+   s'il est plus récent. Depuis une v0.10, attendre des conflits dans
+   `devcontainer.json` (`mounts` et `containerEnv` : **garder les deux
+   côtés**), `CLAUDE.md`, `.devcontainer/README.md`, `.mcp.json.example` et
+   `.env.example` ; puis `grep -rn '^<<<<<<<\|^>>>>>>>' .` avant de
+   committer.
+
+   **Place disque d'abord** (`df -h /tmp .`) : copier travaille dans `/tmp`
+   (un tmpfs, parfois plein). S'il échoue en cours de route (`No space left
+   on device`…), l'arbre reste **à moitié appliqué** : `git reset --hard`
+   puis `git clean -fd` avant de relancer (rien d'autre ne doit être en cours
+   dans le dépôt).
 7. **Un `claude_profile` propre au projet** : login, historique, mémoire,
    `/model` et effort de ce container seulement.
 8. **Un assistant git du projet** (`post-start-project.sh` qui pose son propre
@@ -242,7 +263,10 @@ l'ordre :
 
 10. **Quitter VS Code (⌘Q), rouvrir, *Rebuild Container*, `/login`.** Puis
     vérifier `ls -A ~/.claude | grep migrat` (`.migrated-<dossier>`) et
-    `claude --resume` (les sessions d'avant).
+    `claude --resume` (les sessions d'avant). Une mémoire automatique placée
+    ailleurs par `--settings '{"autoMemoryDirectory": …}'` (un slug du chemin
+    du Mac, `projects/-Users-…/memory`) n'est **pas** migrée : la copier à la
+    main dans `~/.claude-profiles/<profil>/projects/<slug du container>/memory`.
 11. **`chmod -R go-w .` une seule fois** : les fichiers créés avant l'umask 022
     sont modifiables par tous ; post-start les compte et le signale.
 12. Vérifier : `secrets check`, `git-credential-secrets ref`, `gh api user`,
@@ -292,7 +316,10 @@ tout de suite.
   créés en 0666/0777 (Ansible ignore alors un `ansible.cfg` modifiable par
   tous). Ce que VS Code crée lui-même (éditeur, panneau Claude Code) garde
   0000 : aucun réglage de `devcontainer.json` ne fixe l'umask d'un `docker
-  exec`. Les fichiers déjà créés : `chmod -R go-w` une fois. Post-start
+  exec`. La fonction `claude` pose aussi umask 022 ; une session lancée par
+  `docker exec <container> claude` (tmux de l'hôte) ne passe ni par elle ni
+  par `~/.bashrc` : la lancer par `docker exec -it <container> bash -ic
+  claude`. Les fichiers déjà créés : `chmod -R go-w` une fois. Post-start
   compte les fichiers modifiables par tous (hors `.git` et liens) et le
   signale.
 - **post-create / post-start** : `secrets_install` (lien `~/.local/bin/secrets`,

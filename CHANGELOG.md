@@ -95,6 +95,19 @@ and commit messages; this changelog starts at v0.8.12.
   install`, pip en repli). Monter = une PR du modèle, avec une version publiée
   depuis au moins deux semaines.
 
+- **(keyvault) Second retour de sap_testing (migré et prouvé sans `.env`,
+  sap_testing#625).** `secrets_seulement FICHIER NOM... -- COMMANDE` dans
+  `lib-secrets.sh` : ne résout que les noms donnés (`secrets run -f`, lanceur
+  figé, reste tout-ou-rien) ; rend 2 sur un nom non déclaré, sinon le code de
+  la commande. Remplace le `scripts/sous_references.sh` du projet. La fonction
+  `claude` pose umask 022 (session lancée par `docker exec` depuis le tmux de
+  l'hôte : verrous de cache uv en 0666). Guide « Passer un projet existant à
+  keyvault » : place disque et reprise d'un `copier update` interrompu
+  (`git reset --hard`, `git clean -fd`), `--data node_version=` pour un projet
+  d'avant la v0.11, conflits attendus depuis une v0.10 (`devcontainer.json` :
+  garder les deux côtés), mémoire automatique d'un `autoMemoryDirectory` à
+  copier à la main.
+
 ## [0.12.0] — 2026-11-06
 
 Étiquette sur la fusion de la PR #13 (`00cc590`). Les entrées « (v0.13.0) » et
