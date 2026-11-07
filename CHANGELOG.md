@@ -9,7 +9,9 @@ and commit messages; this changelog starts at v0.8.12.
 
 ## [Unreleased]
 
-- **(v0.13.0) Tunnels SSH et instances MCP supplémentaires, pour tous les
+## [0.13.0] — 2026-11-07
+
+- **Tunnels SSH et instances MCP supplémentaires, pour tous les
   projets.** Pour un système joignable seulement depuis un relais (les SAP de
   MH derrière le VPN de `vm-mh-win11`) : la VM ne sert que de relais, rien
   n'y est installé, aucune identité SAP n'y est déposée ; les serveurs MCP
@@ -29,7 +31,7 @@ and commit messages; this changelog starts at v0.8.12.
   sur la VM, identité BCA partagée) et `scripts/tunnel-daemon.sh` de
   sap-fiori-mh (le modèle repris ici). Rendu par défaut : seulement ces
   fichiers en plus et des ajouts à post-start et au README.
-- **(v0.13.0) sap-gui-mcp par le tunnel local 8021, avec jeton (PR #15).**
+- **sap-gui-mcp par le tunnel local 8021, avec jeton (PR #15).**
   L'entrée `sap-gui-mcp` de `.mcp.json.example` vise désormais
   `http://127.0.0.1:8021/mcp` (tunnel `mh-gui` de `tunnels.conf` vers
   `127.0.0.1:8001` de la VM relais) et envoie
